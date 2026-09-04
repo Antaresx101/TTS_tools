@@ -96,11 +96,13 @@ local function apply(code, xml, version, notes)
     self.setLuaScript(code)              -- WRITE: the only script write, on self
     if xml then self.UI.setXml(xml) end  -- WRITE: the only UI write, on self
     once("", version, LABEL .. "updated to v" .. version .. notes)
-    if withReload then
-      self.reload()                  -- self is invalid after this line
-    else
-      report("v" .. version .. " written; it starts on the next load")
+    if not withReload then
+      return report("v" .. version .. " written; it starts on the next load")
     end
+    -- A UI write is queued and applied at the end of the frame, so a
+    -- reload inside that frame throws the XML away and leaves the object
+    -- on its old layout, saying nothing. The script write needs no wait.
+    Wait.frames(function() self.reload() end, xml and 2 or 1)  -- self dies
   end
   Wait.condition(function() commit(true) end, idle, APPLY_TIMEOUT,
                  function() commit(false) end)

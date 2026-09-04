@@ -1827,7 +1827,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "aos-coherency-tool"
-local TOOL_VERSION   = "1.0.1"                 -- bumped with manifest.json
+local TOOL_VERSION   = "1.0.2"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:aos-coherency-tool"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to
@@ -1903,11 +1903,13 @@ local function apply(code, xml, version, notes)
     self.setLuaScript(code)              -- WRITE: the only script write, on self
     if xml then self.UI.setXml(xml) end  -- WRITE: the only UI write, on self
     once("", version, LABEL .. "updated to v" .. version .. notes)
-    if withReload then
-      self.reload()                  -- self is invalid after this line
-    else
-      report("v" .. version .. " written; it starts on the next load")
+    if not withReload then
+      return report("v" .. version .. " written; it starts on the next load")
     end
+    -- A UI write is queued and applied at the end of the frame, so a
+    -- reload inside that frame throws the XML away and leaves the object
+    -- on its old layout, saying nothing. The script write needs no wait.
+    Wait.frames(function() self.reload() end, xml and 2 or 1)  -- self dies
   end
   Wait.condition(function() commit(true) end, idle, APPLY_TIMEOUT,
                  function() commit(false) end)

@@ -1,12 +1,18 @@
 {
   "stable": {
-    "version": "1.0.1",
+    "version": "1.0.2",
     "notes": [
-      "Fixed updating itself: a release with an on-screen panel stopped halfway with an error and left the panel on the old layout."
+      "The on-screen panel now actually arrives with the update. The object was reloading before the layout had finished being written."
     ],
     "xml": true
   },
   "history": [
+    {
+      "version": "1.0.1",
+      "notes": [
+        "Fixed updating itself: a release with an on-screen panel stopped halfway with an error and left the panel on the old layout."
+      ]
+    },
     {
       "version": "1.0.0",
       "notes": [
