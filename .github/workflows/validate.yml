@@ -1,0 +1,25 @@
+# Every push is checked against the same rules validate.py applies locally, so
+# a tool folder that would break in game cannot reach main unnoticed. No
+# dependencies: validate.py is standard library only.
+name: validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Check every tool folder
+        run: python scripts/validate.py
+      - name: Say how to fix it
+        if: failure()
+        run: |
+          echo "Most of these are mechanical. Run locally and commit changes:"
+          echo "    python scripts/validate.py --fix"

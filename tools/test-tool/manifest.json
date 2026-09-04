@@ -1,0 +1,26 @@
+{
+  "stable": {
+    "version": "1.1.2",
+    "notes": [
+      "Updates only when the host types !update in chat. Nothing is checked, downloaded or changed until somebody asks.",
+      "An update says in chat what changed, including anything from releases this copy skipped.",
+      "Several copies of the tool on one table post that between them once, instead of one identical message each.",
+      "It posts what changed, or that the tool is already current, or that the repository could not be reached.",
+      "Update checks are staggered, so many copies on one table no longer all fire at once."
+    ]
+  },
+  "history": [
+    {
+      "version": "1.1.1",
+      "notes": [
+        "First update."
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "notes": [
+        "First release."
+      ]
+    }
+  ]
+}
