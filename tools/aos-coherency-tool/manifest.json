@@ -1,11 +1,17 @@
 {
   "stable": {
-    "version": "1.0.0",
+    "version": "1.0.1",
     "notes": [
-      "Initial release of the tool."
+      "Fixed updating itself: a release with an on-screen panel stopped halfway with an error and left the panel on the old layout."
     ],
     "xml": true
   },
   "history": [
+    {
+      "version": "1.0.0",
+      "notes": [
+        "Initial release of the tool."
+      ]
+    }
   ]
 }

@@ -114,7 +114,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "test-tool"
-local TOOL_VERSION   = "1.2.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "1.2.1"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:test-tool"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to
@@ -188,7 +188,7 @@ local function apply(code, xml, version, notes)
       if type(onSave) == "function" then self.script_state = onSave() end
     end)
     self.setLuaScript(code)              -- WRITE: the only script write, on self
-    if xml then self.setXmlUI(xml) end   -- WRITE: the only UI write, on self
+    if xml then self.UI.setXml(xml) end  -- WRITE: the only UI write, on self
     once("", version, LABEL .. "updated to v" .. version .. notes)
     if withReload then
       self.reload()                  -- self is invalid after this line
@@ -204,7 +204,7 @@ end
 -- running would reload forever. A release that changes only the UI still has
 -- something to install, so the script matching on its own is not enough.
 local function install(code, xml, version, notes)
-  if code == self.getLuaScript() and (xml == nil or xml == self.getXmlUI()) then
+  if code == self.getLuaScript() and (xml == nil or xml == self.UI.getXml()) then
     return report("already running this code")
   end
   apply(code, xml, version, notes)

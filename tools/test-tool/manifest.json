@@ -1,14 +1,20 @@
 {
   "stable": {
-    "version": "1.2.0",
+    "version": "1.2.1",
     "notes": [
-      "The counter is now an on-screen panel as well as buttons on the object. Either one changes the total and both show it.",
-      "The panel header shows the running version, so an update is visible without opening the script.",
-      "An XML UI is now updated together with the script: both arrive as one update, or neither does."
+      "Fixed updating itself: a release with an on-screen panel stopped halfway with an error and left the panel on the old layout."
     ],
     "xml": true
   },
   "history": [
+    {
+      "version": "1.2.0",
+      "notes": [
+        "The counter is now an on-screen panel as well as buttons on the object. Either one changes the total and both show it.",
+        "The panel header shows the running version, so an update is visible without opening the script.",
+        "An XML UI is now updated together with the script: both arrive as one update, or neither does."
+      ]
+    },
     {
       "version": "1.1.2",
       "notes": [

@@ -83,11 +83,11 @@ def check_one_write(where, text):
     # driving its own XML at runtime is ordinary and harmless, so the count
     # cannot be taken across the whole file the way the script write is.
     block = block_of(text) or text
-    ui = [ln.strip() for ln in block.splitlines() if "setXmlUI" in ln]
+    ui = [ln.strip() for ln in block.splitlines() if "UI.setXml(" in ln]
     if len(ui) != 1:
         fail(where, "expected exactly 1 UI write in the block, found %d" % len(ui),
              "\n".join("  " + u for u in ui))
-    elif not re.search(r"\bself\.setXmlUI\s*\(", ui[0]):
+    elif not re.search(r"\bself\.UI\.setXml\s*\(", ui[0]):
         fail(where, "the UI write does not target self", "  " + ui[0])
 
     # Global is touched for one thing: the latch that stops three copies of a
@@ -227,7 +227,7 @@ def check_ui(where, path, tool_id, minimum):
              "--fix" % xml_comment(tool_id))
     if not text.lstrip().startswith("<"):
         fail(where, "does not start with a tag or a comment, so it is not the "
-                    "XML that setXmlUI expects")
+                    "XML that UI.setXml expects")
 
 
 def check_payload(where, path, published, tool_id, repo_base, canonical):
