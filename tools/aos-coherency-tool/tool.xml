@@ -33,8 +33,8 @@
      and size their buttons by hand, because an equal three-way split of the 350
      column leaves 112 px per button and "Base Contact" wraps at that width.
 
-     VERSION in the Lua, which onLoad takes from the updater block and writes
-     into versionText here. Nothing sets a version by hand in either file. -->
+     VERSION in the Lua, which onUIReady writes into versionText here once the
+     panel is live. Nothing sets a version by hand in either file. -->
 
 <Defaults>
   <Text color="#293133" fontSize="20" alignment="MiddleCenter"/>
@@ -178,14 +178,16 @@
            quarter-turn counter-clockwise, so its width becomes its height on
            screen. 150 + 6 + 38 = 194, inside the 196 the strip has to give - the
            panel's 220 less 3 px of border top and bottom and the 9 + 9 padding.
-           versionText's own text is only what shows for the two frames before
-           onLoad overwrites it with the real version, so it is left blank. -->
+           140 + 6 + 50 = 196 now: 38 px clipped "v1.2.0" a character short,
+           and 50 leaves room for the version to grow a digit or two.
+           versionText's own text is only what shows until onUIReady writes the
+           real version into it, so it is left blank. -->
       <Panel preferredWidth="34" color="#00000000">
         <HorizontalLayout width="196" height="30" rotation="0 0 90" spacing="6"
                           padding="0 0 0 0" childForceExpandWidth="false"
                           childAlignment="MiddleCenter">
-          <Text preferredWidth="150" fontSize="15">Made by Antares77</Text>
-          <Text id="versionText" preferredWidth="38" fontSize="14" fontStyle="Bold"></Text>
+          <Text preferredWidth="140" fontSize="15">Made by Antares77</Text>
+          <Text id="versionText" preferredWidth="50" fontSize="14" fontStyle="Bold"></Text>
         </HorizontalLayout>
       </Panel>
 

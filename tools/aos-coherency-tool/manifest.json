@@ -1,11 +1,17 @@
 {
   "stable": {
-    "version": "1.2.0",
+    "version": "1.2.1",
     "notes": [
-      "The panel now comes up painted: seat colours and the version line were being applied before the layout existed, which did nothing and said nothing."
+      "The version on the credit strip no longer has its last character clipped off."
     ]
   },
   "history": [
+    {
+      "version": "1.2.0",
+      "notes": [
+        "The panel now comes up painted: seat colours and the version line were being applied before the layout existed, which did nothing and said nothing."
+      ]
+    },
     {
       "version": "1.1.0",
       "notes": [
