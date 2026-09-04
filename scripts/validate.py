@@ -32,8 +32,8 @@ import re
 import sys
 
 from block import (SEMVER, TOOLS, UPDATER, BlockError, block_of, canonical,
-                   literal, signature_for, stamp, stamp_xml, without_config,
-                   write, xml_comment)
+                   head_of, literal, signature_for, stamp, stamp_xml,
+                   without_config, write, xml_comment)
 
 # Release notes land in everyone's chat window at once, so they are held to a
 # size. None of these are enforced in game - the block prints whatever it is
@@ -250,6 +250,15 @@ def check_payload(where, path, published, tool_id, repo_base, canonical):
         fail(where, "no TOOL_SIGNATURE literal")
     elif signature not in text:
         fail(where, "does not contain its own signature %r" % signature)
+
+    # Every client refuses a payload that defines no onLoad, and says so only
+    # in the host console, so the object sits on its old version looking fine.
+    # The search is on the tool's own code rather than the whole file: the
+    # block quotes the same string in the gate itself, and would match it.
+    if "function onLoad" not in head_of(text):
+        fail(where, "defines no onLoad above the block, which is one of the "
+                    "four gates, so every client would refuse this file",
+             "  nothing in game reports it - copies simply never update")
 
     minimum = int(literal(text, "MIN_BYTES") or 0)
     size = len(text.encode("utf-8"))

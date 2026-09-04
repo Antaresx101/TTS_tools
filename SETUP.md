@@ -97,7 +97,8 @@ follow. Paste it at the bottom and it is done.
 
 One requirement, and it is on the shape of the script rather than its
 contents: it must define `function onLoad`, because that is one of the four
-gates every client applies to a download. `new-tool.py` warns if it does not.
+gates every client applies to a download. `new-tool.py` warns if it does not,
+and `validate.py` refuses to publish a folder whose script has none.
 
 Two optional functions, if you want them:
 
@@ -289,10 +290,11 @@ It reads every folder under `tools/` and checks what the block depends on at
 runtime: the embedded block matches `updater/updater.lua`, `TOOL_ID` matches
 the folder name, `TOOL_VERSION` matches the manifest, `REPO_BASE` is this
 repo's, the payload is bigger than its own `MIN_BYTES` gate, the file contains
-its own signature, there is exactly one script write and it targets `self`,
-the block's one UI write targets `self` too, `Global` is touched by exactly the
-three latch lines and nothing else, `SELF_UPDATE` ships as `true`, and the
-release notes and `history` are shaped the way the chat message needs. Where
+its own signature, the code above the block defines `function onLoad`, there
+is exactly one script write and it targets `self`, the block's one UI write
+targets `self` too, `Global` is touched by exactly the three latch lines and
+nothing else, `SELF_UPDATE` ships as `true`, and the release notes and
+`history` are shaped the way the chat message needs. Where
 there is a `tool.xml`, it is checked against the same two gates a client puts
 it through and against the manifest's `"xml"` flag. It is standard library
 only, and it runs on every push through

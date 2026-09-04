@@ -1,0 +1,195 @@
+<!-- TTS-SELFUPDATE:aos-coherency-tool -->
+<!-- ── AOS COHERENCY TOOL by Antares77 ───────────────────────────
+     AoS Coherency Tool - object UI.
+
+     Laid out WIDE and SHORT, should sit along the edge of a game table:
+     four columns - Auras, Coherency, Formation, Tags, narrow credit strip.
+     Nothing in the Lua depends on the order - the script addresses the buttons
+     by id, so the columns can be shuffled here.
+
+     BORDER. Drawn as geometry, not with an `outline` attribute: root carries the
+     border colour and 3 px of padding, and panelField sits inside it with the pale
+     stone, so the border is the 3 px of root that panelField does not cover.
+     The buttons keep their `outline`, where at their size it reads as a bevel.
+     Geometry to reduce flickering.
+
+     BACKGROUND. bgImage is the source picture at the full width of panelField,
+     docked to the top edge and running off the bottom; the Mask trims it at the
+     field edge.
+
+     ASSETS. `image="aosPanelBg"` is a NAME, and it resolves against the object's
+     Custom UI Assets list, which the Lua fills in on load.
+     The picture can be changed in UI_ASSETS at the top of the script.
+
+     COLOURS. The values baked into mode1 and buddyAuto are the script's own
+     defaults (0.5", Auto), so the panel is right on the first frame, before onLoad
+     re-applies them; both carry a textColor of their own, because the anthracite
+     one from Defaults would be invisible on a dark fill. No `colors` attribute in
+     Defaults for the same reason - it would override the background the script
+     sets. The five aura buttons carry no colour here: the script fills each
+     with its own ring colour on load, and they wear the ordinary wash until then.
+
+     Both three-way rows (distance, buddy rule) set childForceExpandWidth="false"
+     and size their buttons by hand, because an equal three-way split of the 350
+     column leaves 112 px per button and "Base Contact" wraps at that width.
+
+     VERSION in the Lua, which onLoad takes from the updater block and writes
+     into versionText here. Nothing sets a version by hand in either file. -->
+
+<Defaults>
+  <Text color="#293133" fontSize="20" alignment="MiddleCenter"/>
+  <!-- fontStyle Bold across every button: the stock face is thin enough at this
+       size to go soft as soon as the camera leaves the panel. -->
+  <Button color="#ffffff40" textColor="#293133" fontSize="20" fontStyle="Bold"
+          outline="#29313366" outlineSize="2 2"
+          tooltipPosition="Above" tooltipOffset="10"
+          tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+  <HorizontalLayout spacing="6" childForceExpandWidth="true" preferredHeight="46"/>
+  <VerticalLayout spacing="6" childForceExpandHeight="false"/>
+  <!-- Same wash, edge and weight as the buttons, so the field reads as one of
+       them. The four colours are normal|highlighted|pressed|disabled. -->
+  <InputField fontSize="20" fontStyle="Bold" textColor="#293133"
+              textAlignment="MiddleCenter"
+              colors="#ffffff40|#ffffff73|#ffffff26|#ffffff26"
+              outline="#29313366" outlineSize="2 2"
+              tooltipPosition="Above" tooltipOffset="10"
+              tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+</Defaults>
+
+<Panel id="root" position="665 -95 0" rotation="0 0 0"
+       scale="1 1 1" width="1330" height="220"
+       color="#293133" padding="3 3 3 3">
+
+  <!-- The panel proper. root is the border it sits in; see BORDER above. -->
+  <Panel id="panelField" color="#e6e5e1">
+
+    <!-- Background first, so everything below draws on top of it. -->
+    <Mask id="bgMask">
+      <Image id="bgImage" image="aosPanelBg" raycastTarget="false"
+             rectAlignment="UpperCenter" width="1324" height="1829"/>
+    </Mask>
+
+    <HorizontalLayout padding="9 9 9 9" spacing="14" childForceExpandWidth="false">
+
+      <VerticalLayout preferredWidth="384">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">AURAS (Selected Models)</Text>
+        <HorizontalLayout>
+          <Button id="aura3"  onClick="aosAura" text="3&quot;"
+                  tooltip="Ring 3&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura6"  onClick="aosAura" text="6&quot;"
+                  tooltip="Ring 6&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura9"  onClick="aosAura" text="9&quot;"
+                  tooltip="Ring 9&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura12" onClick="aosAura" text="12&quot;"
+                  tooltip="Ring 12&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura18" onClick="aosAura" text="18&quot;"
+                  tooltip="Ring 18&quot; on each selected model. Press it again to clear."/>
+        </HorizontalLayout>
+        <!-- The field is one aura button wide, so it sits under the 3" button.
+             Extra gap is needed to make the row with the custom input work out in width. -->
+        <HorizontalLayout childForceExpandWidth="false" spacing="6">
+          <InputField id="customAura" preferredWidth="72" text="4"
+                      onValueChanged="aosCustomChanged" onEndEdit="aosApplyCustom"
+                      placeholder="0.5-60" characterLimit="5"
+                      characterValidation="Decimal"
+                      tooltip="Custom aura radius in inches, 0.5 to 60."/>
+          <Panel id="gapAfterField" preferredWidth="0" color="#00000000"/>
+          <Button id="applyBtn" onClick="aosApply" text="Apply" preferredWidth="114"
+                  tooltip="Draw the radius in the box on each selected model."/>
+          <Button id="hlBtn" onClick="aosHighlight" text="Enable Highlight"
+                  preferredWidth="200"
+                  tooltip="Toggle: color glow every model in range of an aura. A model two auras reach glows white instead."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"
+                  tooltip="Clear auras on the selected models."/>
+          <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"
+                  tooltip="Clear all auras on the table."/>
+        </HorizontalLayout>
+      </VerticalLayout>
+
+      <VerticalLayout preferredWidth="350">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">COHERENCY (Selected Unit)</Text>
+        <!-- 80 + 80 + 178 + two 6 px gaps = 350. -->
+        <HorizontalLayout childForceExpandWidth="false" spacing="6">
+          <Button id="mode1" onClick="aosMode" text="0.5&quot;" preferredWidth="80"
+                  color="#293133cc" textColor="#f2f1ec"
+                  tooltip="Set coherency / formation ranges at 0.5&quot; between models."/>
+          <Button id="mode2" onClick="aosMode" text="2&quot;" preferredWidth="80"
+                  tooltip="Set coherency / formation ranges at 2&quot; between models."/>
+          <Button id="mode3" onClick="aosMode" text="Base Contact" preferredWidth="178"
+                  tooltip="Set coherency / formation ranges to base contact."/>
+        </HorizontalLayout>
+        <!-- 80 + 129 + 129 + two 6 px gaps = 350. -->
+        <HorizontalLayout childForceExpandWidth="false" spacing="6">
+          <Button id="buddyAuto" onClick="aosBuddy" text="Auto" preferredWidth="80"
+                  color="#293133cc" textColor="#f2f1ec"
+                  tooltip="Follow the rules: 2 buddies in range for a unit of 7+ models, otherwise 1."/>
+          <Button id="buddy1"    onClick="aosBuddy" text="1 in Range" preferredWidth="129"
+                  tooltip="Demand 1 buddy in range whatever the unit size."/>
+          <Button id="buddy2"    onClick="aosBuddy" text="2 in Range" preferredWidth="129"
+                  tooltip="Demand 2 buddies in range whatever the unit size."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="checkBtn" onClick="aosCheck" text="Check Coherency"
+                  tooltip="Toggle: green = OK, orange line to the nearest buddy. Stops itself after 60s."/>
+        </HorizontalLayout>
+      </VerticalLayout>
+
+      <VerticalLayout preferredWidth="350">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">FORMATION (Selected Unit)</Text>
+        <HorizontalLayout>
+          <Button id="shapeLine"   onClick="aosShape" text="Single Line"
+                  tooltip="Rearrange the unit into one rank."/>
+          <Button id="shapeDouble" onClick="aosShape" text="Double Line"
+                  tooltip="Rearrange the unit into two ranks."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="shapeTri"   onClick="aosShape" text="Dogbone"
+                  tooltip="Rearrange the unit into a line with a 3-model triangle at each end."/>
+          <Button id="shapeHoney" onClick="aosShape" text="Honeycomb"
+                  tooltip="Rearrange the unit into a honeycomb block."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="undoBtn" onClick="aosUndo" text="Undo Last Move"
+                  tooltip="Put the unit back where it stood before the last move."/>
+        </HorizontalLayout>
+      </VerticalLayout>
+
+      <VerticalLayout preferredWidth="120">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">Tags</Text>
+        <Panel id="tagFrame" color="#00000000" padding="3 3 3 3" preferredHeight="46">
+          <Button id="tagBtn" onClick="aosTag" text="Tag"
+                  tooltip="Stamp a unit id on the selected models. Refused if they already carry another script's id."/>
+        </Panel>
+        <Button id="untagBtn" onClick="aosUntag" text="Untag"
+                interactable="false" textColor="#a3a8aa" preferredHeight="46"
+                tooltip="Take the unit id off the whole unit. Only ever removes ids this tool issued."/>
+        <Button id="smartTagBtn" onClick="aosSmartTag" text="Smart Tag"
+                fontSize="17" preferredHeight="46"
+                tooltip="Split the selection into units with tags by how the models are standing together."/>
+      </VerticalLayout>
+
+      <!-- Credit then version, reading bottom-to-top: a HorizontalLayout turned a
+           quarter-turn counter-clockwise, so its width becomes its height on
+           screen. 150 + 6 + 38 = 194, inside the 196 the strip has to give - the
+           panel's 220 less 3 px of border top and bottom and the 9 + 9 padding.
+           versionText's own text is only what shows for the two frames before
+           onLoad overwrites it with the real version, so it is left blank. -->
+      <Panel preferredWidth="34" color="#00000000">
+        <HorizontalLayout width="196" height="30" rotation="0 0 90" spacing="6"
+                          padding="0 0 0 0" childForceExpandWidth="false"
+                          childAlignment="MiddleCenter">
+          <Text preferredWidth="150" fontSize="15">Made by Antares77</Text>
+          <Text id="versionText" preferredWidth="38" fontSize="14" fontStyle="Bold"></Text>
+        </HorizontalLayout>
+      </Panel>
+
+    </HorizontalLayout>
+
+  </Panel>
+</Panel>

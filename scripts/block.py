@@ -19,10 +19,12 @@ TOOLS = ROOT / "tools"
 CONFIG_KEYS = ("REPO_BASE", "TOOL_ID", "TOOL_VERSION", "TOOL_SIGNATURE")
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
-# Any signature comment, whoever it names: stamp_xml strips these before it
-# writes the right one, so a UI copied from another tool cannot keep a
-# signature that would make every client refuse the download.
+# Any signature comment, whoever it names: the stamps strip these before they
+# write the right one, so a file copied from another tool - or a folder that
+# was renamed - cannot keep a signature that would make clients refuse it, or
+# end up carrying two.
 XML_SIGNATURE_LINE = re.compile(r"^\s*<!--\s*TTS-SELFUPDATE:[^>]*-->\s*$")
+LUA_SIGNATURE_LINE = re.compile(r"^--\s*TTS-SELFUPDATE:\S*\s*$")
 
 DIVIDER = (
     "\n-- ===========================================================================\n"
@@ -114,8 +116,15 @@ def stamp(text, tool_id, version):
         head = text.rstrip("\n") + "\n" + DIVIDER
 
     signature = signature_for(tool_id)
-    if not head.startswith("-- " + signature):
-        head = "-- %s\n--\n%s" % (signature, head)
+    # Drop a header from a name this tool used to have before writing the one
+    # it has now. Renaming a folder is how a file ends up with two of them,
+    # and the stale one names a tool that no longer exists.
+    lines = head.splitlines(True)
+    while lines and LUA_SIGNATURE_LINE.match(lines[0]):
+        lines.pop(0)
+        if lines and lines[0].strip() == "--":
+            lines.pop(0)
+    head = "-- %s\n--\n%s" % (signature, "".join(lines))
 
     block = canonical()
     block = set_config(block, "TOOL_ID", tool_id)
