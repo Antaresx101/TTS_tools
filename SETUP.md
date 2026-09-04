@@ -58,10 +58,22 @@ it:
 
 The block applies that string with `self.UI.setXml` when the object loads, and
 nothing is ever written to the object's XML field. **The consequence worth
-knowing: a tool cannot address its own UI in the frame it loads in.** Do the
-first `setValue` or `setAttribute` a frame or two later —
-[`tools/test-tool/tool.lua`](tools/test-tool/tool.lua) uses
-`Wait.frames(refresh, 2)`, and the coherency tool does the same.
+knowing: a layout is not addressable for several frames after it is applied.**
+`setValue` and `setAttribute` on an element that is not there yet do nothing
+and report nothing, so a panel that paints itself in `onLoad` comes up blank.
+
+That is what `onUIReady` is for. Define it and the block calls it once the
+layout is live:
+
+```lua
+function onUIReady()          -- optional; only called if the tool has a layout
+    refresh()                 -- setValue / setAttribute are safe from here
+end
+```
+
+The number of frames that takes lives in the block as `UI_FRAMES`, in one
+place, rather than being guessed separately in every tool.
+[`tools/test-tool/tool.lua`](tools/test-tool/tool.lua) is the short example.
 
 The block calls the tool's `onLoad` *before* applying the layout, so anything
 the layout depends on is already in place — custom assets named by `image=""`,
@@ -108,12 +120,16 @@ own, which is what applies the layout, but a script with none of its own never
 sets anything up when the object loads. `new-tool.py` warns if it does not,
 and `validate.py` refuses to publish a folder whose script has none.
 
-Two optional functions, where a tool wants them:
+Three optional functions, where a tool wants them:
 
 ```lua
-Updater_check()                              -- one check for this object, now
+function onUIReady()                           -- the layout is live; paint it
+Updater_check()                                -- one check for this object, now
 local from, now = Updater_stateVersion(state)  -- which version wrote the save
 ```
+
+`onUIReady` is called only for a tool that has a layout to be ready — one
+with no `tool.xml` builds whatever UI it wants on its own schedule.
 
 `Updater_check()` is what the chat command calls. A tool can call it from
 anywhere as well — one of its own buttons, or from Global with

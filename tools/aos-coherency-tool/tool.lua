@@ -1782,15 +1782,19 @@ function onLoad(saved)
     for i = 1, #g do seed = seed + string.byte(g, i) * i end
     pcall(function() seed = seed + os.time() end)
     math.randomseed(seed)
-    -- setAttribute fails silently before the UI exists, so re-apply once it does.
-    Wait.frames(function()
-        refreshUI()
-        paintAuraButtons()
-        self.UI.setAttribute("versionText", "text", "v" .. VERSION)
-    end, 2)
-    Wait.frames(function() selTagState = nil; selWatchTick() end, 3)
     if selWatchTimer ~= nil then Wait.stop(selWatchTimer) end
     selWatchTimer = Wait.time(selWatchTick, SEL_WATCH, -1)
+end
+
+-- Everything that paints the panel, run once the panel is actually there. The
+-- update block calls this after it applies the layout; setAttribute before
+-- that point does nothing and reports nothing.
+function onUIReady()
+    refreshUI()
+    paintAuraButtons()
+    self.UI.setAttribute("versionText", "text", "v" .. VERSION)
+    selTagState = nil
+    selWatchTick()
 end
 
 function onDestroy()
@@ -2030,7 +2034,7 @@ local TOOL_XML = [[
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "aos-coherency-tool"
-local TOOL_VERSION   = "1.1.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "1.2.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:aos-coherency-tool"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
@@ -2038,6 +2042,7 @@ local TOOL_SIGNATURE = "TTS-SELFUPDATE:aos-coherency-tool"
 -- than that. scripts/validate.py enforces it at publish time.
 local MIN_BYTES     = 1024
 local APPLY_TIMEOUT = 20                       -- seconds to wait for a safe moment
+local UI_FRAMES     = 5                        -- frames a layout takes to go live
 local SPREAD        = 8                        -- seconds to smear checks across
 local CHAT_COMMAND  = "!update"                -- host types it, every copy hears
 local LABEL         = "[" .. TOOL_ID .. "] "   -- four tools, four named voices
@@ -2191,7 +2196,14 @@ end
 local toolLoad = onLoad
 function onLoad(saved)
   if type(toolLoad) == "function" then toolLoad(saved) end
-  if TOOL_XML then self.UI.setXml(TOOL_XML) end   -- WRITE: the only UI write
+  if not TOOL_XML then return end
+  self.UI.setXml(TOOL_XML)                        -- WRITE: the only UI write
+  -- setXml is queued, and the elements it creates are not addressable in this
+  -- frame or the next: setValue and setAttribute on them do nothing, and say
+  -- nothing. A tool that fills its layout in at load does that from onUIReady
+  -- and never has to guess a delay of its own - this is the only place that
+  -- number lives, so getting it wrong is one edit rather than one per tool.
+  if type(onUIReady) == "function" then Wait.frames(onUIReady, UI_FRAMES) end
 end
 
 -- Chat reaches object scripts, not just the Global one, so every copy on the

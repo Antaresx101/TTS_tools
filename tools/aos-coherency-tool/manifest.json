@@ -1,12 +1,18 @@
 {
   "stable": {
-    "version": "1.1.0",
+    "version": "1.2.0",
     "notes": [
-      "The on-screen panel now travels inside the script instead of being fetched separately, so an update can no longer install one half of the tool.",
-      "It arrives with the update it belongs to, every time, rather than sometimes not at all."
+      "The panel now comes up painted: seat colours and the version line were being applied before the layout existed, which did nothing and said nothing."
     ]
   },
   "history": [
+    {
+      "version": "1.1.0",
+      "notes": [
+        "The on-screen panel now travels inside the script instead of being fetched separately, so an update can no longer install one half of the tool.",
+        "It arrives with the update it belongs to, every time, rather than sometimes not at all."
+      ]
+    },
     {
       "version": "1.0.2",
       "notes": [
