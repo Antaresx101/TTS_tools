@@ -19,9 +19,10 @@ asks this repository whether a newer version of *itself* exists, and if one does
 downloads the complete script, checks it, and replaces its own — and nothing
 else on the table is touched.
 
-A tool is always a script, and sometimes an XML UI beside it. Where there is
-one, both halves come down together and are installed together, or neither of
-them is — an object is never left running new code against an old layout.
+A tool is always exactly one file. Where it has an on-screen UI, that layout
+travels inside the script and is applied when the object loads, so an update
+cannot leave new code running against an old layout — there are no halves to
+get out of step.
 
 Every tool posts the update status in chat.
 However many copies of one tool are on the table, each of these is posted
@@ -50,8 +51,9 @@ More info:
 
 ```
 tools/       one folder per tool - tool.lua plus manifest.json, and tool.xml
-             for a tool with a UI. This is what objects download.
-             test-tool/ is the worked example: both halves, in one folder.
+             for a tool with a UI. Only tool.lua is downloaded; tool.xml is
+             the source layout, spliced into it by validate.py.
+             test-tool/ is the worked example.
 updater/     the self-update block itself, pasted into every tool
 scripts/     validate.py to check and repair the repo, new-tool.py to scaffold
              a tool, block.py holding the one operation both of them do

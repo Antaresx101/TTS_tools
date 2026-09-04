@@ -4,9 +4,10 @@ Both scripts here work on the same thing - a tool.lua is the script with
 updater/updater.lua pasted onto the end and four config values filled in - so
 that one operation lives here rather than in two slightly different copies.
 
-A tool may also ship an XML UI as tool.xml beside it. That file carries the
-same signature the script does, as an XML comment on its first line, which is
-what a client checks a downloaded UI against before it installs anything.
+A tool may also have an XML UI, authored as tool.xml beside it. That file is
+not published: stamp() splices it into tool.lua as a Lua long string, and the
+block applies it at load. One file is the whole tool, which is why an update
+cannot land half of one - there are no halves to land.
 """
 
 import re
@@ -31,6 +32,17 @@ DIVIDER = (
     "-- Everything below this line is updater/updater.lua, pasted unchanged.\n"
     "-- ===========================================================================\n\n"
 )
+
+XML_DIVIDER = (
+    "\n-- ===========================================================================\n"
+    "-- The tool's UI, spliced in from tool.xml. Edit that file, not this copy.\n"
+    "-- ===========================================================================\n\n"
+)
+
+# The spliced literal, read back out of a published file exactly as Lua sees
+# it: the newline straight after the opening bracket is not part of the string.
+TOOL_XML_LITERAL = re.compile(r"^local TOOL_XML = \[(=*)\[\n(.*?)\]\1\]$",
+                              re.M | re.S)
 
 
 class BlockError(Exception):
@@ -89,10 +101,41 @@ def block_of(text):
 
 
 def head_of(text):
-    """Everything above the block: the tool's own script, divider and all."""
+    """The tool's own script: everything above the spliced UI and the block.
+
+    Stopping at the UI matters for more than tidiness - the payload gate looks
+    for `function onLoad` in here, and a layout is perfectly capable of
+    carrying that string somewhere in a comment.
+    """
+    for mark in (XML_DIVIDER, DIVIDER):
+        index = text.find(mark)
+        if index >= 0:
+            return text[:index]
     opener = canonical().splitlines()[0]
     index = text.find(opener)
     return text if index < 0 else text[:index]
+
+
+def long_string(text):
+    """`text` as a Lua long-bracket literal, at a level it cannot close itself.
+
+    The level goes up until the closing sequence is absent from the body, so
+    no layout can end the string early however many brackets it has in it.
+    Lua drops the newline straight after the opening bracket, which is why one
+    is written there: the string starts at tool.xml's own first character.
+    """
+    level = 0
+    while ("]" + "=" * level + "]") in text:
+        level += 1
+    eq = "=" * level
+    return "local TOOL_XML = [%s[\n%s]%s]\n" % (
+        eq, text.rstrip("\n") + "\n", eq)
+
+
+def xml_of(text):
+    """The UI spliced into a published file, or None. The inverse of above."""
+    match = TOOL_XML_LITERAL.search(text)
+    return match.group(2) if match else None
 
 
 def without_config(text):
@@ -103,17 +146,16 @@ def without_config(text):
     return text
 
 
-def stamp(text, tool_id, version):
+def stamp(text, tool_id, version, xml=None):
     """A tool file rebuilt around the current block, config filled in.
 
     `text` is either a finished tool.lua or a bare object script with no block
-    in it yet; both come out the same shape. Rebuilding from the canonical
-    block on every pass is the point - a tool folder can never drift, and the
-    file stays an ordinary readable one that diffs cleanly afterwards.
+    in it yet; both come out the same shape. `xml` is the tool.xml beside it,
+    spliced in between the two. Rebuilding all three parts on every pass is
+    the point - a tool folder can never drift, and the file stays an ordinary
+    readable one that diffs cleanly afterwards.
     """
-    head = head_of(text)
-    if head == text:                     # no block in there yet
-        head = text.rstrip("\n") + "\n" + DIVIDER
+    head = head_of(text).rstrip("\n") + "\n"
 
     signature = signature_for(tool_id)
     # Drop a header from a name this tool used to have before writing the one
@@ -126,19 +168,22 @@ def stamp(text, tool_id, version):
             lines.pop(0)
     head = "-- %s\n--\n%s" % (signature, "".join(lines))
 
+    ui = "" if xml is None else XML_DIVIDER + long_string(xml)
+
     block = canonical()
     block = set_config(block, "TOOL_ID", tool_id)
     block = set_config(block, "TOOL_VERSION", version)
     block = set_config(block, "TOOL_SIGNATURE", signature)
-    return head + block
+    return head + ui + DIVIDER + block
 
 
 def stamp_xml(text, tool_id):
     """An XML UI file with this tool's signature comment as its first line.
 
-    The counterpart to stamp() for the other half of a tool, and the whole of
-    preparing a UI for publishing: nothing else in the file is touched, and
-    running it twice changes nothing the second time.
+    The signature is no longer a gate - the layout travels inside a payload
+    that is already checked three ways - but it still says which tool a loose
+    file belongs to, and it rides along into the splice. Nothing else in the
+    file is touched, and running it twice changes nothing the second time.
     """
     lines = [ln for ln in text.splitlines() if not XML_SIGNATURE_LINE.match(ln)]
     return "\n".join([xml_comment(tool_id)] + lines).rstrip("\n") + "\n"

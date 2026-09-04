@@ -8,9 +8,10 @@ it, fills in the three config values from the tool id, and writes both files
 into tools/my-tool/. Then it runs validate.py to find out immediately if
 anything is off.
 
-A tool with an XML UI passes it as --xml, and the file is copied in as
-tool.xml with the tool's signature stamped on its first line and "xml": true
-written into the manifest, which is what makes clients fetch it at all.
+A tool with an XML UI passes it as --xml. The file is copied in as tool.xml
+with the tool's signature stamped on its first line, and spliced into tool.lua
+as the string the block applies at load. tool.xml stays in the folder as the
+source copy; nothing ever downloads it.
 
 It never overwrites an existing tool folder, and it never edits the source
 script. Everything it produces is an ordinary readable file that can be
@@ -69,15 +70,19 @@ def main():
     signature = signature_for(tool_id)
 
     # Warn loudly, but still write. The block needs no call from the script -
-    # it listens for the command by itself - but a payload with no onLoad is
-    # one every client refuses, and nothing in game reports why.
+    # it listens for the command by itself - but a script with no onLoad does
+    # nothing at all when the object loads, and nothing in game reports that.
     warnings = []
     if "function onLoad" not in head:
-        warnings.append("the script has no `function onLoad`, which the payload "
-                        "check requires. Clients will reject it.")
+        warnings.append("the script has no `function onLoad`, so nothing in it "
+                        "runs when the object loads.")
+
+    xml_text = args.xml.read_text(encoding="utf-8") if args.xml else None
+    if xml_text is not None:
+        xml_text = stamp_xml(xml_text, tool_id)
 
     try:
-        payload = stamp(head, tool_id, args.version)
+        payload = stamp(head, tool_id, args.version, xml_text)
     except BlockError as exc:
         die(str(exc))
 
@@ -86,25 +91,24 @@ def main():
     manifest = folder / "manifest.json"
     write(lua, payload)
 
-    # "xml": true is what makes a client ask for the UI at all, so the flag and
-    # the file are written in one go and cannot come apart here.
+    # The layout is already inside tool.lua by now; this is the copy the author
+    # edits, and the one validate.py splices from on every later pass.
     xml = None
     # Notes are always a list, even with one entry: that is the shape that
     # arrives in chat as a bulleted list, and the shape people copy from.
     stable = {"version": args.version, "notes": args.notes or ["First release."]}
-    if args.xml:
+    if xml_text is not None:
         xml = folder / "tool.xml"
-        write(xml, stamp_xml(args.xml.read_text(encoding="utf-8"), tool_id))
-        stable["xml"] = True
+        write(xml, xml_text)
     write(manifest, json.dumps({"stable": stable}, indent=2) + "\n")
 
     print("created tools/%s/" % tool_id)
     print("  tool.lua       %d bytes, TOOL_ID = %r, v%s"
           % (lua.stat().st_size, tool_id, args.version))
     if xml:
-        print("  tool.xml       %d bytes, signed for %r"
-              % (xml.stat().st_size, tool_id))
-    print("  manifest.json  v%s%s" % (args.version, ', "xml": true' if xml else ""))
+        print("  tool.xml       %d bytes, signed and spliced into tool.lua"
+              % xml.stat().st_size)
+    print("  manifest.json  v%s" % args.version)
     for warning in warnings:
         print("\n  WARNING: " + warning)
     print()
@@ -114,8 +118,6 @@ def main():
     if result.returncode == 0 and not warnings:
         print("\nCommit the folder and push. The tool is live at")
         print("  tools/%s/tool.lua" % tool_id)
-        if xml:
-            print("  tools/%s/tool.xml" % tool_id)
     return result.returncode
 
 

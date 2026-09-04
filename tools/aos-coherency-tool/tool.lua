@@ -1802,6 +1802,208 @@ function onDestroy()
 end
 
 -- ===========================================================================
+-- The tool's UI, spliced in from tool.xml. Edit that file, not this copy.
+-- ===========================================================================
+
+local TOOL_XML = [[
+<!-- TTS-SELFUPDATE:aos-coherency-tool -->
+<!-- ── AOS COHERENCY TOOL by Antares77 ───────────────────────────
+     AoS Coherency Tool - object UI.
+
+     Laid out WIDE and SHORT, should sit along the edge of a game table:
+     four columns - Auras, Coherency, Formation, Tags, narrow credit strip.
+     Nothing in the Lua depends on the order - the script addresses the buttons
+     by id, so the columns can be shuffled here.
+
+     BORDER. Drawn as geometry, not with an `outline` attribute: root carries the
+     border colour and 3 px of padding, and panelField sits inside it with the pale
+     stone, so the border is the 3 px of root that panelField does not cover.
+     The buttons keep their `outline`, where at their size it reads as a bevel.
+     Geometry to reduce flickering.
+
+     BACKGROUND. bgImage is the source picture at the full width of panelField,
+     docked to the top edge and running off the bottom; the Mask trims it at the
+     field edge.
+
+     ASSETS. `image="aosPanelBg"` is a NAME, and it resolves against the object's
+     Custom UI Assets list, which the Lua fills in on load.
+     The picture can be changed in UI_ASSETS at the top of the script.
+
+     COLOURS. The values baked into mode1 and buddyAuto are the script's own
+     defaults (0.5", Auto), so the panel is right on the first frame, before onLoad
+     re-applies them; both carry a textColor of their own, because the anthracite
+     one from Defaults would be invisible on a dark fill. No `colors` attribute in
+     Defaults for the same reason - it would override the background the script
+     sets. The five aura buttons carry no colour here: the script fills each
+     with its own ring colour on load, and they wear the ordinary wash until then.
+
+     Both three-way rows (distance, buddy rule) set childForceExpandWidth="false"
+     and size their buttons by hand, because an equal three-way split of the 350
+     column leaves 112 px per button and "Base Contact" wraps at that width.
+
+     VERSION in the Lua, which onLoad takes from the updater block and writes
+     into versionText here. Nothing sets a version by hand in either file. -->
+
+<Defaults>
+  <Text color="#293133" fontSize="20" alignment="MiddleCenter"/>
+  <!-- fontStyle Bold across every button: the stock face is thin enough at this
+       size to go soft as soon as the camera leaves the panel. -->
+  <Button color="#ffffff40" textColor="#293133" fontSize="20" fontStyle="Bold"
+          outline="#29313366" outlineSize="2 2"
+          tooltipPosition="Above" tooltipOffset="10"
+          tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+  <HorizontalLayout spacing="6" childForceExpandWidth="true" preferredHeight="46"/>
+  <VerticalLayout spacing="6" childForceExpandHeight="false"/>
+  <!-- Same wash, edge and weight as the buttons, so the field reads as one of
+       them. The four colours are normal|highlighted|pressed|disabled. -->
+  <InputField fontSize="20" fontStyle="Bold" textColor="#293133"
+              textAlignment="MiddleCenter"
+              colors="#ffffff40|#ffffff73|#ffffff26|#ffffff26"
+              outline="#29313366" outlineSize="2 2"
+              tooltipPosition="Above" tooltipOffset="10"
+              tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+</Defaults>
+
+<Panel id="root" position="665 -95 0" rotation="0 0 0"
+       scale="1 1 1" width="1330" height="220"
+       color="#293133" padding="3 3 3 3">
+
+  <!-- The panel proper. root is the border it sits in; see BORDER above. -->
+  <Panel id="panelField" color="#e6e5e1">
+
+    <!-- Background first, so everything below draws on top of it. -->
+    <Mask id="bgMask">
+      <Image id="bgImage" image="aosPanelBg" raycastTarget="false"
+             rectAlignment="UpperCenter" width="1324" height="1829"/>
+    </Mask>
+
+    <HorizontalLayout padding="9 9 9 9" spacing="14" childForceExpandWidth="false">
+
+      <VerticalLayout preferredWidth="384">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">AURAS (Selected Models)</Text>
+        <HorizontalLayout>
+          <Button id="aura3"  onClick="aosAura" text="3&quot;"
+                  tooltip="Ring 3&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura6"  onClick="aosAura" text="6&quot;"
+                  tooltip="Ring 6&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura9"  onClick="aosAura" text="9&quot;"
+                  tooltip="Ring 9&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura12" onClick="aosAura" text="12&quot;"
+                  tooltip="Ring 12&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura18" onClick="aosAura" text="18&quot;"
+                  tooltip="Ring 18&quot; on each selected model. Press it again to clear."/>
+        </HorizontalLayout>
+        <!-- The field is one aura button wide, so it sits under the 3" button.
+             Extra gap is needed to make the row with the custom input work out in width. -->
+        <HorizontalLayout childForceExpandWidth="false" spacing="6">
+          <InputField id="customAura" preferredWidth="72" text="4"
+                      onValueChanged="aosCustomChanged" onEndEdit="aosApplyCustom"
+                      placeholder="0.5-60" characterLimit="5"
+                      characterValidation="Decimal"
+                      tooltip="Custom aura radius in inches, 0.5 to 60."/>
+          <Panel id="gapAfterField" preferredWidth="0" color="#00000000"/>
+          <Button id="applyBtn" onClick="aosApply" text="Apply" preferredWidth="114"
+                  tooltip="Draw the radius in the box on each selected model."/>
+          <Button id="hlBtn" onClick="aosHighlight" text="Enable Highlight"
+                  preferredWidth="200"
+                  tooltip="Toggle: color glow every model in range of an aura. A model two auras reach glows white instead."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"
+                  tooltip="Clear auras on the selected models."/>
+          <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"
+                  tooltip="Clear all auras on the table."/>
+        </HorizontalLayout>
+      </VerticalLayout>
+
+      <VerticalLayout preferredWidth="350">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">COHERENCY (Selected Unit)</Text>
+        <!-- 80 + 80 + 178 + two 6 px gaps = 350. -->
+        <HorizontalLayout childForceExpandWidth="false" spacing="6">
+          <Button id="mode1" onClick="aosMode" text="0.5&quot;" preferredWidth="80"
+                  color="#293133cc" textColor="#f2f1ec"
+                  tooltip="Set coherency / formation ranges at 0.5&quot; between models."/>
+          <Button id="mode2" onClick="aosMode" text="2&quot;" preferredWidth="80"
+                  tooltip="Set coherency / formation ranges at 2&quot; between models."/>
+          <Button id="mode3" onClick="aosMode" text="Base Contact" preferredWidth="178"
+                  tooltip="Set coherency / formation ranges to base contact."/>
+        </HorizontalLayout>
+        <!-- 80 + 129 + 129 + two 6 px gaps = 350. -->
+        <HorizontalLayout childForceExpandWidth="false" spacing="6">
+          <Button id="buddyAuto" onClick="aosBuddy" text="Auto" preferredWidth="80"
+                  color="#293133cc" textColor="#f2f1ec"
+                  tooltip="Follow the rules: 2 buddies in range for a unit of 7+ models, otherwise 1."/>
+          <Button id="buddy1"    onClick="aosBuddy" text="1 in Range" preferredWidth="129"
+                  tooltip="Demand 1 buddy in range whatever the unit size."/>
+          <Button id="buddy2"    onClick="aosBuddy" text="2 in Range" preferredWidth="129"
+                  tooltip="Demand 2 buddies in range whatever the unit size."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="checkBtn" onClick="aosCheck" text="Check Coherency"
+                  tooltip="Toggle: green = OK, orange line to the nearest buddy. Stops itself after 60s."/>
+        </HorizontalLayout>
+      </VerticalLayout>
+
+      <VerticalLayout preferredWidth="350">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">FORMATION (Selected Unit)</Text>
+        <HorizontalLayout>
+          <Button id="shapeLine"   onClick="aosShape" text="Single Line"
+                  tooltip="Rearrange the unit into one rank."/>
+          <Button id="shapeDouble" onClick="aosShape" text="Double Line"
+                  tooltip="Rearrange the unit into two ranks."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="shapeTri"   onClick="aosShape" text="Dogbone"
+                  tooltip="Rearrange the unit into a line with a 3-model triangle at each end."/>
+          <Button id="shapeHoney" onClick="aosShape" text="Honeycomb"
+                  tooltip="Rearrange the unit into a honeycomb block."/>
+        </HorizontalLayout>
+        <HorizontalLayout>
+          <Button id="undoBtn" onClick="aosUndo" text="Undo Last Move"
+                  tooltip="Put the unit back where it stood before the last move."/>
+        </HorizontalLayout>
+      </VerticalLayout>
+
+      <VerticalLayout preferredWidth="120">
+        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+              alignment="UpperCenter">Tags</Text>
+        <Panel id="tagFrame" color="#00000000" padding="3 3 3 3" preferredHeight="46">
+          <Button id="tagBtn" onClick="aosTag" text="Tag"
+                  tooltip="Stamp a unit id on the selected models. Refused if they already carry another script's id."/>
+        </Panel>
+        <Button id="untagBtn" onClick="aosUntag" text="Untag"
+                interactable="false" textColor="#a3a8aa" preferredHeight="46"
+                tooltip="Take the unit id off the whole unit. Only ever removes ids this tool issued."/>
+        <Button id="smartTagBtn" onClick="aosSmartTag" text="Smart Tag"
+                fontSize="17" preferredHeight="46"
+                tooltip="Split the selection into units with tags by how the models are standing together."/>
+      </VerticalLayout>
+
+      <!-- Credit then version, reading bottom-to-top: a HorizontalLayout turned a
+           quarter-turn counter-clockwise, so its width becomes its height on
+           screen. 150 + 6 + 38 = 194, inside the 196 the strip has to give - the
+           panel's 220 less 3 px of border top and bottom and the 9 + 9 padding.
+           versionText's own text is only what shows for the two frames before
+           onLoad overwrites it with the real version, so it is left blank. -->
+      <Panel preferredWidth="34" color="#00000000">
+        <HorizontalLayout width="196" height="30" rotation="0 0 90" spacing="6"
+                          padding="0 0 0 0" childForceExpandWidth="false"
+                          childAlignment="MiddleCenter">
+          <Text preferredWidth="150" fontSize="15">Made by Antares77</Text>
+          <Text id="versionText" preferredWidth="38" fontSize="14" fontStyle="Bold"></Text>
+        </HorizontalLayout>
+      </Panel>
+
+    </HorizontalLayout>
+
+  </Panel>
+</Panel>
+]]
+
+-- ===========================================================================
 -- Everything below this line is updater/updater.lua, pasted unchanged.
 -- ===========================================================================
 
@@ -1813,8 +2015,9 @@ end
   typing "!update" in the chat as the host will automatically update all such
   tools in the session with the newest version (if it isn´t on it already).
 
-  A tool is always a script, and sometimes an XML UI beside it. Both halves
-  are replaced together, or neither of them is.
+  A tool is one file. Where it has an on-screen UI, that layout travels
+  inside the script and goes on when the object loads, so an update is one
+  download and one write, and cannot leave half a tool behind.
 
   Nothing happens until you ask. Loading a mod sends no requests and changes no
   scripts, it is triggered manually always.
@@ -1827,16 +2030,13 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "aos-coherency-tool"
-local TOOL_VERSION   = "1.0.2"                 -- bumped with manifest.json
+local TOOL_VERSION   = "1.1.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:aos-coherency-tool"
 
--- Fixed conventions. MIN_BYTES only has to be large enough to
--- throw out error pages and truncated bodies; any file carrying this block is
--- usually bigger than that. MIN_XML_BYTES is the same gate for a UI file,
--- which is legitimately a great deal smaller. scripts/validate.py enforces
--- both at publish time.
+-- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
+-- pages and truncated bodies; any file carrying this block is usually bigger
+-- than that. scripts/validate.py enforces it at publish time.
 local MIN_BYTES     = 1024
-local MIN_XML_BYTES = 64
 local APPLY_TIMEOUT = 20                       -- seconds to wait for a safe moment
 local SPREAD        = 8                        -- seconds to smear checks across
 local CHAT_COMMAND  = "!update"                -- host types it, every copy hears
@@ -1887,10 +2087,10 @@ local function once(suffix, value, msg)
   broadcastToAll(msg, {0.6, 0.9, 0.6})
 end
 
--- Writes the new script, and the XML UI beside it when the release carries
--- one, and reloads only while the object is idle. If it never goes idle we
--- still write, and the new script starts on the next load.
-local function apply(code, xml, version, notes)
+-- Writes the new script and reloads only while the object is idle. If it never
+-- goes idle we still write, and the new script starts on the next load. The
+-- tool's UI rides inside the script, so there is nothing else here to write.
+local function apply(code, version, notes)
   local function idle()
     return self.held_by_color == nil and not self.isSmoothMoving()
        and not self.spawning
@@ -1901,72 +2101,49 @@ local function apply(code, xml, version, notes)
       if type(onSave) == "function" then self.script_state = onSave() end
     end)
     self.setLuaScript(code)              -- WRITE: the only script write, on self
-    if xml then self.UI.setXml(xml) end  -- WRITE: the only UI write, on self
     once("", version, LABEL .. "updated to v" .. version .. notes)
-    if not withReload then
-      return report("v" .. version .. " written; it starts on the next load")
+    if withReload then
+      self.reload()                  -- self is invalid after this line
+    else
+      report("v" .. version .. " written; it starts on the next load")
     end
-    -- A UI write is queued and applied at the end of the frame, so a
-    -- reload inside that frame throws the XML away and leaves the object
-    -- on its old layout, saying nothing. The script write needs no wait.
-    Wait.frames(function() self.reload() end, xml and 2 or 1)  -- self dies
   end
   Wait.condition(function() commit(true) end, idle, APPLY_TIMEOUT,
                  function() commit(false) end)
 end
 
--- The loop guard, over both halves at once: writing back what is already
--- running would reload forever. A release that changes only the UI still has
--- something to install, so the script matching on its own is not enough.
-local function install(code, xml, version, notes)
-  if code == self.getLuaScript() and (xml == nil or xml == self.UI.getXml()) then
+-- The loop guard: writing back what is already running would reload forever.
+-- One file is the whole tool now, so one comparison covers it.
+local function install(code, version, notes)
+  if code == self.getLuaScript() then
     return report("already running this code")
   end
-  apply(code, xml, version, notes)
+  apply(code, version, notes)
 end
 
--- The UI half, fetched only for a release whose manifest says it has one, and
--- gated the same way: long enough not to be an error page, and carrying the
--- signature in an XML comment. A failure here drops the script with it, so
--- half a tool is never installed.
-local function onXml(req, code, version, notes)
-  if req.is_error or req.response_code ~= 200 then
-    return report("rejected: no UI to go with the script ("
-                  .. tostring(req.error or req.response_code) .. ")")
-  end
-  local xml = req.text or ""
-  if #xml < MIN_XML_BYTES then
-    return report("rejected: UI shorter than MIN_XML_BYTES")
-  end
-  if not string.find(xml, TOOL_SIGNATURE, 1, true) then
-    return report("rejected: UI carries no TOOL_SIGNATURE")
-  end
-  install(code, xml, version, notes)
-end
-
-local function onPayload(req, version, notes, wantsXml)
+local function onPayload(req, version, notes)
   if req.is_error or req.response_code ~= 200 then return end   -- silently
   local code = req.text or ""
-  -- Three of the four gates: size, signature, and an onLoad to come back to.
-  -- The loop guard is the fourth and waits until both halves are in hand.
-  -- Any failure leaves the object exactly as it is.
+  -- Three of the four gates: long enough, signed for this tool, and whole.
+  -- The loop guard is the fourth. Any failure leaves the object as it is.
   if #code < MIN_BYTES then return report("rejected: shorter than MIN_BYTES") end
   if not string.find(code, TOOL_SIGNATURE, 1, true) then
     return report("rejected: TOOL_SIGNATURE missing")
   end
-  if not string.find(code, "function onLoad", 1, true) then
-    return report("rejected: defines no onLoad")
+  -- The block's last function, named in halves so this line cannot match
+  -- itself: the payload carries this file too, and a search for the whole
+  -- literal would find the search. Finding the real one proves the body
+  -- arrived to its last line rather than stopping somewhere in the middle.
+  if not string.find(code, "function Updater_" .. "stateVersion", 1, true) then
+    return report("rejected: cut short before the end of the block")
   end
-  if not wantsXml then return install(code, nil, version, notes) end
-  WebRequest.get(url("tool.xml"), function(r) onXml(r, code, version, notes) end)
+  install(code, version, notes)
 end
 
 -- Answers: the repository is not there (offline, blocked, moved, private, 404),
 -- or nothing needs fetching because this copy is the published one.
 -- Once per tool per asking, either way. A manifest that arrives but will not
 -- parse goes to the host console instead: the repository is alive so it´s on that author.
--- A release that declares no UI leaves whatever is on the object alone, since
--- plenty of tools build one at runtime and that is not this block's to erase.
 local function onManifest(req)
   if req.is_error or req.response_code ~= 200 then
     return once("_ANSWER", "offline", LABEL .. "could not reach its repository ("
@@ -1980,9 +2157,8 @@ local function onManifest(req)
   if rank(version) <= rank(TOOL_VERSION) then            -- nothing to fetch
     return once("_ANSWER", "current", LABEL .. "up to date at v" .. TOOL_VERSION)
   end
-  local notes, wantsXml = whatsNew(m), m.stable.xml == true
-  WebRequest.get(url("tool.lua"),
-                 function(r) onPayload(r, version, notes, wantsXml) end)
+  local notes = whatsNew(m)
+  WebRequest.get(url("tool.lua"), function(r) onPayload(r, version, notes) end)
 end
 
 -- Seconds to hold this object's request for: over 0, under SPREAD, the same
@@ -2004,6 +2180,18 @@ function Updater_check()
   pcall(function() Global.setVar(GLOBAL_KEY .. "_ANSWER", "") end)
   Wait.time(function() WebRequest.get(url("manifest.json"), onManifest) end,
             stagger())
+end
+
+-- The tool's UI, spliced in above this block as TOOL_XML by scripts/validate.py
+-- and applied here rather than kept on the object. One file, one write: an
+-- update cannot land half a tool, because there are no halves. The tool's own
+-- onLoad runs first, so whatever it registers - the custom assets a layout
+-- names by image="", for one - is in place before the layout that wants them.
+-- A tool with no UI declares no TOOL_XML and this does nothing at all.
+local toolLoad = onLoad
+function onLoad(saved)
+  if type(toolLoad) == "function" then toolLoad(saved) end
+  if TOOL_XML then self.UI.setXml(TOOL_XML) end   -- WRITE: the only UI write
 end
 
 -- Chat reaches object scripts, not just the Global one, so every copy on the

@@ -14,7 +14,8 @@ python scripts/validate.py --fix
 ```
 tools/turn-timer/
   tool.lua        the object script, exactly as it runs in game
-  tool.xml        the XML UI, if the tool has one - optional
+  tool.xml        the XML UI, if the tool has one - optional. It is
+                  spliced into tool.lua; nothing downloads it.
   manifest.json   {"stable": {"version": "1.0.0", "notes": ["First release."]}}
 ```
 
@@ -25,8 +26,9 @@ onto the end and all four config values filled in - `TOOL_ID` and
 entire release: no registry to edit, nothing to regenerate, no code to change
 anywhere else.
 
-`--fix` only ever writes the block, those four values and the signature line on
-`tool.xml`. The code above the divider is never touched, running it twice
+`--fix` only ever writes the block, those four values, the signature line on
+`tool.xml` and the copy of it spliced into `tool.lua`. The tool's own code is
+never touched, running it twice
 changes nothing the second time, and on a folder that is already correct it
 changes nothing at all. With no manifest it writes a starter one at `1.0.0` and
 says to put real notes in it. The one thing it will not do is decide a version:
@@ -36,38 +38,43 @@ release or a typo.
 
 ## Tools with an XML UI
 
-A tool is always a script, and sometimes an XML UI beside it. Put that file in
-the same folder as `tool.xml` and run `--fix`, which does two things with it:
+A tool is always exactly one file. Where it has an on-screen UI, that layout
+is authored as `tool.xml` in the same folder, and `--fix` does two things with
+it:
 
-- stamps `<!-- TTS-SELFUPDATE:<tool-id> -->` onto its first line. That is the
-  gate a client checks a downloaded UI against, exactly as `TOOL_SIGNATURE` is
-  checked in the script.
-- writes `"xml": true` into the manifest's `stable` entry. That is what makes a
-  client ask for the file at all.
+- stamps `<!-- TTS-SELFUPDATE:<tool-id> -->` onto its first line, so a loose
+  file says which tool it belongs to.
+- splices it into `tool.lua` between the tool's code and the block, as
 
-```json
-{
-  "stable": {
-    "version": "1.2.0",
-    "notes": ["The panel now remembers which tab was open."],
-    "xml": true
-  }
-}
-```
+  ```lua
+  local TOOL_XML = [[
+  <!-- TTS-SELFUPDATE:my-tool -->
+  <Panel>...</Panel>
+  ]]
+  ```
 
-Both halves arrive as one update or not at all. The UI is fetched only once the
-script has passed its own gates, and a UI that fails either of its two — too
-short, or unsigned — takes the script down with it, so an object is never left
-running new code against an old layout.
+  The bracket level goes up on its own if the layout contains `]]`, so nothing
+  in a UI can end the string early.
 
-The flag and the file have to agree, and `validate.py` fails if they do not: a
-manifest that publishes a UI whose file is not there would break every update,
-with nothing said in game. A release that mentions no XML at all leaves
-whatever is on the object alone — plenty of tools build their own UI at
-runtime, and none of that is the updater's to erase.
+The block applies that string with `self.UI.setXml` when the object loads, and
+nothing is ever written to the object's XML field. **The consequence worth
+knowing: a tool cannot address its own UI in the frame it loads in.** Do the
+first `setValue` or `setAttribute` a frame or two later —
+[`tools/test-tool/tool.lua`](tools/test-tool/tool.lua) uses
+`Wait.frames(refresh, 2)`, and the coherency tool does the same.
 
-[`tools/test-tool/tool.xml`](tools/test-tool/tool.xml) is a minimal one, beside
-the script it belongs to.
+The block calls the tool's `onLoad` *before* applying the layout, so anything
+the layout depends on is already in place — custom assets named by `image=""`,
+for one, which the tool registers with `setCustomAssets` on load.
+
+This is why an update cannot land half a tool: there are no halves. One file
+is fetched, checked and written. A tool with no `tool.xml` splices nothing and
+the block touches no UI at all, which leaves tools that build their own at
+runtime alone.
+
+`tool.xml` is source, not something published. It stays in the folder because
+it is the copy that gets edited and reviewed; no client ever asks for it.
+[`tools/test-tool/tool.xml`](tools/test-tool/tool.xml) is a minimal one.
 
 ## Starting from a script outside the repo
 
@@ -83,7 +90,7 @@ when it is done. What it writes is byte-for-byte what dropping the folder in
 and running `--fix` would have produced - both go through the same code.
 
 A tool with an XML UI passes it as `--xml`, and the file is copied in as
-`tool.xml`, signed, and published in the manifest in one step:
+`tool.xml`, signed, and spliced into `tool.lua` in one step:
 
 ```bash
 python scripts/new-tool.py my-tool my-script.lua --xml my-ui.xml
@@ -96,19 +103,20 @@ script loads, so there is no line to add to `onLoad` and no convention to
 follow. Paste it at the bottom and it is done.
 
 One requirement, and it is on the shape of the script rather than its
-contents: it must define `function onLoad`, because that is one of the four
-gates every client applies to a download. `new-tool.py` warns if it does not,
+contents: it must define `function onLoad`. The block brings an onLoad of its
+own, which is what applies the layout, but a script with none of its own never
+sets anything up when the object loads. `new-tool.py` warns if it does not,
 and `validate.py` refuses to publish a folder whose script has none.
 
-Two optional functions, if you want them:
+Two optional functions, where a tool wants them:
 
 ```lua
 Updater_check()                              -- one check for this object, now
 local from, now = Updater_stateVersion(state)  -- which version wrote the save
 ```
 
-`Updater_check()` is what the chat command calls. You can call it yourself from
-anywhere — a button on your own tool, or from Global with
+`Updater_check()` is what the chat command calls. A tool can call it from
+anywhere as well — one of its own buttons, or from Global with
 `obj.call("Updater_check")`.
 
 ## By hand
@@ -130,12 +138,13 @@ set `TOOL_ID` / `TOOL_VERSION` / `TOOL_SIGNATURE` in the pasted block, and write
 }
 ```
 
-A tool with a UI adds `tool.xml` to the folder, `<!-- TTS-SELFUPDATE:my-tool -->`
-to its first line, and `"xml": true` to the `stable` entry.
+A tool with a UI adds `tool.xml` to the folder and
+`<!-- TTS-SELFUPDATE:my-tool -->` to its first line. Splicing it into
+`tool.lua` by hand is possible but pointless — run `--fix`.
 
 [`tools/test-tool/`](tools/test-tool/) is a real, published tool with the block
-already integrated, and it carries both halves — script, UI and manifest — so
-it doubles as the starting shape to copy.
+already integrated, and it has a UI as well as a script, so it doubles as the
+starting shape to copy.
 
 ## The config values
 
@@ -150,8 +159,8 @@ it doubles as the starting shape to copy.
 `--fix` fills in the first four for you. You never edit `SELF_UPDATE` in the
 repo — it exists for the person on the other end.
 
-If your tool saves state and you ever need to migrate it, one optional line
-gives you the version that wrote the save:
+Where a tool saves state and that state ever needs migrating, one optional
+line reports the version that wrote the save:
 
 ```lua
 local from, now = Updater_stateVersion(state)
@@ -235,14 +244,14 @@ Nothing is configured per tool. Both URLs are derived from the folder name:
 ```
 https://raw.githubusercontent.com/Antaresx101/TTS_tools/main/tools/<tool-id>/manifest.json
 https://raw.githubusercontent.com/Antaresx101/TTS_tools/main/tools/<tool-id>/tool.lua
-https://raw.githubusercontent.com/Antaresx101/TTS_tools/main/tools/<tool-id>/tool.xml
 ```
 
 That is why one repo can serve any number of independent tools with zero setup:
-a new folder under `tools/` *is* a new endpoint. All three URLs are plain
-readable literals — paste one into a browser and you see exactly what an object
-fetches. The third is only ever requested when the manifest says `"xml": true`,
-so a tool without a UI makes two requests and no more.
+a new folder under `tools/` *is* a new endpoint. Both URLs are plain readable
+literals — paste one into a browser and it shows exactly what an object
+fetches.
+There is no third: every tool makes exactly two requests, whether it has a UI
+or not, because the UI is part of the second one.
 
 A `?ts=<timestamp>` is added to every request, because raw.githubusercontent
 caches for about five minutes and a fresh release would otherwise be invisible
@@ -257,8 +266,8 @@ and `math.random` is left alone for whatever the tool above is doing with dice.
 
 ## Releasing a new version
 
-1. Edit `tools/<tool-id>/tool.lua` — the tool's own code, above the divider —
-   and `tool.xml` if it has one.
+1. Edit `tools/<tool-id>/tool.lua` — the tool's own code, above the spliced
+   layout — and `tool.xml` if it has one.
 2. Bump `stable.version` in `manifest.json`. That file is what the repo
    publishes; `tool.lua` is made to agree with it in step 4.
 3. Move the outgoing release to the top of `history`, then rewrite `notes` for
@@ -267,8 +276,10 @@ and `math.random` is left alone for whatever the tool above is doing with dice.
 4. `python scripts/validate.py --fix`
 5. Commit and push. Objects pick it up the next time a host types `!update`.
 
-The XML has no version of its own and needs none: it rides along with the
-script, so a UI change is an ordinary release like any other.
+The XML has no version of its own and needs none: it is part of the script by
+the time anything is published, so a UI change is an ordinary release like any
+other. Step 4 is what puts it there — edit `tool.xml` and skip `--fix`, and
+the published file still carries the old layout. `validate.py` fails on that.
 
 The versions disagreeing is the thing that used to go wrong here. If the
 manifest is ahead of the file, every client downloads the payload every time
@@ -295,8 +306,8 @@ is exactly one script write and it targets `self`, the block's one UI write
 targets `self` too, `Global` is touched by exactly the three latch lines and
 nothing else, `SELF_UPDATE` ships as `true`, and the release notes and
 `history` are shaped the way the chat message needs. Where
-there is a `tool.xml`, it is checked against the same two gates a client puts
-it through and against the manifest's `"xml"` flag. It is standard library
+there is a `tool.xml`, the copy spliced into `tool.lua` is checked against it
+byte for byte, so a stale layout cannot be published. It is standard library
 only, and it runs on every push through
 [`.github/workflows/validate.yml`](.github/workflows/validate.yml) as well, so
 a broken folder cannot reach `main` unnoticed.

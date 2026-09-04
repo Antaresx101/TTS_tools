@@ -18,11 +18,11 @@ block over any copy that has drifted. It never touches the code above the
 block, and it never decides a version: the manifest says what is
 published, and tool.lua is made to agree with it.
 
-A tool that also has an XML UI keeps it in the same folder as tool.xml. That
-file gets the tool's signature comment stamped onto its first line, and the
-manifest gets "xml": true so clients know to fetch it. Both halves are checked
-here for the same reason: a UI the client refuses at its gate takes the whole
-update down with it, and nothing in game reports that either.
+A tool that also has an XML UI authors it as tool.xml in the same folder. That
+file is not published - --fix splices it into tool.lua as a Lua long string,
+and the block applies it at load - so what is checked here is that the spliced
+copy is still the file beside it. Nothing fetches tool.xml, so a tool is one
+file and an update cannot land half of one.
 """
 
 import argparse
@@ -33,7 +33,7 @@ import sys
 
 from block import (SEMVER, TOOLS, UPDATER, BlockError, block_of, canonical,
                    head_of, literal, signature_for, stamp, stamp_xml,
-                   without_config, write, xml_comment)
+                   without_config, write, xml_comment, xml_of)
 
 # Release notes land in everyone's chat window at once, so they are held to a
 # size. None of these are enforced in game - the block prints whatever it is
@@ -79,9 +79,10 @@ def check_one_write(where, text):
         fail(where, "the script write does not target self",
              "  line %d: %s" % writes[0])
 
-    # The UI write gets the same treatment, but only inside the block. A tool
-    # driving its own XML at runtime is ordinary and harmless, so the count
-    # cannot be taken across the whole file the way the script write is.
+    # The UI write gets the same treatment, but only inside the block: it is
+    # the line that applies the spliced layout at load. A tool driving its own
+    # XML at runtime as well is ordinary and harmless, so the count cannot be
+    # taken across the whole file the way the script write is.
     block = block_of(text) or text
     ui = [ln.strip() for ln in block.splitlines() if "UI.setXml(" in ln]
     if len(ui) != 1:
@@ -208,26 +209,25 @@ def check_history(where, manifest, current):
     return None
 
 
-def check_ui(where, path, tool_id, minimum):
-    """A tool's tool.xml against the two gates a client puts it through.
+def check_ui(where, path, tool_id):
+    """A tool's tool.xml, which is source rather than something published.
 
-    There is no version in here and nothing to keep in step with the manifest:
-    the UI rides along with the script it belongs to, so all that matters is
-    that a client will accept it. One that will not takes the script down with
-    it, and the object stays on the old version with nothing said in game.
+    There is no version in here and nothing to keep in step with the manifest,
+    and no client ever downloads it: it is spliced into tool.lua, and
+    check_payload is where that copy is held to the file. What is left is
+    whether the thing being spliced is a layout at all.
     """
     text = path.read_text(encoding="utf-8")
-    size = len(text.encode("utf-8"))
-    if size < minimum:
-        fail(where, "%d bytes, under the MIN_XML_BYTES gate of %d in tool.lua, "
-                    "so clients would reject it" % (size, minimum))
+    if not text.strip():
+        return fail(where, "is empty, so the tool would splice in no layout")
     if signature_for(tool_id) not in text:
-        fail(where, "carries no signature, so every client refuses it",
+        fail(where, "carries no signature saying which tool it belongs to",
              "  put %s on the first line, or run: python scripts/validate.py "
              "--fix" % xml_comment(tool_id))
     if not text.lstrip().startswith("<"):
         fail(where, "does not start with a tag or a comment, so it is not the "
                     "XML that UI.setXml expects")
+    return None
 
 
 def check_payload(where, path, published, tool_id, repo_base, canonical):
@@ -251,14 +251,34 @@ def check_payload(where, path, published, tool_id, repo_base, canonical):
     elif signature not in text:
         fail(where, "does not contain its own signature %r" % signature)
 
-    # Every client refuses a payload that defines no onLoad, and says so only
-    # in the host console, so the object sits on its old version looking fine.
-    # The search is on the tool's own code rather than the whole file: the
-    # block quotes the same string in the gate itself, and would match it.
+    # Not a runtime gate. The block brings an onLoad of its own, so a tool
+    # without one loads and updates perfectly well - it simply never sets
+    # anything up, which is a mistake far more often than it is a decision,
+    # and nothing in game would say so.
     if "function onLoad" not in head_of(text):
-        fail(where, "defines no onLoad above the block, which is one of the "
-                    "four gates, so every client would refuse this file",
-             "  nothing in game reports it - copies simply never update")
+        fail(where, "defines no onLoad, so nothing in the tool runs when the "
+                    "object loads",
+             "  the block supplies one for the layout, but it calls nothing")
+
+    # The whole of publishing a UI now: the layout inside the file has to be
+    # the file beside it. A stale splice is the drift version drift used to
+    # be - it installs cleanly, looks fine, and shows the wrong layout.
+    xml = path.parent / "tool.xml"
+    spliced = xml_of(text)
+    if xml.exists():
+        wanted = xml.read_text(encoding="utf-8").rstrip("\n") + "\n"
+        if spliced is None:
+            fail(where, "tool.xml is here but no layout is spliced into this "
+                        "file, so the tool would load with no UI",
+                 "  run: python scripts/validate.py --fix")
+        elif spliced != wanted:
+            fail(where, "the spliced layout is not what tool.xml says",
+                 "  the object would show a stale UI. Run: python "
+                 "scripts/validate.py --fix")
+    elif spliced is not None:
+        fail(where, "splices a layout that has no tool.xml beside it",
+             "  nothing can edit or review it. Restore the file, or drop the "
+             "TOOL_XML literal.")
 
     minimum = int(literal(text, "MIN_BYTES") or 0)
     size = len(text.encode("utf-8"))
@@ -294,18 +314,18 @@ def repair_ui(xml, tool_id):
     return ["stamped %s with %s" % (xml.name, xml_comment(tool_id))]
 
 
-def publish_ui(manifest_path, manifest, folder):
-    """Set "xml": true once tool.xml is in the folder, so clients fetch it.
+def retire_xml_flag(manifest_path, manifest):
+    """Drop the old "xml": true, which no longer means anything.
 
-    Only in that direction. A manifest that publishes a UI whose file is not
-    there is left exactly as it is: clearing the flag would quietly unpublish
-    a UI that is merely uncommitted, and only the author knows which it is.
+    It used to be what made a client fetch tool.xml as a second request. There
+    is no second request now, and leaving the flag in would have old copies
+    still asking for a file whose contents they already have in the payload.
     """
-    if not (folder / "tool.xml").exists() or manifest["stable"].get("xml") is True:
+    if "xml" not in manifest.get("stable", {}):
         return []
-    manifest["stable"]["xml"] = True
+    del manifest["stable"]["xml"]
     write(manifest_path, json.dumps(manifest, indent=2) + "\n")
-    return ['set "xml": true in manifest.json, from tool.xml being here']
+    return ['dropped "xml" from manifest.json; the layout ships inside tool.lua']
 
 
 def repair(folder):
@@ -337,7 +357,7 @@ def repair(folder):
         return changed
 
     changed += repair_ui(folder / "tool.xml", tool_id)
-    changed += publish_ui(manifest_path, manifest, folder)
+    changed += retire_xml_flag(manifest_path, manifest)
 
     text = lua.read_text(encoding="utf-8")
     declared = literal(text, "TOOL_VERSION")
@@ -348,6 +368,13 @@ def repair(folder):
              "  bump the manifest to release it, or lower TOOL_VERSION - only "
              "the author knows which")
         return changed
+
+    xml_path = folder / "tool.xml"
+    xml = xml_path.read_text(encoding="utf-8") if xml_path.exists() else None
+    if xml is not None and xml_of(text) != xml.rstrip("\n") + "\n":
+        changed.append("spliced tool.xml into tool.lua as TOOL_XML")
+    elif xml is None and xml_of(text) is not None:
+        changed.append("removed the spliced layout; there is no tool.xml here")
 
     embedded = block_of(text)
     if embedded is None:
@@ -364,7 +391,7 @@ def repair(folder):
         changed.append("set REPO_BASE from updater/updater.lua")
 
     try:
-        fixed = stamp(text, tool_id, published)
+        fixed = stamp(text, tool_id, published, xml)
     except BlockError as exc:
         fail("tools/%s/tool.lua" % tool_id, str(exc))
         return changed
@@ -408,26 +435,17 @@ def check_tool(folder, canonical, repo_base):
 
     check_payload("%s/tool.lua" % where, lua, version, name, repo_base, canonical)
 
-    # "xml": true is the whole of publishing a UI - it is what makes a client
-    # ask for tool.xml at all. The flag and the file have to agree, or an
-    # update either installs no UI or fails outright, silently both ways.
-    xml = folder / "tool.xml"
-    declared = entry.get("xml", False)
-    if not isinstance(declared, bool):
-        fail("%s/manifest.json" % where, '"xml" must be true or false, got %r'
-             % (declared,))
-    elif declared and not xml.exists():
-        fail(where, 'manifest.json publishes an XML UI, but tool.xml is missing',
-             "  every update would fail at the UI gate. Commit the file, or "
-             'drop "xml" from the manifest.')
-    elif xml.exists() and not declared:
-        fail(where, 'tool.xml is here but manifest.json does not publish it, so '
-                    'no client ever asks for it',
+    # Nothing in a manifest describes the UI any more: the layout is part of
+    # the payload, so a release either carries one or does not, and the file
+    # that says which is tool.lua itself.
+    if "xml" in entry:
+        fail("%s/manifest.json" % where, '"xml" no longer does anything - the '
+             'layout ships inside tool.lua',
              "  run: python scripts/validate.py --fix")
 
+    xml = folder / "tool.xml"
     if xml.exists():
-        minimum = int(literal(lua.read_text(encoding="utf-8"), "MIN_XML_BYTES") or 0)
-        check_ui("%s/tool.xml" % where, xml, name, minimum)
+        check_ui("%s/tool.xml" % where, xml, name)
     return None
 
 
