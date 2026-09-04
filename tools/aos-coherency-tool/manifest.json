@@ -1,41 +1,10 @@
 {
   "stable": {
-    "version": "1.2.1",
+    "version": "1.0.0",
     "notes": [
-      "The version on the credit strip no longer has its last character clipped off."
+      "Initial releasae of the tool."
     ]
   },
   "history": [
-    {
-      "version": "1.2.0",
-      "notes": [
-        "The panel now comes up painted: seat colours and the version line were being applied before the layout existed, which did nothing and said nothing."
-      ]
-    },
-    {
-      "version": "1.1.0",
-      "notes": [
-        "The on-screen panel now travels inside the script instead of being fetched separately, so an update can no longer install one half of the tool.",
-        "It arrives with the update it belongs to, every time, rather than sometimes not at all."
-      ]
-    },
-    {
-      "version": "1.0.2",
-      "notes": [
-        "The on-screen panel now actually arrives with the update. The object was reloading before the layout had finished being written."
-      ]
-    },
-    {
-      "version": "1.0.1",
-      "notes": [
-        "Fixed updating itself: a release with an on-screen panel stopped halfway with an error and left the panel on the old layout."
-      ]
-    },
-    {
-      "version": "1.0.0",
-      "notes": [
-        "Initial release of the tool."
-      ]
-    }
   ]
 }
