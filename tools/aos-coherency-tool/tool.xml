@@ -56,7 +56,7 @@
               tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
 </Defaults>
 
-<Panel id="root" position="665 -95 0" rotation="0 0 0"
+<Panel id="root" position="665 -95 -500" rotation="0 0 0"
        scale="1 1 1" width="1330" height="220"
        color="#293133" padding="3 3 3 3">
 

@@ -2036,7 +2036,7 @@ local TOOL_XML = [[
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "aos-coherency-tool"
-local TOOL_VERSION   = "1.2.1"                 -- bumped with manifest.json
+local TOOL_VERSION   = "1.0.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:aos-coherency-tool"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
