@@ -17,6 +17,12 @@ fills the config in from the folder name and the manifest, and re-pastes the
 block over any copy that has drifted. It never touches the code above the
 block, and it never decides a version: the manifest says what is
 published, and tool.lua is made to agree with it.
+
+A tool that also has an XML UI keeps it in the same folder as tool.xml. That
+file gets the tool's signature comment stamped onto its first line, and the
+manifest gets "xml": true so clients know to fetch it. Both halves are checked
+here for the same reason: a UI the client refuses at its gate takes the whole
+update down with it, and nothing in game reports that either.
 """
 
 import argparse
@@ -25,9 +31,9 @@ import json
 import re
 import sys
 
-from block import (ROOT, SEMVER, TOOLS, UPDATER, BlockError, block_of,
-                   canonical, literal, signature_for, stamp, without_config,
-                   write)
+from block import (SEMVER, TOOLS, UPDATER, BlockError, block_of, canonical,
+                   literal, signature_for, stamp, stamp_xml, without_config,
+                   write, xml_comment)
 
 # Release notes land in everyone's chat window at once, so they are held to a
 # size. None of these are enforced in game - the block prints whatever it is
@@ -73,10 +79,20 @@ def check_one_write(where, text):
         fail(where, "the script write does not target self",
              "  line %d: %s" % writes[0])
 
+    # The UI write gets the same treatment, but only inside the block. A tool
+    # driving its own XML at runtime is ordinary and harmless, so the count
+    # cannot be taken across the whole file the way the script write is.
+    block = block_of(text) or text
+    ui = [ln.strip() for ln in block.splitlines() if "setXmlUI" in ln]
+    if len(ui) != 1:
+        fail(where, "expected exactly 1 UI write in the block, found %d" % len(ui),
+             "\n".join("  " + u for u in ui))
+    elif not re.search(r"\bself\.setXmlUI\s*\(", ui[0]):
+        fail(where, "the UI write does not target self", "  " + ui[0])
+
     # Global is touched for one thing: the latch that stops three copies of a
     # tool saying the same thing three times. Docs tell a suspicious mod author
     # to grep for it, so these are the only three lines that grep may find.
-    block = block_of(text) or text
     uses = [ln.strip() for ln in block.splitlines()
             if "Global." in ln and not ln.strip().startswith("--")]
     stray = [u for u in uses if not any(a in u for a in GLOBAL_CALLS)]
@@ -180,7 +196,7 @@ def check_history(where, manifest, current):
     stale = [v for r, v in ranks if r >= rank(current)]
     if stale:
         fail(where, "history holds v%s, which is not older than the published "
-                    "v%s. Move the outgoing release into history when you bump, "
+                    "v%s. Move the outgoing release into history on a bump, "
                     "not the incoming one." % (stale[0], current))
 
     total = sum(len(as_list(e.get("notes"))) for e in [manifest["stable"]] + history)
@@ -190,6 +206,28 @@ def check_history(where, manifest, current):
                     "chat message. Trim the tail of history - nobody needs the "
                     "v1.0.1 line two years on." % total)
     return None
+
+
+def check_ui(where, path, tool_id, minimum):
+    """A tool's tool.xml against the two gates a client puts it through.
+
+    There is no version in here and nothing to keep in step with the manifest:
+    the UI rides along with the script it belongs to, so all that matters is
+    that a client will accept it. One that will not takes the script down with
+    it, and the object stays on the old version with nothing said in game.
+    """
+    text = path.read_text(encoding="utf-8")
+    size = len(text.encode("utf-8"))
+    if size < minimum:
+        fail(where, "%d bytes, under the MIN_XML_BYTES gate of %d in tool.lua, "
+                    "so clients would reject it" % (size, minimum))
+    if signature_for(tool_id) not in text:
+        fail(where, "carries no signature, so every client refuses it",
+             "  put %s on the first line, or run: python scripts/validate.py "
+             "--fix" % xml_comment(tool_id))
+    if not text.lstrip().startswith("<"):
+        fail(where, "does not start with a tag or a comment, so it is not the "
+                    "XML that setXmlUI expects")
 
 
 def check_payload(where, path, published, tool_id, repo_base, canonical):
@@ -230,12 +268,44 @@ def check_payload(where, path, published, tool_id, repo_base, canonical):
     check_switch(where, text)
 
 
+def repair_ui(xml, tool_id):
+    """Stamp an XML UI with the signature, if there is one. LF, as ever.
+
+    The counterpart to what stamp() does to the script: the only edit is the
+    signature comment on the first line, and a file already carrying the right
+    one comes back untouched.
+    """
+    if not xml.exists():
+        return []
+    text = xml.read_text(encoding="utf-8")
+    fixed = stamp_xml(text, tool_id)
+    if fixed == text:
+        return []
+    write(xml, fixed)
+    return ["stamped %s with %s" % (xml.name, xml_comment(tool_id))]
+
+
+def publish_ui(manifest_path, manifest, folder):
+    """Set "xml": true once tool.xml is in the folder, so clients fetch it.
+
+    Only in that direction. A manifest that publishes a UI whose file is not
+    there is left exactly as it is: clearing the flag would quietly unpublish
+    a UI that is merely uncommitted, and only the author knows which it is.
+    """
+    if not (folder / "tool.xml").exists() or manifest["stable"].get("xml") is True:
+        return []
+    manifest["stable"]["xml"] = True
+    write(manifest_path, json.dumps(manifest, indent=2) + "\n")
+    return ['set "xml": true in manifest.json, from tool.xml being here']
+
+
 def repair(folder):
     """Make one tool folder publishable, in place. Returns what it changed.
 
-    Only ever rewrites the block and the four config values, and only ever
-    downwards from the manifest: if tool.lua claims a version the manifest does
-    not publish, that is a decision, not a typo, so it is reported instead.
+    Only ever rewrites the block, the four config values and the signature on
+    the UI, and only ever downwards from the manifest: if tool.lua claims a
+    version the manifest does not publish, that is a decision, not a typo, so
+    it is reported instead.
     """
     tool_id, changed = folder.name, []
     manifest_path, lua = folder / "manifest.json", folder / "tool.lua"
@@ -246,8 +316,8 @@ def repair(folder):
         write(manifest_path, json.dumps(
             {"stable": {"version": "1.0.0", "notes": ["First release."]}},
             indent=2) + "\n")
-        changed.append("wrote manifest.json at 1.0.0 - put real notes in it "
-                       "before you push")
+        changed.append("wrote manifest.json at 1.0.0 - it needs real notes "
+                       "before the push")
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -257,6 +327,9 @@ def repair(folder):
     if not isinstance(published, str) or not SEMVER.match(published):
         return changed
 
+    changed += repair_ui(folder / "tool.xml", tool_id)
+    changed += publish_ui(manifest_path, manifest, folder)
+
     text = lua.read_text(encoding="utf-8")
     declared = literal(text, "TOOL_VERSION")
     if declared and SEMVER.match(declared) and rank(declared) > rank(published):
@@ -264,12 +337,12 @@ def repair(folder):
              "tool.lua declares v%s but manifest.json publishes v%s, so --fix "
              "left both alone" % (declared, published),
              "  bump the manifest to release it, or lower TOOL_VERSION - only "
-             "you know which")
+             "the author knows which")
         return changed
 
     embedded = block_of(text)
     if embedded is None:
-        changed.append("pasted updater/updater.lua onto the end of your script")
+        changed.append("pasted updater/updater.lua onto the end of the script")
     elif without_config(embedded) != without_config(canonical()):
         changed.append("re-pasted updater/updater.lua over a drifted copy")
     if declared != published:
@@ -291,24 +364,6 @@ def repair(folder):
         if not changed:                  # whitespace, ordering, anything else
             changed.append("rewrote tool.lua around the current block")
     return changed
-
-
-def repair_example(path):
-    """The same treatment for updater/example-tool.lua, which has no manifest.
-
-    It is the file people copy as a starting shape, so it must not be left
-    pointing at the repo it was forked from.
-    """
-    text = path.read_text(encoding="utf-8")
-    version = literal(text, "TOOL_VERSION") or "1.0.0"
-    try:
-        fixed = stamp(text, "example-tool", version)
-    except BlockError as exc:
-        return fail("updater/example-tool.lua", str(exc)) or []
-    if fixed == text:
-        return []
-    write(path, fixed)
-    return ["re-pasted updater/updater.lua and filled in the config"]
 
 
 def check_tool(folder, canonical, repo_base):
@@ -343,6 +398,27 @@ def check_tool(folder, canonical, repo_base):
                            % version)
 
     check_payload("%s/tool.lua" % where, lua, version, name, repo_base, canonical)
+
+    # "xml": true is the whole of publishing a UI - it is what makes a client
+    # ask for tool.xml at all. The flag and the file have to agree, or an
+    # update either installs no UI or fails outright, silently both ways.
+    xml = folder / "tool.xml"
+    declared = entry.get("xml", False)
+    if not isinstance(declared, bool):
+        fail("%s/manifest.json" % where, '"xml" must be true or false, got %r'
+             % (declared,))
+    elif declared and not xml.exists():
+        fail(where, 'manifest.json publishes an XML UI, but tool.xml is missing',
+             "  every update would fail at the UI gate. Commit the file, or "
+             'drop "xml" from the manifest.')
+    elif xml.exists() and not declared:
+        fail(where, 'tool.xml is here but manifest.json does not publish it, so '
+                    'no client ever asks for it',
+             "  run: python scripts/validate.py --fix")
+
+    if xml.exists():
+        minimum = int(literal(lua.read_text(encoding="utf-8"), "MIN_XML_BYTES") or 0)
+        check_ui("%s/tool.xml" % where, xml, name, minimum)
     return None
 
 
@@ -353,7 +429,7 @@ def main():
     parser.add_argument("--fix", action="store_true",
                         help="first paste in the current block and fill the "
                              "config from the folder name and manifest, so a "
-                             "folder you dropped into tools/ becomes a "
+                             "folder dropped into tools/ becomes a "
                              "publishable tool")
     args = parser.parse_args()
 
@@ -366,29 +442,14 @@ def main():
     check_one_write("updater/updater.lua", canon)
     check_switch("updater/updater.lua", canon)
 
-    example = ROOT / "updater" / "example-tool.lua"
     folders = sorted(p for p in TOOLS.iterdir() if p.is_dir()) if TOOLS.is_dir() else []
 
     if args.fix:
         done = [("tools/" + f.name, line) for f in folders for line in repair(f)]
-        if example.exists():
-            done += [("updater/example-tool.lua", line)
-                     for line in repair_example(example)]
         for where, line in done:
             print("%s: %s" % (where, line))
         if done:
             print()
-
-    if example.exists():
-        text = example.read_text(encoding="utf-8")
-        check_block_matches("updater/example-tool.lua", text, canon)
-        check_one_write("updater/example-tool.lua", text)
-        check_switch("updater/example-tool.lua", text)
-        if literal(text, "REPO_BASE") != repo_base:
-            fail("updater/example-tool.lua",
-                 "REPO_BASE differs from updater/updater.lua, so the file "
-                 "people copy as a starting shape points at another repository",
-                 "  run: python scripts/validate.py --fix")
 
     for folder in folders:
         check_tool(folder, canon, repo_base)

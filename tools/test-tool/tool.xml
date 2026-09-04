@@ -1,0 +1,32 @@
+<!-- TTS-SELFUPDATE:test-tool -->
+<!--
+  The XML UI half of test-tool: a tool with a UI keeps it beside tool.lua
+  as tool.xml, and its manifest carries "xml": true.
+  Without that flag no client ever asks for this file, so the
+  script would update on its own and the UI would stay on the old version.
+
+  The signature comment on the first line is what a client checks a downloaded
+  UI against, the same way TOOL_SIGNATURE is checked in the script. It is
+  stamped in by scripts/validate.py - -fix; nothing else is touched.
+
+  Everything with an id is filled in from tool.lua at load.-->
+<Panel position="0 0 -80" width="460" height="210" color="#101418E6"
+       outlineSize="2 2" outline="#000000FF">
+  <VerticalLayout padding="16 16 12 16" spacing="10">
+
+    <Text id="ttHeader" fontSize="24" color="#8FB8FF"
+          alignment="MiddleCenter">test-tool</Text>
+
+    <Text id="ttTotal" fontSize="64" color="#FFFFFF"
+          alignment="MiddleCenter">20</Text>
+
+    <HorizontalLayout spacing="8" preferredHeight="60">
+      <Button id="ttMinusFive" fontSize="30" onClick="ttAdjust(-5)">-5</Button>
+      <Button id="ttMinusOne"  fontSize="30" onClick="ttAdjust(-1)">-1</Button>
+      <Button id="ttPlusOne"   fontSize="30" onClick="ttAdjust(1)">+1</Button>
+      <Button id="ttPlusFive"  fontSize="30" onClick="ttAdjust(5)">+5</Button>
+      <Button id="ttReset"     fontSize="24" onClick="ttReset">Reset</Button>
+    </HorizontalLayout>
+
+  </VerticalLayout>
+</Panel>

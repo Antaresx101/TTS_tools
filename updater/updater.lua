@@ -6,6 +6,9 @@
   typing "!update" in the chat as the host will automatically update all such
   tools in the session with the newest version (if it isn´t on it already).
 
+  A tool is always a script, and sometimes an XML UI beside it. Both halves
+  are replaced together, or neither of them is.
+
   Nothing happens until you ask. Loading a mod sends no requests and changes no
   scripts, it is triggered manually always.
 ========================================================================== ]]
@@ -22,8 +25,11 @@ local TOOL_SIGNATURE = "TTS-SELFUPDATE:example-tool"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to
 -- throw out error pages and truncated bodies; any file carrying this block is
--- usually bigger than that. scripts/validate.py enforces it at publish time.
+-- usually bigger than that. MIN_XML_BYTES is the same gate for a UI file,
+-- which is legitimately a great deal smaller. scripts/validate.py enforces
+-- both at publish time.
 local MIN_BYTES     = 1024
+local MIN_XML_BYTES = 64
 local APPLY_TIMEOUT = 20                       -- seconds to wait for a safe moment
 local SPREAD        = 8                        -- seconds to smear checks across
 local CHAT_COMMAND  = "!update"                -- host types it, every copy hears
@@ -74,9 +80,10 @@ local function once(suffix, value, msg)
   broadcastToAll(msg, {0.6, 0.9, 0.6})
 end
 
--- Writes the new script, and reloads only while the object is idle. If it
--- never goes idle we still write, and the new script starts on the next load.
-local function apply(code, version, notes)
+-- Writes the new script, and the XML UI beside it when the release carries
+-- one, and reloads only while the object is idle. If it never goes idle we
+-- still write, and the new script starts on the next load.
+local function apply(code, xml, version, notes)
   local function idle()
     return self.held_by_color == nil and not self.isSmoothMoving()
        and not self.spawning
@@ -86,7 +93,8 @@ local function apply(code, version, notes)
     pcall(function()
       if type(onSave) == "function" then self.script_state = onSave() end
     end)
-    self.setLuaScript(code)          -- WRITE: the only script write, on self
+    self.setLuaScript(code)              -- WRITE: the only script write, on self
+    if xml then self.setXmlUI(xml) end   -- WRITE: the only UI write, on self
     once("", version, LABEL .. "updated to v" .. version .. notes)
     if withReload then
       self.reload()                  -- self is invalid after this line
@@ -98,10 +106,41 @@ local function apply(code, version, notes)
                  function() commit(false) end)
 end
 
-local function onPayload(req, version, notes)
+-- The loop guard, over both halves at once: writing back what is already
+-- running would reload forever. A release that changes only the UI still has
+-- something to install, so the script matching on its own is not enough.
+local function install(code, xml, version, notes)
+  if code == self.getLuaScript() and (xml == nil or xml == self.getXmlUI()) then
+    return report("already running this code")
+  end
+  apply(code, xml, version, notes)
+end
+
+-- The UI half, fetched only for a release whose manifest says it has one, and
+-- gated the same way: long enough not to be an error page, and carrying the
+-- signature in an XML comment. A failure here drops the script with it, so
+-- half a tool is never installed.
+local function onXml(req, code, version, notes)
+  if req.is_error or req.response_code ~= 200 then
+    return report("rejected: no UI to go with the script ("
+                  .. tostring(req.error or req.response_code) .. ")")
+  end
+  local xml = req.text or ""
+  if #xml < MIN_XML_BYTES then
+    return report("rejected: UI shorter than MIN_XML_BYTES")
+  end
+  if not string.find(xml, TOOL_SIGNATURE, 1, true) then
+    return report("rejected: UI carries no TOOL_SIGNATURE")
+  end
+  install(code, xml, version, notes)
+end
+
+local function onPayload(req, version, notes, wantsXml)
   if req.is_error or req.response_code ~= 200 then return end   -- silently
   local code = req.text or ""
-  -- The four gates. Any failure leaves the object exactly as it is.
+  -- Three of the four gates: size, signature, and an onLoad to come back to.
+  -- The loop guard is the fourth and waits until both halves are in hand.
+  -- Any failure leaves the object exactly as it is.
   if #code < MIN_BYTES then return report("rejected: shorter than MIN_BYTES") end
   if not string.find(code, TOOL_SIGNATURE, 1, true) then
     return report("rejected: TOOL_SIGNATURE missing")
@@ -109,15 +148,16 @@ local function onPayload(req, version, notes)
   if not string.find(code, "function onLoad", 1, true) then
     return report("rejected: defines no onLoad")
   end
-  -- Also the loop guard: writing identical code would reload forever.
-  if code == self.getLuaScript() then return report("already running this code") end
-  apply(code, version, notes)
+  if not wantsXml then return install(code, nil, version, notes) end
+  WebRequest.get(url("tool.xml"), function(r) onXml(r, code, version, notes) end)
 end
 
 -- Answers: the repository is not there (offline, blocked, moved, private, 404),
 -- or nothing needs fetching because this copy is the published one.
 -- Once per tool per asking, either way. A manifest that arrives but will not
 -- parse goes to the host console instead: the repository is alive so it´s on that author.
+-- A release that declares no UI leaves whatever is on the object alone, since
+-- plenty of tools build one at runtime and that is not this block's to erase.
 local function onManifest(req)
   if req.is_error or req.response_code ~= 200 then
     return once("_ANSWER", "offline", LABEL .. "could not reach its repository ("
@@ -131,8 +171,9 @@ local function onManifest(req)
   if rank(version) <= rank(TOOL_VERSION) then            -- nothing to fetch
     return once("_ANSWER", "current", LABEL .. "up to date at v" .. TOOL_VERSION)
   end
-  local notes = whatsNew(m)
-  WebRequest.get(url("tool.lua"), function(r) onPayload(r, version, notes) end)
+  local notes, wantsXml = whatsNew(m), m.stable.xml == true
+  WebRequest.get(url("tool.lua"),
+                 function(r) onPayload(r, version, notes, wantsXml) end)
 end
 
 -- Seconds to hold this object's request for: over 0, under SPREAD, the same
@@ -144,9 +185,9 @@ local function stagger()
   return (n % (SPREAD * 100 - 1) + 1) / 100
 end
 
--- One check, now. The chat command calls this, and so can you: from your own
--- script, or from Global with obj.call("Updater_check"). Your tool needs no
--- call of its own for the command below to work.
+-- One check, now. The chat command calls this, and so can the tool above:
+-- from its own code, or from Global with obj.call("Updater_check"). The tool
+-- needs no call of its own for the command below to work.
 function Updater_check()
   if not SELF_UPDATE then return end
   -- A fresh ask, a fresh answer: every copy clears the flag in this frame,
@@ -171,7 +212,7 @@ function onChat(message, player)
 end
 
 -- Optional migration hook. Returns the version that wrote the saved state and
--- the version running now; do any migrating in your own tool, not here.
+-- the version running now; do any migrating in the tool above, not here.
 function Updater_stateVersion(saved)
   local ok, t = pcall(JSON.decode, saved or "")
   local v = (ok and type(t) == "table") and t.version or nil

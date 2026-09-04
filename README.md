@@ -19,6 +19,10 @@ asks this repository whether a newer version of *itself* exists, and if one does
 downloads the complete script, checks it, and replaces its own — and nothing
 else on the table is touched.
 
+A tool is always a script, and sometimes an XML UI beside it. Where there is
+one, both halves come down together and are installed together, or neither of
+them is — an object is never left running new code against an old layout.
+
 Every tool posts the update status in chat.
 However many copies of one tool are on the table, each of these is posted
 once.
@@ -45,9 +49,10 @@ More info:
 ## What is in here
 
 ```
-tools/       one folder per tool - tool.lua plus manifest.json.
-             This is what objects download.
-updater/     the self-update block itself, and a minimal example using it
+tools/       one folder per tool - tool.lua plus manifest.json, and tool.xml
+             for a tool with a UI. This is what objects download.
+             test-tool/ is the worked example: both halves, in one folder.
+updater/     the self-update block itself, pasted into every tool
 scripts/     validate.py to check and repair the repo, new-tool.py to scaffold
              a tool, block.py holding the one operation both of them do
 .github/     the same check, run on every push
@@ -66,7 +71,7 @@ It is one string, in one file:
 python scripts/validate.py --fix
 ```
 
-That pushes the new host out to every tool folder and to the example. Nothing
+That pushes the new host out to every tool folder. Nothing
 else in the repo names a host, and `validate.py` fails if any file disagrees
 with `updater/updater.lua` about it, so you cannot half-finish the job.
 

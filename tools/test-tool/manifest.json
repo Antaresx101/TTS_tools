@@ -1,15 +1,24 @@
 {
   "stable": {
-    "version": "1.1.2",
+    "version": "1.2.0",
     "notes": [
-      "Updates only when the host types !update in chat. Nothing is checked, downloaded or changed until somebody asks.",
-      "An update says in chat what changed, including anything from releases this copy skipped.",
-      "Several copies of the tool on one table post that between them once, instead of one identical message each.",
-      "It posts what changed, or that the tool is already current, or that the repository could not be reached.",
-      "Update checks are staggered, so many copies on one table no longer all fire at once."
-    ]
+      "The counter is now an on-screen panel as well as buttons on the object. Either one changes the total and both show it.",
+      "The panel header shows the running version, so an update is visible without opening the script.",
+      "An XML UI is now updated together with the script: both arrive as one update, or neither does."
+    ],
+    "xml": true
   },
   "history": [
+    {
+      "version": "1.1.2",
+      "notes": [
+        "Updates only when the host types !update in chat. Nothing is checked, downloaded or changed until somebody asks.",
+        "An update says in chat what changed, including anything from releases this copy skipped.",
+        "Several copies of the tool on one table post that between them once, instead of one identical message each.",
+        "It posts what changed, or that the tool is already current, or that the repository could not be reached.",
+        "Update checks are staggered, so many copies on one table no longer all fire at once."
+      ]
+    },
     {
       "version": "1.1.1",
       "notes": [
