@@ -3,7 +3,7 @@
      AoS Coherency Tool - object UI.
 
      Laid out WIDE and SHORT, should sit along the edge of a game table:
-     four columns - Auras, Coherency, Formation, Tags, narrow credit strip.
+     three columns - Auras, Coherency, Formation - and a narrow credit strip.
      Nothing in the Lua depends on the order - the script addresses the buttons
      by id, so the columns can be shuffled here.
 
@@ -26,12 +26,18 @@
      re-applies them; both carry a textColor of their own, because the anthracite
      one from Defaults would be invisible on a dark fill. No `colors` attribute in
      Defaults for the same reason - it would override the background the script
-     sets. The five aura buttons carry no colour here: the script fills each
-     with its own ring colour on load, and they wear the ordinary wash until then.
+     sets. The five aura buttons and colorBtn carry no colour here: the script
+     fills them with the chosen aura colour on load, and they wear the ordinary
+     wash until then.
+
+     COLOUR PICKER. colorPopup is the last child of panelField, so it draws over
+     everything else, and starts inactive. Its twelve swatches carry their preset
+     fill here - that list is the one in AURA_PRESETS at the top of the Lua, in
+     the same order, and the script reads a swatch's index out of its id.
 
      Both three-way rows (distance, buddy rule) set childForceExpandWidth="false"
-     and size their buttons by hand, because an equal three-way split of the 350
-     column leaves 112 px per button and "Base Contact" wraps at that width.
+     and size their buttons by hand, so the long labels ("Base Contact", the two
+     "in Range") get the room an equal three-way split would give the short ones.
 
      VERSION in the Lua, which onUIReady writes into versionText here once the
      panel is live. Nothing sets a version by hand in either file. -->
@@ -41,9 +47,7 @@
   <!-- fontStyle Bold across every button: the stock face is thin enough at this
        size to go soft as soon as the camera leaves the panel. -->
   <Button color="#ffffff40" textColor="#293133" fontSize="20" fontStyle="Bold"
-          outline="#29313366" outlineSize="2 2"
-          tooltipPosition="Above" tooltipOffset="10"
-          tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+          outline="#29313366" outlineSize="2 2"/>
   <HorizontalLayout spacing="6" childForceExpandWidth="true" preferredHeight="46"/>
   <VerticalLayout spacing="6" childForceExpandHeight="false"/>
   <!-- Same wash, edge and weight as the buttons, so the field reads as one of
@@ -51,9 +55,7 @@
   <InputField fontSize="20" fontStyle="Bold" textColor="#293133"
               textAlignment="MiddleCenter"
               colors="#ffffff40|#ffffff73|#ffffff26|#ffffff26"
-              outline="#29313366" outlineSize="2 2"
-              tooltipPosition="Above" tooltipOffset="10"
-              tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+              outline="#29313366" outlineSize="2 2"/>
 </Defaults>
 
 <Panel id="root" position="665 -95 -500" rotation="0 0 0"
@@ -75,111 +77,79 @@
         <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
               alignment="UpperCenter">AURAS (Selected Models)</Text>
         <HorizontalLayout>
-          <Button id="aura3"  onClick="aosAura" text="3&quot;"
-                  tooltip="Ring 3&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura6"  onClick="aosAura" text="6&quot;"
-                  tooltip="Ring 6&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura9"  onClick="aosAura" text="9&quot;"
-                  tooltip="Ring 9&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura12" onClick="aosAura" text="12&quot;"
-                  tooltip="Ring 12&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura18" onClick="aosAura" text="18&quot;"
-                  tooltip="Ring 18&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura3"  onClick="aosAura" text="3&quot;"/>
+          <Button id="aura6"  onClick="aosAura" text="6&quot;"/>
+          <Button id="aura9"  onClick="aosAura" text="9&quot;"/>
+          <Button id="aura12" onClick="aosAura" text="12&quot;"/>
+          <Button id="aura18" onClick="aosAura" text="18&quot;"/>
         </HorizontalLayout>
-        <!-- The field is one aura button wide, so it sits under the 3" button.
-             Extra gap is needed to make the row with the custom input work out in width. -->
+        <!-- The field is one aura button wide, so it sits under the 3" button, and
+             the rest of the row lands on the row below it: Apply ends where Clear
+             (Selected) ends and Aura Color covers Clear (All). 72 + 0 + 105 + 189
+             and three 6 px gaps = 384. gapAfterField has no width of its own and is
+             there as the handle for retuning that split. -->
         <HorizontalLayout childForceExpandWidth="false" spacing="6">
           <InputField id="customAura" preferredWidth="72" text="4"
                       onValueChanged="aosCustomChanged" onEndEdit="aosApplyCustom"
                       placeholder="0.5-60" characterLimit="5"
-                      characterValidation="Decimal"
-                      tooltip="Custom aura radius in inches, 0.5 to 60."/>
+                      characterValidation="Decimal"/>
           <Panel id="gapAfterField" preferredWidth="0" color="#00000000"/>
-          <Button id="applyBtn" onClick="aosApply" text="Apply" preferredWidth="114"
-                  tooltip="Draw the radius in the box on each selected model."/>
-          <Button id="hlBtn" onClick="aosHighlight" text="Enable Highlight"
-                  preferredWidth="200"
-                  tooltip="Toggle: color glow every model in range of an aura. A model two auras reach glows white instead."/>
+          <Button id="applyBtn" onClick="aosApply" text="Apply" preferredWidth="105"/>
+          <Button id="colorBtn" onClick="aosColors" text="Aura Color"
+                  preferredWidth="189"/>
         </HorizontalLayout>
         <HorizontalLayout>
-          <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"
-                  tooltip="Clear auras on the selected models."/>
-          <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"
-                  tooltip="Clear all auras on the table."/>
+          <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"/>
+          <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"/>
         </HorizontalLayout>
       </VerticalLayout>
 
-      <VerticalLayout preferredWidth="350">
+      <VerticalLayout preferredWidth="417">
         <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
-              alignment="UpperCenter">COHERENCY (Selected Unit)</Text>
-        <!-- 80 + 80 + 178 + two 6 px gaps = 350. -->
+              alignment="UpperCenter">COHERENCY (Selection)</Text>
+        <!-- 100 + 100 + 205 + two 6 px gaps = 417. -->
         <HorizontalLayout childForceExpandWidth="false" spacing="6">
-          <Button id="mode1" onClick="aosMode" text="0.5&quot;" preferredWidth="80"
-                  color="#293133cc" textColor="#f2f1ec"
-                  tooltip="Set coherency / formation ranges at 0.5&quot; between models."/>
-          <Button id="mode2" onClick="aosMode" text="2&quot;" preferredWidth="80"
-                  tooltip="Set coherency / formation ranges at 2&quot; between models."/>
-          <Button id="mode3" onClick="aosMode" text="Base Contact" preferredWidth="178"
-                  tooltip="Set coherency / formation ranges to base contact."/>
+          <Button id="mode1" onClick="aosMode" text="0.5&quot;" preferredWidth="100"
+                  color="#293133cc" textColor="#f2f1ec"/>
+          <Button id="mode2" onClick="aosMode" text="2&quot;" preferredWidth="100"/>
+          <Button id="mode3" onClick="aosMode" text="Base Contact" preferredWidth="205"/>
         </HorizontalLayout>
-        <!-- 80 + 129 + 129 + two 6 px gaps = 350. -->
+        <!-- 95 + 155 + 155 + two 6 px gaps = 417. -->
         <HorizontalLayout childForceExpandWidth="false" spacing="6">
-          <Button id="buddyAuto" onClick="aosBuddy" text="Auto" preferredWidth="80"
-                  color="#293133cc" textColor="#f2f1ec"
-                  tooltip="Follow the rules: 2 buddies in range for a unit of 7+ models, otherwise 1."/>
-          <Button id="buddy1"    onClick="aosBuddy" text="1 in Range" preferredWidth="129"
-                  tooltip="Demand 1 buddy in range whatever the unit size."/>
-          <Button id="buddy2"    onClick="aosBuddy" text="2 in Range" preferredWidth="129"
-                  tooltip="Demand 2 buddies in range whatever the unit size."/>
+          <Button id="buddyAuto" onClick="aosBuddy" text="Auto" preferredWidth="95"
+                  color="#293133cc" textColor="#f2f1ec"/>
+          <Button id="buddy1"    onClick="aosBuddy" text="1 in Range" preferredWidth="155"/>
+          <Button id="buddy2"    onClick="aosBuddy" text="2 in Range" preferredWidth="155"/>
         </HorizontalLayout>
         <HorizontalLayout>
-          <Button id="checkBtn" onClick="aosCheck" text="Check Coherency"
-                  tooltip="Toggle: green = OK, orange line to the nearest buddy. Stops itself after 60s."/>
+          <Button id="checkBtn" onClick="aosCheck" text="Check Coherency"/>
         </HorizontalLayout>
       </VerticalLayout>
 
-      <VerticalLayout preferredWidth="350">
+      <VerticalLayout preferredWidth="417">
         <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
-              alignment="UpperCenter">FORMATION (Selected Unit)</Text>
+              alignment="UpperCenter">FORMATION (Selection)</Text>
         <HorizontalLayout>
-          <Button id="shapeLine"   onClick="aosShape" text="Single Line"
-                  tooltip="Rearrange the unit into one rank."/>
-          <Button id="shapeDouble" onClick="aosShape" text="Double Line"
-                  tooltip="Rearrange the unit into two ranks."/>
+          <Button id="shapeLine"   onClick="aosShape" text="Single Line"/>
+          <Button id="shapeDouble" onClick="aosShape" text="Double Line"/>
         </HorizontalLayout>
         <HorizontalLayout>
-          <Button id="shapeTri"   onClick="aosShape" text="Dogbone"
-                  tooltip="Rearrange the unit into a line with a 3-model triangle at each end."/>
-          <Button id="shapeHoney" onClick="aosShape" text="Honeycomb"
-                  tooltip="Rearrange the unit into a honeycomb block."/>
+          <Button id="shapeTri"   onClick="aosShape" text="Dogbone"/>
+          <Button id="shapeHoney" onClick="aosShape" text="Honeycomb"/>
         </HorizontalLayout>
+        <!-- Two buttons share this row, so both labels drop a size to fit half
+             the column. -->
         <HorizontalLayout>
-          <Button id="undoBtn" onClick="aosUndo" text="Undo Last Move"
-                  tooltip="Put the unit back where it stood before the last move."/>
+          <Button id="undoBtn" onClick="aosUndo" text="Undo Last Move" fontSize="18"/>
+          <Button id="ovalBtn" onClick="aosOval" text="Ovals Sideways" fontSize="18"/>
         </HorizontalLayout>
-      </VerticalLayout>
-
-      <VerticalLayout preferredWidth="120">
-        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
-              alignment="UpperCenter">Tags</Text>
-        <Panel id="tagFrame" color="#00000000" padding="3 3 3 3" preferredHeight="46">
-          <Button id="tagBtn" onClick="aosTag" text="Tag"
-                  tooltip="Stamp a unit id on the selected models. Refused if they already carry another script's id."/>
-        </Panel>
-        <Button id="untagBtn" onClick="aosUntag" text="Untag"
-                interactable="false" textColor="#a3a8aa" preferredHeight="46"
-                tooltip="Take the unit id off the whole unit. Only ever removes ids this tool issued."/>
-        <Button id="smartTagBtn" onClick="aosSmartTag" text="Smart Tag"
-                fontSize="17" preferredHeight="46"
-                tooltip="Split the selection into units with tags by how the models are standing together."/>
       </VerticalLayout>
 
       <!-- Credit then version, reading bottom-to-top: a HorizontalLayout turned a
            quarter-turn counter-clockwise, so its width becomes its height on
-           screen. 150 + 6 + 38 = 194, inside the 196 the strip has to give - the
+           screen. 140 + 6 + 50 = 196, the height the strip has to give - the
            panel's 220 less 3 px of border top and bottom and the 9 + 9 padding.
-           140 + 6 + 50 = 196 now: 38 px clipped "v1.2.0" a character short,
-           and 50 leaves room for the version to grow a digit or two.
+           50 px holds a version such as "v1.2.0" with room for another digit.
            versionText's own text is only what shows until onUIReady writes the
            real version into it, so it is left blank. -->
       <Panel preferredWidth="34" color="#00000000">
@@ -192,6 +162,38 @@
       </Panel>
 
     </HorizontalLayout>
+
+    <!-- The colour picker, last so it covers the columns while it is up. Six
+         swatches to a row: 6 x 84 + 5 x 6 of spacing + 12 + 12 of padding = 558
+         across, and 44 + 44 + 34 of rows + 2 x 6 + 24 = 158 down. -->
+    <Panel id="colorPopup" active="false" rectAlignment="MiddleCenter"
+           width="558" height="158" color="#1c2224f5" padding="12 12 12 12"
+           outline="#e6e5e1" outlineSize="2 2">
+      <VerticalLayout spacing="6" childForceExpandHeight="false">
+        <HorizontalLayout preferredHeight="44" spacing="6" childForceExpandWidth="false">
+          <Button id="auraCol1"  onClick="aosPickColor" preferredWidth="84" color="#e62626"/>
+          <Button id="auraCol2"  onClick="aosPickColor" preferredWidth="84" color="#fa850d"/>
+          <Button id="auraCol3"  onClick="aosPickColor" preferredWidth="84" color="#f7d926"/>
+          <Button id="auraCol4"  onClick="aosPickColor" preferredWidth="84" color="#8ce033"/>
+          <Button id="auraCol5"  onClick="aosPickColor" preferredWidth="84" color="#1ab847"/>
+          <Button id="auraCol6"  onClick="aosPickColor" preferredWidth="84" color="#00c7bf"/>
+        </HorizontalLayout>
+        <HorizontalLayout preferredHeight="44" spacing="6" childForceExpandWidth="false">
+          <Button id="auraCol7"  onClick="aosPickColor" preferredWidth="84" color="#40a6ff"/>
+          <Button id="auraCol8"  onClick="aosPickColor" preferredWidth="84" color="#264ce6"/>
+          <Button id="auraCol9"  onClick="aosPickColor" preferredWidth="84" color="#9e40eb"/>
+          <Button id="auraCol10" onClick="aosPickColor" preferredWidth="84" color="#ff59b3"/>
+          <Button id="auraCol11" onClick="aosPickColor" preferredWidth="84" color="#8c5c33"/>
+          <Button id="auraCol12" onClick="aosPickColor" preferredWidth="84" color="#ffffff"/>
+        </HorizontalLayout>
+        <!-- Its own colours: the anthracite label the Defaults hand out would be
+             all but invisible on the popup's dark fill. -->
+        <HorizontalLayout preferredHeight="34">
+          <Button id="colorClose" onClick="aosColorsClose" text="Close" fontSize="18"
+                  color="#ffffff26" textColor="#e6e5e1" outline="#e6e5e14d"/>
+        </HorizontalLayout>
+      </VerticalLayout>
+    </Panel>
 
   </Panel>
 </Panel>

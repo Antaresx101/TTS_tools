@@ -15,39 +15,18 @@ local MM_TO_INCH             = 0.0393701
 local RING_CLEARANCE         = 0.10  -- world units the aura ring floats above the table
 local AURA_THICK             = 0.05  -- aura ring line width
 local BASE_THICK             = 0.04  -- base outline line width
--- Breach lines (models out of coherenc) only read from above with this width seemingly
+-- Breach lines (models out of coherency) only read well from above at this width.
 local BREACH_THICK           = 0.05  -- coherency breach line width
-local SEL_WATCH              = 0.3   -- s, Tag/Untag button poll (no selection event exists)
-local SEL_SCAN               = 60    -- objects examined per player per poll
 local MAX_UNIT               = 40    -- models per unit for coherency / shapes
 local MAX_BREACH_LINES       = 24    -- breach lines drawn at once
 local MOTION_TICK            = 0.1   -- s, motion loop period
 local MONITOR_TIMEOUT        = 60    -- s, monitor auto-stop
--- Unit ids are uuid:77<20 digits>77. Reading accepts any uuid:<digits> tag;
--- removing accepts only the 77-bookended ones, so another script's id is never
--- stripped (e.g. yellow tags).
-local TAG_PREFIX             = "uuid:"
-local TAG_MARK               = "77"
-local SMART_GAP              = 0.525 -- edge gap that still counts as one unit
-local SMART_MAX              = 300   -- models Smart tag will look at in one go
-local SMART_HILITE           = 7.5   -- s, Smart tag shows its groups in colour
 local UPRIGHT_EPS            = 0.5   -- degrees of lean a shape button will ignore
--- Highlight loop: the costly rescan runs every HL_RESCAN ticks and is cached, the
--- cheap distance pass runs every tick against that cache.
-local HL_TICK                = 0.3   -- s, highlight refresh
-local HL_RESCAN              = 7     -- ticks between full table rescans (~2s)
-local HL_MAX_SCAN            = 400   -- models the highlighter will consider
--- What counts as a model; a tagged unit counts whatever its type.
-local MODEL_TYPES = { Figurine = true, Generic = true, Custom_Model = true }
--- Every copy wears this, so the copies can find each other for the overlap rule.
-local TOOL_TAG               = "AoS_Coherency_Tool77"
-
--- Smart tag flash colours, cycled when a selection holds more units than colours.
-local UNIT_COLORS = {
-    {1.00, 0.25, 0.25}, {0.25, 0.60, 1.00}, {0.30, 0.90, 0.35}, {1.00, 0.85, 0.20},
-    {0.85, 0.35, 1.00}, {0.20, 0.90, 0.85}, {1.00, 0.55, 0.15}, {0.65, 1.00, 0.30},
-    {1.00, 0.45, 0.75}, {0.55, 0.45, 1.00}, {0.95, 0.95, 0.95}, {0.45, 0.70, 0.55},
-}
+-- How far a base's two semi-axes have to differ before it counts as an oval and
+-- the Ovals Sideways toggle turns it. The closest catalogued oval, 35.5 x 60 mm,
+-- has semi-axes 0.48" apart and a round base's are equal, so 0.05" separates the
+-- two with room to spare.
+local OVAL_EPS               = 0.05
 
 -- Rounds, then ovals in both orientations.
 local VALID_BASE_SIZES_IN_MM = {
@@ -71,64 +50,25 @@ local BUDDY_IDS = { "buddyAuto", "buddy1", "buddy2" } -- 0 = auto, 1 = force 1, 
 -- Resting is a white wash over the parchment, lit inverts it. Background and text
 -- colour always move together, or a lit button ends up anthracite on anthracite.
 local ANTHRACITE          = "#293133"
-local ANTHRACITE_RGB      = {0.161, 0.192, 0.200}  -- the same, to mix with
--- A lit button wears the seat colour pulled toward anthracite. findSeat writes
--- ON_COLOR and FRAME_ON once the seat is known; these are the fallbacks until then.
-local ACTIVE_MIX          = 0.45   -- how far toward anthracite (Teal sets the floor:
-                                   -- any less and its label drops under 4.5:1)
-local ACTIVE_ALPHA        = 0.85   -- and how solid, so the picture still shows
 local ON_COLOR,  ON_TEXT  = "#293133d9", "#f2f1ec"
 local OFF_COLOR, OFF_TEXT = "#ffffff40", ANTHRACITE
-local DISABLED_TEXT       = "#a3a8aa"   -- Untag, greyed for a foreign unit id
-local FRAME_ON,  FRAME_OFF = "#293133", "#00000000"
+-- panelField's fill, which every button's wash sits over. Only used to work out
+-- whether a coloured fill wants the pale label or the anthracite one.
+local PARCHMENT           = {0.902, 0.898, 0.882}   -- #e6e5e1
 
--- Aura colours run along a ramp with one stop per button: a pale tint of the seat
--- colour at 3", sweeping through neighbouring hues, back to the seat colour at
--- depth. Consecutive stops differ by at least 0.25 in some channel, which
--- tests/highlight_test.lua enforces. White is for a two-aura overlap, so
--- no ramp starts near it.
-local AURA_STOPS      = { 3, 6, 9, 12, 18 }  -- the radii the five stops sit on
-local AURA_BTN_ALPHA  = 0.38  -- how solid a button wears its own ring colour; any
-                              -- more drops the anthracite label under 4.5:1 on the
-                              -- dark stops
-local OVERLAP_COLOR   = {1, 1, 1}
--- Seats a tool can belong to. White, Grey and Black are the spectator, the GM and
--- the table owner, not a side with an army.
-local SEAT_COLORS = { "Red", "Orange", "Yellow", "Green", "Teal",
-                      "Blue", "Purple", "Pink", "Brown" }
--- Five stops each, for 3" 6" 9" 12" 18".
-local SEAT_RAMPS = {
-    -- light red, amber, orange, red, deep crimson
-    Red    = { {0.92,0.51,0.50}, {1.00,0.60,0.00}, {0.95,0.25,0.00},
-               {0.65,0.03,0.12}, {0.38,0.00,0.20} },
-    -- apricot, yellow, orange, rust, dark rust
-    Orange = { {0.98,0.67,0.51}, {1.00,0.78,0.10}, {0.98,0.48,0.00},
-               {0.72,0.26,0.00}, {0.42,0.14,0.00} },
-    -- pale yellow, yellow, gold, bronze, dark olive
-    Yellow = { {0.95,0.94,0.54}, {1.00,0.82,0.02}, {0.78,0.54,0.00},
-               {0.50,0.32,0.00}, {0.22,0.13,0.02} },
-    -- pale green, lime, green, emerald, deep forest
-    Green  = { {0.56,0.84,0.54}, {0.50,0.90,0.10}, {0.10,0.72,0.28},
-               {0.02,0.45,0.32}, {0.00,0.20,0.16} },
-    -- pale teal, mint, cyan, sea, deep teal
-    Teal   = { {0.67,0.88,0.85}, {0.40,0.95,0.55}, {0.00,0.82,0.78},
-               {0.00,0.50,0.62}, {0.00,0.24,0.34} },
-    -- light blue, green, cyan, azure, deep blue
-    Blue   = { {0.51,0.74,1.00}, {0.20,0.88,0.35}, {0.00,0.72,0.80},
-               {0.03,0.35,0.92}, {0.06,0.08,0.60} },
-    -- lilac, magenta, violet, indigo, deep purple
-    Purple = { {0.79,0.52,0.97}, {1.00,0.25,0.85}, {0.72,0.05,0.88},
-               {0.42,0.02,0.72}, {0.20,0.00,0.40} },
-    -- pale pink, coral, hot pink, rose, deep rose
-    Pink   = { {0.98,0.69,0.89}, {1.00,0.52,0.35}, {1.00,0.18,0.55},
-               {0.72,0.00,0.40}, {0.42,0.00,0.24} },
-    -- light brown, tan, ochre, russet, bark
-    Brown  = { {0.61,0.46,0.36}, {0.88,0.66,0.28}, {0.68,0.40,0.06},
-               {0.42,0.20,0.02}, {0.16,0.07,0.02} },
+-- The colour picker's twelve swatches, in the order colorPopup lists them in the
+-- XML. A swatch's id is "auraCol" .. its index here, which is how aosPickColor
+-- finds it, and the hex baked into the XML is this same colour, so the popup is
+-- right on the first frame. Every aura drawn takes whichever one is picked.
+local AURA_PRESETS = {
+    {0.902, 0.149, 0.149}, {0.980, 0.522, 0.051}, {0.969, 0.851, 0.149},
+    {0.549, 0.878, 0.200}, {0.102, 0.722, 0.278}, {0.000, 0.780, 0.749},
+    {0.251, 0.651, 1.000}, {0.149, 0.298, 0.902}, {0.620, 0.251, 0.922},
+    {1.000, 0.349, 0.702}, {0.549, 0.361, 0.200}, {1.000, 1.000, 1.000},
 }
--- Fallback when no hand zone is near the tool.
-local NEUTRAL_RAMP = { {0.68,0.72,0.75}, {0.53,0.56,0.55}, {0.39,0.41,0.40},
-                       {0.25,0.27,0.28}, {0.11,0.13,0.16} }
+local AURA_DEFAULT    = 7     -- the sky blue: clear of the monitor's own colours
+local AURA_BTN_ALPHA  = 0.38  -- how solid the five radius buttons wear that colour
+local COLOR_BTN_ALPHA = 0.62  -- and Aura Color, which is the swatch itself
 
 -- The XML names the picture (image="aosPanelBg") and that name resolves against the
 -- object's Custom UI Assets list, filled in on load.
@@ -141,24 +81,17 @@ local UI_ASSETS = {
 local uiMode        = 1              -- index into MODES
 local buddyOverride = 0              -- 0 auto | 1 force 1 | 2 force 2
 local lastCustom    = "4"
-local seatColor     = nil            -- name of the seat this tool serves
-local seatRamp      = NEUTRAL_RAMP   -- and the five stops its auras run through
+local auraIdx       = AURA_DEFAULT   -- index into AURA_PRESETS
+local ovalSideways  = false          -- oval bases turned across the formation
+local colorOpen     = false          -- the picker panel is up
 local actingColor   = nil            -- whoever pressed the last button, for broadcasts
-local selTagState   = nil            -- last known "selection contains a tagged unit"
 
 local monActive, monTimer, monTimeout = false, nil, nil
 local monGuids, monIdx, monDesc, monBase, monDrop = {}, {}, {}, {}, {}
 local monGap, monCp, monPrevMoving = {}, {}, {}
-local monTag, monGlowed, monGlowState = nil, {}, {}
+local monGlowed, monGlowState = {}, {}
 
 local undoStack = {}
-local selWatchTimer = nil
-
--- Highlighter. hlApplied is what THIS tool is currently lighting and in what
--- colour, so each tick only touches models whose colour actually changed.
-local hlActive, hlTimer, hlSince = false, nil, 0
-local hlModels, hlSources = {}, {}   -- caches, rebuilt every HL_RESCAN ticks
-local hlClaims, hlApplied = {}, {}
 
 -- ======================================================= GEOMETRY CORE ======
 -- No TTS API calls anywhere below until the "base + descriptors" header.
@@ -274,44 +207,10 @@ local function evaluate(descs, dist, req)
     return r
 end
 
--- Single-linkage clustering by base-edge gap: two models belong to the same unit
--- when their bases are within maxGap, theand that relation is transitive, so a rank
--- of models each half an inch from the next is one unit while an inch of empty
--- table between two blocks splits them. Returns comp[i] = unit index (numbered in
--- input order) and the number of units found. Results in grouping up units from
--- all selected models (typically an army).
-local function clusterByGap(descs, maxGap)
-    local n, thr = #descs, maxGap + EPS
-    local adj = {}
-    for i = 1, n do adj[i] = {} end
-    for i = 1, n - 1 do
-        for j = i + 1, n do
-            local g = baseGap(descs[i], descs[j])
-            if g <= thr then
-                adj[i][#adj[i] + 1] = j; adj[j][#adj[j] + 1] = i
-            end
-        end
-    end
-    local comp, k = {}, 0
-    for i = 1, n do
-        if comp[i] == nil then
-            k = k + 1
-            comp[i] = k
-            local stack = { i }
-            while #stack > 0 do
-                local v = stack[#stack]; stack[#stack] = nil
-                for _, w in ipairs(adj[v]) do
-                    if comp[w] == nil then comp[w] = k; stack[#stack + 1] = w end
-                end
-            end
-        end
-    end
-    return comp, k
-end
-
 -- Long axis of the formation: principal eigenvector of the 2D covariance of the
 -- models' x/z positions. n <= 3 uses the most-separated pair; a degenerate
--- spread falls back to world +x.
+-- spread falls back to world +x. Buttons always hand buildLayout the tool's own
+-- axis; this is what it uses when it is given none, as in the geometry tests.
 local function principalAxis(descs)
     local n, X = #descs, { x = 1, z = 0 }
     if n < 2 then return X end
@@ -370,6 +269,13 @@ end
 -- origin; buildLayout re-anchors on the centroid. rin(k, dx, dz) is model k's
 -- semi-radius along layout-frame direction (dx,dz): an oval presents a different
 -- radius to every neighbour, so spacing is asked for per direction.
+--
+-- Every one of them places its models PAIR BY PAIR, at an exact edge gap from
+-- named neighbours, rather than on one spacing shared by the whole unit. That is
+-- what lets a unit that mixes base sizes still hold the coherency distance: one
+-- uniform step cannot keep the small bases coherent and the large ones apart at
+-- the same time, and when those two pull against each other it is the coherency
+-- that has to win.
 
 -- Centre-to-centre distance putting i and j at edge gap g, given where they sit.
 -- The direction depends on the answer, so callers iterate; the half-step damping
@@ -382,6 +288,15 @@ local function pairDist(rin, i, j, xi, zi, xj, zj, g, prev)
     local d = rin(i, dx, dz) + g + rin(j, -dx, -dz)
     if prev == nil then return d end
     return 0.5 * (prev + d)
+end
+
+-- Edge gap between two models already placed in the layout frame. rin answers in
+-- that frame, so this needs no round trip through world coordinates.
+local function slotGap(rin, slots, i, j)
+    local dx, dz = slots[j][1] - slots[i][1], slots[j][2] - slots[i][2]
+    local m = sqrt(dx * dx + dz * dz)
+    if m < EPS then return -1 end
+    return m - rin(i, dx / m, dz / m) - rin(j, -dx / m, -dz / m)
 end
 
 -- Per-pair steps: every consecutive edge gap is exactly g. Neighbours lie along
@@ -398,17 +313,31 @@ end
 -- j at (Qx,Qz). Both target distances depend on where k ends up, so this
 -- iterates: `pick` chooses between the two mirrored solutions on the first pass,
 -- and every later pass stays on whichever side that first choice landed.
+-- It runs until the distances stop moving. The half-step damping keeps an oval
+-- from oscillating but converges slowly, and a formation has only SHAPE_MARGIN of
+-- room under the coherency limit, so a pass short of settled can leave a model
+-- out of range. The pass cap is only a guard; this runs on a button press.
 local function settle(rin, g, i, Px, Pz, j, Qx, Qz, k, pick)
     local dP = rin(i, 1, 0) + g + rin(k, -1, 0)
     local dQ = rin(j, 1, 0) + g + rin(k, -1, 0)
     local x, z = pick(triangulate(Px, Pz, dP, Qx, Qz, dQ))
-    for _ = 1, 12 do
-        dP = pairDist(rin, i, k, Px, Pz, x, z, g, dP)
-        dQ = pairDist(rin, j, k, Qx, Qz, x, z, g, dQ)
+    for _ = 1, 80 do
+        local nP = pairDist(rin, i, k, Px, Pz, x, z, g, dP)
+        local nQ = pairDist(rin, j, k, Qx, Qz, x, z, g, dQ)
+        local moved = abs(nP - dP) + abs(nQ - dQ)
+        dP, dQ = nP, nQ
         local a, b, c, d = triangulate(Px, Pz, dP, Qx, Qz, dQ)
         if dist2(x, z, a, b) <= dist2(x, z, c, d) then x, z = a, b else x, z = c, d end
+        if moved < 1e-10 then break end
     end
     return x, z
+end
+
+-- Of the two mirrored solutions, the one further along the perpendicular: the
+-- rank being built always stands in front of the rank it is settling against.
+local function pickFar(x1, z1, x2, z2)
+    if z1 >= z2 then return x1, z1 end
+    return x2, z2
 end
 
 -- Hex-staggered two-rank block, built as a chain of triangles: model k sits at
@@ -417,11 +346,12 @@ end
 local function slotsChain(n, rin, g)
     local out = { {0, 0} }
     if n >= 2 then
-        local d = rin(1, 1, 0) + g + rin(2, -1, 0)
-        for _ = 1, 6 do
-            out[2] = { d * 0.5, d * SQRT3_2 }             -- 60 deg off the axis
-            d = pairDist(rin, 1, 2, 0, 0, out[2][1], out[2][2], g, d)
-        end
+        -- 60 degrees off the axis. The direction does not depend on how far along
+        -- it model 2 ends up, so the distance is exact in one step and is not
+        -- iterated: damping it would leave part of the correction unapplied.
+        local dx, dz = 0.5, SQRT3_2
+        local d = rin(1, dx, dz) + g + rin(2, -dx, -dz)
+        out[2] = { d * dx, d * dz }
     end
     -- Pick the solution farther from k-3, the model the chain would otherwise
     -- fold back onto. "Farther along the axis" looks equivalent but degenerates
@@ -466,30 +396,143 @@ local function slotsTriangles(n, rin, g)
     return out
 end
 
--- Hex grid: column step s, row step s*sqrt(3)/2, odd rows offset by s/2. cols is
--- picked so the footprint comes out roughly square, and a short final row is
--- centred on whole columns so its models keep landing in the previous row's
--- valleys -- without that, a lone trailing model (n=13) would have only 1 buddy.
--- A lattice must use ONE step for every pair, so s is clamped between "wide enough
--- not to overlap the widest base" and "narrow enough to keep the narrowest pair
--- coherent". When a unit's bases differ by more than the coherency distance that
--- band is empty; fall back to the tightest step the widest base allows and flag it
--- in the second return value so the caller can say so.
-local function slotsHoneycomb(n, rmaxK, rminK, g, dist)
+-- Columns across the block, picked so the footprint comes out roughly square:
+-- a row is one step wide per model and the rows are only sqrt(3)/2 of a step
+-- apart, which is where the 0.866 comes from.
+local function honeyCols(n)
+    return max(2, floor(sqrt(0.866 * n) + 0.5))
+end
+
+-- Honeycomb, built pair by pair like the rest rather than on one lattice step.
+-- Rows run left to right and alternate their offset by half a step, so the block
+-- comes out square-edged, and every model is settled at exactly edge gap g from
+-- the model before it in its row and from the model it nests against in the row
+-- behind. Equal bases reproduce the textbook hex grid to the last decimal; mixed
+-- bases give a grid that goes a little irregular and holds the coherency
+-- distance, which is the way round that matters.
+--
+-- EVERY PAIR OF ANCHORS IS ITSELF A NEIGHBOURING PAIR, and that is the whole
+-- trick. Two circles of radius (anchor + g + model) about anchors that are only
+-- (anchor + g + anchor) apart always cross, so a model can always be put at the
+-- exact gap from both; anchors any further apart than that -- the two ends of a
+-- row, say -- have no such guarantee, and once a unit mixes a 25mm base with a
+-- 75mm one they stop crossing and the model lands short of one of them.
+--
+-- Rows are filled to a WIDTH, not to a model count, and each model nests against
+-- whichever model of the row behind actually ends up under it. Both of those are
+-- for mixed bases: a row of 40mm bases holding the same COUNT as the row of 25mm
+-- bases beneath it is half again as long, so it runs off the end of that row and
+-- its last models have nothing left to nest against. Filling by width keeps the
+-- rows stacked over each other however the sizes are mixed, and looking up the
+-- neighbour by position rather than by index lets one big base span two small
+-- ones. With equal bases every row comes out the same count and the lookup finds
+-- the model a fixed index rule would have named, so the block is the plain
+-- lattice again.
+--
+-- A row starts either OFFSET -- between the first two models of the row behind --
+-- or FLUSH, half a step back from that row's first model, where there is only one
+-- neighbour to have and the next model along gives it its second. Alternating the
+-- two is what squares the block off; nesting every row would shear it.
+local function slotsHoneycomb(n, rin, g)
+    -- Row widths first: the full single-line length, split into the number of rows
+    -- that makes the block roughly square. A row is one model-width plus a gap per
+    -- model and the rows are only sqrt(3)/2 of that apart, which is the 0.866.
+    local w, total = {}, (n - 1) * g
+    for k = 1, n do
+        w[k] = rin(k, 1, 0) + rin(k, -1, 0)
+        total = total + w[k]
+    end
+    local rows = max(1, floor(sqrt(n / 0.866) + 0.5))
+    local wide = total / rows
+    local first, last, rowOf = { 1 }, {}, {}
+    local r, used = 1, 0
+    for k = 1, n do
+        local grown = (k == first[r]) and w[k] or (used + g + w[k])
+        if k > first[r] and grown > wide then
+            last[r] = k - 1
+            r = r + 1
+            first[r], used = k, w[k]
+        else
+            used = grown
+        end
+        rowOf[k] = r
+    end
+    last[r] = n
+
+    local out = { {0, 0} }
+    for k = 2, n do
+        local rr = rowOf[k]
+        if rr == 1 then                                  -- the first row is a line
+            out[k] = { out[k - 1][1] + rin(k - 1, 1, 0) + g + rin(k, -1, 0), 0 }
+        else
+            local b0, b1 = first[rr - 1], last[rr - 1]   -- the row behind
+            -- A final row with fewer models than the one behind nests whatever its
+            -- parity, and starts far enough in to sit centred: left flush, a lone
+            -- trailing model hangs off the corner of the block with one buddy.
+            local mine = last[rr] - first[rr]
+            local nest = (rr % 2 == 0) or (mine < b1 - b0)
+            if k ~= first[rr] then
+                -- Where continuing this row puts k, then the model of the row
+                -- behind nearest that spot. The <= keeps the earlier of two equal
+                -- candidates, which is the one the lattice wants.
+                local ax = out[k - 1][1] + rin(k - 1, 1, 0) + g + rin(k, -1, 0)
+                local b, near = b0, abs(out[b0][1] - ax)
+                for t = b0 + 1, b1 do
+                    local d = abs(out[t][1] - ax)
+                    if d < near then near, b = d, t end
+                end
+                local function put(t)
+                    out[k] = { settle(rin, g, k - 1, out[k - 1][1], out[k - 1][2],
+                                             t,     out[t][1],     out[t][2],
+                                             k, pickFar) }
+                end
+                -- The model that ENDS a row takes the model that ENDS the row
+                -- behind, wherever the two still settle cleanly. It is the only
+                -- pairing that gives that one a second buddy of its own, and in the
+                -- first row -- where a model has nothing but its two neighbours in
+                -- the line -- there is no other way for the far corner to get one.
+                -- Whether they settle depends on how far apart they are, so it is
+                -- tried and then measured rather than reasoned about.
+                if k == last[rr] and b ~= b1 then
+                    put(b1)
+                    if abs(slotGap(rin, out, k, k - 1) - g) < 1e-6
+                       and abs(slotGap(rin, out, k, b1) - g) < 1e-6 then b = nil end
+                end
+                if b ~= nil then put(b) end
+            elseif nest and b1 > b0 then
+                local c = floor(((b1 - b0) - mine) / 2)
+                if c < 0 then c = 0 elseif b0 + c + 1 > b1 then c = b1 - b0 - 1 end
+                local p, q = b0 + c, b0 + c + 1
+                out[k] = { settle(rin, g, p, out[p][1], out[p][2],
+                                         q, out[q][1], out[q][2], k, pickFar) }
+            else
+                local dx, dz = -0.5, SQRT3_2             -- half a step back, one row up
+                local d = rin(b0, dx, dz) + g + rin(k, -dx, -dz)
+                out[k] = { out[b0][1] + dx * d, out[b0][2] + dz * d }
+            end
+        end
+    end
+    return out
+end
+
+-- The last-resort honeycomb: one lattice step for every pair, and the only layout
+-- here that is not built per pair, used when every per-pair attempt still puts
+-- two bases on top of each other. The step is wide enough that the widest pair
+-- cannot touch and, where the bases allow it, narrow enough that the narrowest
+-- pair stays coherent; when both cannot be had it takes the tightest step the
+-- widest base allows, and buildLayout notes that the distance was given up.
+local function slotsHoneyGrid(n, rmaxK, rminK, g)
     local rmin, rmax = rminK[1], rmaxK[1]
     for k = 2, n do
         if rminK[k] < rmin then rmin = rminK[k] end
         if rmaxK[k] > rmax then rmax = rmaxK[k] end
     end
-    local floorS, ceilS = 2 * rmax + 0.01, 2 * rmin + dist
-    local tight = floorS > ceilS
-    local s = floorS                                     -- minimum spacing
-    if not tight then
-        s = min(2 * rmax + g, ceilS - 0.02 * dist)
-        if s < floorS then s = floorS end
-    end
-    local cols = max(2, floor(sqrt(0.866 * n) + 0.5))
+    local s = max(2 * rmax + 0.01, 2 * rmin + g)
+    local cols = honeyCols(n)
     local rows = ceil(n / cols)
+    -- A short final row is centred on whole columns so its models keep landing in
+    -- the previous row's valleys -- without that, a lone trailing model (n=13)
+    -- would have only 1 buddy.
     local c0   = floor((cols - (n - (rows - 1) * cols)) / 2)
     local h, out = s * SQRT3_2, {}
     for k = 1, n do
@@ -501,14 +544,18 @@ local function slotsHoneycomb(n, rmaxK, rminK, g, dist)
         if r % 2 == 1 then along = along + s * 0.5 end
         out[k] = { along, r * h }
     end
-    return out, tight
+    return out
 end
 
--- The mode distance minus a 20% safety margin, so physics settle and float error
--- cannot push a legal layout over the line. Base contact takes the same margin:
--- 0.008" rather than 0.01", which is still base contact on any table.
+-- Formations aim just INSIDE the coherency limit rather than at it: SHAPE_MARGIN
+-- under the mode distance, which is room enough for float error and the physics
+-- settle and small enough that a 2" formation measures 1.99". Base contact cannot
+-- give up a whole hundredth, so it keeps a proportional margin instead and lands
+-- on 0.008" -- still base contact on any table.
+local SHAPE_MARGIN = 0.01
 local function shapeGap(modeIdx)
-    return 0.8 * MODES[modeIdx].dist
+    local d = MODES[modeIdx].dist
+    return max(d - SHAPE_MARGIN, 0.8 * d)
 end
 
 -- Build a formation. shape is "line" | "double" | "triangles" (Dogbone) | "honey".
@@ -516,7 +563,7 @@ end
 -- shape had to be substituted. Callers keep each model's current y and rotation.
 -- `axis` pins the direction the formation runs in; omit it and the unit is laid
 -- out along principalAxis instead, which is what the geometry tests exercise.
-local function buildLayout(shape, descs, g, dist, axis)
+local function buildLayout(shape, descs, g, axis)
     local n = #descs
     if n < 1 then return {}, "no models" end
     local note = nil
@@ -533,7 +580,8 @@ local function buildLayout(shape, descs, g, dist, axis)
         return pb[i] < pb[j]
     end)
 
-    -- Layout frame -> world. u and p are orthonormal, so unit stays unit.
+    -- Layout frame -> world. u and p are orthonormal, so unit stays unit. It
+    -- reads `order` live, so re-sorting below re-aims every generator with it.
     local function rin(k, dx, dz)
         return baseRadiusInDir(descs[order[k]], u.x * dx + p.x * dz,
                                                 u.z * dx + p.z * dz)
@@ -541,22 +589,89 @@ local function buildLayout(shape, descs, g, dist, axis)
     if shape == "triangles" and n < 6 then
         shape, note = "line", "n<6, used Single Line"
     end
-    local slots
-    if shape == "line" then
-        slots = slotsSingleLine(n, rin, g)
-    elseif shape == "double" then
-        slots = slotsChain(n, rin, g)
-    elseif shape == "triangles" then
-        slots = slotsTriangles(n, rin, g)
-    else
+    local function generate()
+        if shape == "line"        then return slotsSingleLine(n, rin, g) end
+        if shape == "double"      then return slotsChain(n, rin, g) end
+        if shape == "triangles"   then return slotsTriangles(n, rin, g) end
+        return slotsHoneycomb(n, rin, g)
+    end
+    -- Placing each model at an exact gap from named neighbours says nothing about
+    -- the pairs it never named, so a unit that mixes a 25mm base with a 130mm one
+    -- can still fold one of those onto another or leave one hanging by a single
+    -- buddy. What comes out is therefore MEASURED rather than assumed, and the
+    -- shape gets up to three further attempts.
+    --
+    -- Overlaps are counted a thousand times heavier than models short of a buddy:
+    -- a model standing inside another is broken outright, where a model out of
+    -- coherency is only wrong. Below that, coherency is the thing being bought,
+    -- which is the whole point of the fallbacks -- a formation is allowed to come
+    -- out irregular, or not to be the shape that was asked for, before it is
+    -- allowed to break the distance the player set.
+    -- A single line cannot give its two end models a second buddy at any spacing,
+    -- so it is scored against one.
+    local want = (shape == "line") and 1 or min(2, n - 1)
+    local function score(slots)
+        local within, bad = {}, 0
+        for i = 1, n do within[i] = 0 end
+        for i = 1, n - 1 do
+            for j = i + 1, n do
+                local s = slotGap(rin, slots, i, j)
+                if s < 0 then bad = bad + 1 end
+                if s <= g + EPS then
+                    within[i] = within[i] + 1; within[j] = within[j] + 1
+                end
+            end
+        end
+        local lonely = 0
+        for i = 1, n do if within[i] < want then lonely = lonely + 1 end end
+        return bad * 1000 + lonely
+    end
+    local slots = generate()
+    local best = score(slots)
+    local function tryIt(candidate, why)
+        if best == 0 then return end
+        local s = score(candidate)
+        if s < best then slots, best, note = candidate, s, why end
+    end
+    if best > 0 then
+        -- Fill the slots smallest base first instead of in the order the models
+        -- happen to be standing. Neighbouring slots then hold neighbouring sizes,
+        -- which is all the regularity these shapes need, and the models inside a
+        -- unit are interchangeable -- the whole button is about moving them.
+        local byPos = {}
+        for i = 1, n do byPos[i] = order[i] end
+        table.sort(order, function(i, j)
+            local a, b = descs[i], descs[j]
+            local am, bm = max(a.a, a.b), max(b.a, b.b)
+            if am ~= bm then return am < bm end
+            return min(a.a, a.b) < min(b.a, b.b)
+        end)
+        local sized = generate()
+        local s = score(sized)
+        if s < best then
+            slots, best, note = sized, s, "bases mixed, filled by base size"
+        else
+            order = byPos                        -- rin reads it, so put it back
+        end
+    end
+    -- The staggered chain is the most forgiving shape here -- every model at an
+    -- exact gap from the two before it, and no row to keep in step with -- so it
+    -- is what a block that cannot be packed falls back to. It is a real change of
+    -- shape and the note says so.
+    if best > 0 and shape ~= "double" and shape ~= "line" then
+        tryIt(slotsChain(n, rin, g), "bases too mixed for that shape, used Double Line")
+    end
+    -- Last resort, and the only layout here that gives up the distance rather than
+    -- keeping it: one lattice step, which cannot overlap however the bases are
+    -- mixed. It only ever wins when everything above it still overlaps.
+    if best >= 1000 and shape == "honey" then
         local rmaxK, rminK = {}, {}
         for k = 1, n do
             local d = descs[order[k]]
             rmaxK[k] = max(d.a, d.b); rminK[k] = min(d.a, d.b)
         end
-        local tight
-        slots, tight = slotsHoneycomb(n, rmaxK, rminK, g, dist)
-        if tight then note = "bases too mixed for an exact grid, packed as tight as they fit" end
+        tryIt(slotsHoneyGrid(n, rmaxK, rminK, g),
+              "bases too mixed to pack, spaced on one grid step")
     end
     local sa, sb, cx, cz = 0, 0, 0, 0
     for k = 1, n do sa = sa + slots[k][1]; sb = sb + slots[k][2] end
@@ -570,26 +685,12 @@ local function buildLayout(shape, descs, g, dist, axis)
     return out, note
 end
 
--- Circular mean of yaw angles (degrees): the "face same way" consensus heading,
--- which turns every model the least on average.
-local function meanYaw(yaws)
-    local sx, sc = 0, 0
-    for _, y in ipairs(yaws) do
-        local t = rad(y); sx = sx + sin(t); sc = sc + cos(t)
-    end
-    if abs(sx) + abs(sc) < EPS then return yaws[1] or 0 end
-    local d = deg(atan2(sx, sc))
-    if d < 0 then d = d + 360 end
-    return d
-end
-
 -- Exported for tests/geometry_test.lua only; nothing in TTS reads this.
 AOS_GEO = {
     makeDesc = makeDesc, baseRadiusInDir = baseRadiusInDir, baseGap = baseGap,
     requiredBuddies = requiredBuddies, evaluate = evaluate, summarize = summarize,
-    clusterByGap = clusterByGap,
     principalAxis = principalAxis, buildLayout = buildLayout,
-    shapeGap = shapeGap, meanYaw = meanYaw, MODES = MODES,
+    shapeGap = shapeGap, MODES = MODES,
 }
 
 -- ================================================== BASE + DESCRIPTORS ======
@@ -623,6 +724,9 @@ local function determineBaseInInches(model)
     return out
 end
 
+-- A base wide enough one way and narrow the other: the ones Ovals Sideways turns.
+local function isOvalBase(b) return abs(b.x - b.z) > OVAL_EPS end
+
 -- yaw (degrees) overrides the model's real heading, so a layout can be computed
 -- against the rotation the models are turning to: setRotationSmooth is animated,
 -- so reading the rotation back would give the old pose and size ovals wrongly.
@@ -638,8 +742,6 @@ local function descOf(o, base, yaw)
     return d
 end
 
-local function buildDesc(o, yaw) return descOf(o, determineBaseInInches(o), yaw) end
-
 -- ================================================================ STATUS ====
 -- No status panel: messages go to whoever pressed the button, as a TTS broadcast.
 -- Only buttons speak; the live monitor is silent.
@@ -648,7 +750,43 @@ local function setStatus(msg)
     else broadcastToAll(msg, {0.85, 0.9, 1}) end
 end
 
+local function selectionOf(playerColor)
+    local pl, out = Player[playerColor], {}
+    if pl == nil then return out end
+    local sel = pl.getSelectedObjects()
+    if sel == nil then return out end
+    for _, o in ipairs(sel) do if alive(o) then out[#out + 1] = o end end
+    return out
+end
+
+-- The models a button acts on: whatever the player has selected is the unit.
+local function resolveUnit(playerColor)
+    local sel = selectionOf(playerColor)
+    if #sel == 0 then return nil, "Select models first" end
+    return sel, nil
+end
+
 -- ================================================================= AURAS ====
+-- The colour every aura is drawn in: whichever swatch the picker is on.
+local function auraColor() return AURA_PRESETS[auraIdx] or AURA_PRESETS[1] end
+
+local function sameRGB(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return false end
+    return abs((a[1] or 0) - (b[1] or 0)) < 0.004
+       and abs((a[2] or 0) - (b[2] or 0)) < 0.004
+       and abs((a[3] or 0) - (b[3] or 0)) < 0.004
+end
+
+-- One stored ring, normalised to radius + colour. A bare number is the older
+-- stored form, a radius without a colour, and draws in the colour picked now.
+local function auraEntry(e)
+    if type(e) == "number" then return e, auraColor() end
+    if type(e) == "table" and type(e.r) == "number" then
+        return e.r, (type(e.c) == "table" and e.c or auraColor())
+    end
+    return nil
+end
+
 -- Ring points are object-local (they scale with the object, hence the 1/scale) and
 -- shared between identical models, so 20 Liberators generate one table, not twenty.
 local ringCache = {}
@@ -696,19 +834,6 @@ local function mixRGB(a, b, t)
              a[3] + (b[3] - a[3]) * t }
 end
 
--- Where a radius sits on the seat ramp: each preset gets its own stop, a custom
--- radius interpolates between the two it falls between, and anything past 18"
--- keeps the last stop.
-local function auraColor(r)
-    local n = #AURA_STOPS
-    if r <= AURA_STOPS[1] then return seatRamp[1] end
-    for i = 1, n - 1 do
-        local a, b = AURA_STOPS[i], AURA_STOPS[i + 1]
-        if r <= b then return mixRGB(seatRamp[i], seatRamp[i + 1], (r - a) / (b - a)) end
-    end
-    return seatRamp[n]
-end
-
 local function hexRGB(c, alpha)
     local function ch(v)
         v = floor(v * 255 + 0.5)
@@ -721,6 +846,15 @@ local function hexRGB(c, alpha)
     return string.format("#%02x%02x%02x%02x", ch(c[1]), ch(c[2]), ch(c[3]), ch(alpha))
 end
 
+-- Which label a coloured button wants: Rec. 709 luma of the fill as it actually
+-- appears once the wash has been laid over the parchment, so a dark swatch takes
+-- the pale label and a bright one keeps the anthracite.
+local function labelOver(c, alpha)
+    local m = mixRGB(PARCHMENT, c, alpha)
+    local y = 0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]
+    return (y < 0.5) and ON_TEXT or OFF_TEXT
+end
+
 -- Every ring this model carries, plus a thin outline of the base itself, in ONE
 -- setVectorLines call.
 local function drawAuras(o)
@@ -729,21 +863,30 @@ local function drawAuras(o)
         local b, sf, h = determineBaseInInches(o), 1 / o.getScale().x, ringHeight(o)
         lines[1] = { points = ringPoints(0, b.x, b.z, sf, h, BASE_THICK * 0.5),
                      color = {1, 1, 1, 0.85}, thickness = BASE_THICK }
-        for _, r in ipairs(list) do
-            lines[#lines + 1] = { points = ringPoints(r, b.x, b.z, sf, h, AURA_THICK * 0.5),
-                                  color = auraColor(r), thickness = AURA_THICK }
+        for _, e in ipairs(list) do
+            local r, c = auraEntry(e)
+            if r ~= nil then
+                lines[#lines + 1] = { points = ringPoints(r, b.x, b.z, sf, h,
+                                                          AURA_THICK * 0.5),
+                                      color = c, thickness = AURA_THICK }
+            end
         end
     end
     o.setVectorLines(lines)
 end
 
--- One ring at a time: a new radius replaces whatever the model was carrying, and
--- pressing the radius it already has clears it. Returns true when a ring is now
--- showing. Stored on the model, so it survives save/load.
+-- One ring at a time: a new radius replaces whatever the model was carrying.
+-- Pressing the radius it already has, in the colour it already has, clears it;
+-- pressing it after picking a different colour recolours instead, which is how a
+-- ring is changed without having to take it off and put it back. Returns true
+-- when a ring is now showing. Stored on the model, so it survives save/load.
 local function setAura(o, r)
     local list = o.getTable("aos_auras")
-    local same = list ~= nil and list[1] ~= nil and abs(list[1] - r) < 0.001
-    o.setTable("aos_auras", same and {} or { r })
+    local cur, curC = nil, nil
+    if list ~= nil then cur, curC = auraEntry(list[1]) end
+    local c = auraColor()
+    local same = cur ~= nil and abs(cur - r) < 0.001 and sameRGB(curC, c)
+    o.setTable("aos_auras", same and {} or { { r = r, c = c } })
     drawAuras(o)
     return not same
 end
@@ -751,7 +894,7 @@ end
 -- Sets rather than toggles, because onEndEdit also fires on clicking away: firing
 -- twice on the same radius has to leave the ring up. The presets keep the toggle.
 local function forceAura(o, r)
-    o.setTable("aos_auras", { r })
+    o.setTable("aos_auras", { { r = r, c = auraColor() } })
     drawAuras(o)
 end
 
@@ -760,91 +903,16 @@ local function clearAuras(o)
     o.setVectorLines({})
 end
 
--- =============================================================== TAGGING ====
-local function objectsWithTag(tag)
-    if getObjectsWithTag ~= nil then
-        local r = getObjectsWithTag(tag)
-        if r ~= nil then return r end
-    end
-    local out = {}                                  -- fallback: one full pass
-    for _, o in ipairs(getAllObjects()) do
-        if o.hasTag(tag) then out[#out + 1] = o end
-    end
-    return out
-end
-
-local TAG_ANY = "^" .. TAG_PREFIX .. "%d+$"                            -- anyone's
-local TAG_OUR = "^" .. TAG_PREFIX .. TAG_MARK .. "%d+" .. TAG_MARK .. "$"  -- ours
-local function isUnitTag(t) return string.match(t, TAG_ANY) ~= nil end
-local function isOurTag(t)  return string.match(t, TAG_OUR) ~= nil end
-
--- The unit a model belongs to. Ours wins when a model carries both, so a model
--- shared with another script still resolves to one unit here.
-local function unitTagOf(o)
-    local tags = o.getTags()
-    if tags == nil then return nil end
-    local other = nil
-    for _, t in ipairs(tags) do
-        if isOurTag(t) then return t end
-        if other == nil and isUnitTag(t) then other = t end
-    end
-    return other
-end
-
--- Only ever strips our own ids; a foreign uuid: tag on the same model survives.
-local function stripOurTags(o)
-    local tags = o.getTags()
-    if tags == nil then return end
-    for _, t in ipairs(tags) do
-        if isOurTag(t) then o.removeTag(t) end
-    end
-end
-
-local function selectionOf(playerColor)
-    local pl, out = Player[playerColor], {}
-    if pl == nil then return out end
-    local sel = pl.getSelectedObjects()
-    if sel == nil then return out end
-    for _, o in ipairs(sel) do if alive(o) then out[#out + 1] = o end end
-    return out
-end
-
--- One uuid tag in the selection -> the whole unit, selected or not. None -> the
--- raw selection as an ad-hoc unit. Two or more -> refuse. Returns objs,tag,err.
-local function resolveUnit(playerColor)
-    local sel = selectionOf(playerColor)
-    if #sel == 0 then return nil, nil, "Select models first" end
-    local seen, tags = {}, {}
-    for _, o in ipairs(sel) do
-        local t = unitTagOf(o)
-        if t ~= nil and not seen[t] then seen[t] = true; tags[#tags + 1] = t end
-    end
-    if #tags > 1 then
-        return nil, nil, "Selection spans " .. #tags .. " units"
-    end
-    if #tags == 0 then return sel, nil, nil end
-    local objs = {}
-    for _, o in ipairs(objectsWithTag(tags[1])) do
-        if alive(o) then objs[#objs + 1] = o end
-    end
-    return objs, tags[1], nil
-end
-
 -- ===================================================== COHERENCY MONITOR ====
 local refreshUI            -- forward declaration; defined with the UI glue
-local hlGlowsLost          -- forward declaration; defined with the highlighter
 
 local function clearMonitorVisuals()
-    local released = {}
     for guid in pairs(monGlowed) do                 -- only ever our own glows
         local o = getObjectFromGUID(guid)
         if alive(o) then o.highlightOff() end
-        released[#released + 1] = guid
     end
     monGlowed, monGlowState = {}, {}
     self.setVectorLines({})
-    -- Those highlightOff calls may have taken an aura glow off with them.
-    if hlGlowsLost ~= nil then hlGlowsLost(released) end
 end
 
 local function stopMonitor(msg)
@@ -853,7 +921,7 @@ local function stopMonitor(msg)
     if monTimeout ~= nil then Wait.stop(monTimeout); monTimeout = nil end
     clearMonitorVisuals()
     monGuids, monIdx, monDesc, monBase, monDrop = {}, {}, {}, {}, {}
-    monGap, monCp, monPrevMoving, monTag = {}, {}, {}, nil
+    monGap, monCp, monPrevMoving = {}, {}, {}
     if msg ~= nil then setStatus(msg) end
 end
 
@@ -915,20 +983,14 @@ local function drawMonitor()
             want[guid] = true
         end
     end
-    local released = nil
     for guid in pairs(monGlowed) do
         if want[guid] == nil then
             local o = getObjectFromGUID(guid)
             if alive(o) then o.highlightOff() end
             monGlowState[guid] = nil
-            released = released or {}
-            released[#released + 1] = guid
         end
     end
     monGlowed = want
-    -- monGlowed is updated FIRST: the highlighter decides what the monitor owns by
-    -- reading it, and these models are no longer in it.
-    if released ~= nil and hlGlowsLost ~= nil then hlGlowsLost(released) end
     -- A plain segment between the two base edges at one shared height, mapped
     -- through positionToLocal so it lands where the models are whatever the tool
     -- object's transform is.
@@ -1037,214 +1099,6 @@ local function resyncMonitor()
     startMotionLoop()
 end
 
--- ============================================================ HIGHLIGHTS ====
--- Enable Highlight glows every model standing inside somebody's aura, in that
--- aura's own colour, and WHITE when two auras reach it at once.
---
--- Three things keep it cheap enough to leave on. The rescan -- getAllObjects plus
--- a getTags and a getTable per object -- runs once every HL_RESCAN ticks and is
--- cached; every tick against that cache is one squared-distance compare per aura
--- per model, with no square roots, for every pair two round bases can settle; and
--- hlApplied remembers what this tool lit, so a still table issues no highlightOn
--- calls at all.
-local hlObj = {}                                -- guid -> object, from the rescan
-
-local function hlRescan()
-    hlModels, hlSources, hlObj = {}, {}, {}
-    local all = getAllObjects()
-    for i = 1, #all do
-        if #hlModels >= HL_MAX_SCAN then break end
-        local o = all[i]
-        local tag = alive(o) and o ~= self and unitTagOf(o) or nil
-        if o ~= self and alive(o) and (MODEL_TYPES[o.type] or tag ~= nil) then
-            local base = determineBaseInInches(o)
-            local ba, bb = base.x, base.z
-            -- br and sr are the circumscribed and inscribed radii, which fence the
-            -- oval work off in hlCompute; equal for a round base.
-            local br = (ba > bb) and ba or bb
-            local sr = (ba < bb) and ba or bb
-            local guid = o.getGUID()
-            hlObj[guid] = o
-            hlModels[#hlModels + 1] = { o = o, guid = guid, tag = tag,
-                                        a = ba, b = bb, br = br, sr = sr }
-            local list = o.getTable("aos_auras")
-            if list ~= nil and list[1] ~= nil then
-                hlSources[#hlSources + 1] = { o = o, guid = guid, tag = tag,
-                                              a = ba, b = bb, br = br, sr = sr,
-                                              r = list[1], c = auraColor(list[1]) }
-            end
-        end
-    end
-end
-
--- Reach is base edge to base edge -- the oval the ring is drawn around, at the
--- rotation the model is standing at -- and measured FLAT: only x and z are read.
--- The oval case is fenced between the circumscribed and inscribed circles, so only
--- a model in the thin band where those disagree pays for a square root.
-
--- The base's own radius toward the unit vector (ux, uz). Round bases answer
--- without touching the object; an oval needs its two world axes, read once per
--- pass and thrown away at the start of the next, because models turn.
-local function hlReachInDir(m, ux, uz)
-    if m.br == m.sr then return m.br end
-    local d = m.desc
-    if d == nil then
-        d = { a = m.a, b = m.b,
-              right = m.o.getTransformRight(), forward = m.o.getTransformForward() }
-        m.desc = d
-    end
-    return baseRadiusInDir(d, ux, uz)
-end
-
-local function hlCompute()
-    local claims = {}
-    if #hlSources == 0 then return claims end
-    local n, mp = #hlModels, {}
-    for i = 1, n do
-        local m = hlModels[i]
-        m.desc = nil
-        if alive(m.o) then mp[i] = m.o.getPosition() end
-    end
-    for j = 1, #hlSources do
-        local s = hlSources[j]
-        s.desc = nil
-        local p = alive(s.o) and s.o.getPosition() or nil
-        if p ~= nil then
-            local px, pz, r = p.x, p.z, s.r
-            local outer, inner = r + s.br, r + s.sr
-            for i = 1, n do
-                local q, m = mp[i], hlModels[i]
-                -- An aura never lights its own unit.
-                if q ~= nil and m.guid ~= s.guid
-                   and not (s.tag ~= nil and s.tag == m.tag) then
-                    local dx, dz = q.x - px, q.z - pz
-                    local d2 = dx * dx + dz * dz
-                    local far, near = outer + m.br, inner + m.sr
-                    local hit
-                    if d2 > far * far then hit = false
-                    elseif d2 <= near * near then hit = true
-                    else
-                        -- The band between the two circles, so measure it properly.
-                        -- centre is > 0 here: a zero distance is inside `near`.
-                        local centre = sqrt(d2)
-                        local ux, uz = dx / centre, dz / centre
-                        hit = (centre - hlReachInDir(s, ux, uz)
-                                      - hlReachInDir(m, -ux, -uz)) <= r
-                    end
-                    if hit then
-                        local cl = claims[m.guid]
-                        if cl == nil then claims[m.guid] = { c = s.c, n = 1 }
-                        else cl.n = cl.n + 1 end
-                    end
-                end
-            end
-        end
-    end
-    return claims
-end
-
--- What THIS tool is lighting, for the other copies to read: the last tick's cached
--- answer, so a sibling asking never makes this tool recompute. A tool with its
--- highlight off publishes nothing.
-function aosClaims()
-    return hlActive and hlClaims or {}
-end
-
--- The overlap rule spans tools: every copy merges the same claims from the same
--- sources and so reaches the same answer without fighting the others.
-local function hlMerged()
-    local merged = {}
-    local function add(src)
-        for guid, cl in pairs(src) do
-            local m = merged[guid]
-            if m == nil then merged[guid] = { c = cl.c, n = cl.n }
-            else m.n = m.n + cl.n end
-        end
-    end
-    add(hlClaims)
-    for _, o in ipairs(objectsWithTag(TOOL_TAG)) do
-        if o ~= self and alive(o) then
-            local ok, other = pcall(function() return o.call("aosClaims") end)
-            if ok and type(other) == "table" then add(other) end
-        end
-    end
-    return merged
-end
-
--- The monitor owns a model only while it is actually glowing it, not for as long as
--- the model is in the unit being measured, so a model it has stopped glowing is
--- free for an aura again.
-local function hlOwnedByMonitor(guid)
-    return monActive and monGlowed[guid] ~= nil
-end
-
-local function hlApply(merged)
-    local want = {}
-    for guid, cl in pairs(merged) do
-        -- The monitor's green and red outrank an aura colour.
-        if not hlOwnedByMonitor(guid) then
-            want[guid] = (cl.n > 1) and OVERLAP_COLOR or cl.c
-        end
-    end
-    for guid in pairs(hlApplied) do
-        if want[guid] == nil and not hlOwnedByMonitor(guid) then
-            local o = hlObj[guid] or getObjectFromGUID(guid)
-            if alive(o) then o.highlightOff() end
-        end
-    end
-    for guid, c in pairs(want) do
-        local prev = hlApplied[guid]
-        if prev == nil or prev[1] ~= c[1] or prev[2] ~= c[2] or prev[3] ~= c[3] then
-            local o = hlObj[guid] or getObjectFromGUID(guid)
-            if alive(o) then o.highlightOn(c) end
-        end
-    end
-    hlApplied = want
-end
-
-local function hlStop()
-    hlActive = false
-    if hlTimer ~= nil then Wait.stop(hlTimer); hlTimer = nil end
-    for guid in pairs(hlApplied) do
-        if not hlOwnedByMonitor(guid) then
-            local o = hlObj[guid] or getObjectFromGUID(guid)
-            if alive(o) then o.highlightOff() end
-        end
-    end
-    hlApplied, hlClaims = {}, {}
-end
-
-local function hlPass()
-    hlClaims = hlCompute()
-    hlApply(hlMerged())
-end
-
--- Something else has taken its glow off these models -- the monitor letting a unit
--- go, or a smart-tag flash expiring. Whatever this tool believed they were wearing
--- went with it, so the record has to go too: hlApply paints by difference, and a
--- model it still thinks is lit in the right colour is one it will never light
--- again. Re-assert at once rather than leaving them dark until the next tick.
-hlGlowsLost = function(guids)
-    if not hlActive then return end
-    for i = 1, #guids do hlApplied[guids[i]] = nil end
-    hlPass()
-end
-
-local function hlTick()
-    if not hlActive then return end
-    hlSince = hlSince + 1
-    if hlSince >= HL_RESCAN then hlSince = 0; hlRescan() end
-    hlPass()
-end
-
-local function hlStart()
-    hlActive, hlSince = true, 0
-    hlRescan()
-    hlPass()
-    if hlTimer ~= nil then Wait.stop(hlTimer) end
-    hlTimer = Wait.time(hlTick, HL_TICK, -1)
-end
-
 -- ================================================================ SHAPES ====
 local SHAPE_LABEL = { line = "Single Line", double = "Double Line",
                       triangles = "Dogbone", honey = "Honeycomb" }
@@ -1256,14 +1110,30 @@ local function offLevel(a)
     return abs(a)
 end
 
--- The frame every formation is built in: the tool's own long edge as the axis the
--- shape runs along, the tool's forward as the heading every model ends on. Both
--- come off one yaw so they cannot drift apart. A y rotation of t puts local +X at
--- (cos t, -sin t) and +Z at (sin t, cos t), the frame descOf builds for that yaw.
+-- The frame EVERY formation is built in, so a unit always lands parallel to the
+-- panel and facing out across the table, whatever way it was standing before:
+-- the tool's own long edge is the axis the shape runs along, and the tool's
+-- forward -- a quarter turn from that edge, pointing away from the panel -- is
+-- the heading every model ends on. Both come off one vector, so they cannot
+-- drift apart.
+--
+-- It is read off the object's TRANSFORM rather than its Euler angles. A yaw of t
+-- puts local +X at (cos t, -sin t) and +Z at (sin t, cos t) -- the frame descOf
+-- builds for that yaw -- but getRotation().y stops being that heading the moment
+-- the tool is tilted or flipped, and the formation then comes out square to the
+-- panel instead of along it. The transform stays right through both.
 local function toolFrame()
-    local yaw = self.getRotation().y
-    local t = rad(yaw)
-    return { x = cos(t), z = -sin(t) }, yaw
+    local r = self.getTransformRight()
+    local ax, az = r.x, r.z
+    local m = sqrt(ax * ax + az * az)
+    if m < EPS then                                 -- stood on end: no long edge
+        local f = self.getTransformForward()        -- on the table, so take the
+        ax, az = f.z, -f.x                          -- forward turned back a quarter
+        m = sqrt(ax * ax + az * az)
+        if m < EPS then ax, az, m = 1, 0, 1 end     -- and world +x if that fails too
+    end
+    ax, az = ax / m, az / m
+    return { x = ax, z = az }, deg(atan2(-az, ax)) % 360
 end
 
 -- Shapes always stand their models up: a leaning model reports its silhouette from
@@ -1284,7 +1154,7 @@ local function standUp(objs, yaws)
 end
 
 local function doShape(shape, playerColor)
-    local objs, tag, err = resolveUnit(playerColor)
+    local objs, err = resolveUnit(playerColor)
     if err ~= nil then return setStatus(err) end
     local n = #objs
     if n < 2 then return setStatus("Need 2+ models") end
@@ -1293,20 +1163,28 @@ local function doShape(shape, playerColor)
     end
     -- Settle on the end pose first, so the descriptors below are built against the
     -- pose the models are about to have rather than the one they are leaving.
+    -- Ovals Sideways turns the oval bases a quarter turn out of that heading and
+    -- leaves the round ones alone -- a round base presents the same footprint
+    -- either way, and turning it would only leave the model looking off to one
+    -- side while the rest of the unit faces front.
     local axis, yaw = toolFrame()
-    local yaws = {}
-    for i = 1, n do yaws[i] = yaw end
-    standUp(objs, yaws)
-
-    local descs, snap = {}, {}
+    local bases, yaws, snap = {}, {}, {}
     for i = 1, n do
-        descs[i] = buildDesc(objs[i], yaws[i])
-        snap[i]  = { guid = objs[i].getGUID(), pos = objs[i].getPosition(),
-                     rot = objs[i].getRotation() }
+        bases[i] = determineBaseInInches(objs[i])
+        if ovalSideways and isOvalBase(bases[i]) then yaws[i] = (yaw + 90) % 360
+        else yaws[i] = yaw end
+        -- Snapshot for Undo before anything moves: setRotationSmooth is animated,
+        -- so a rotation read back after standUp can already be the new heading.
+        snap[i] = { guid = objs[i].getGUID(), pos = objs[i].getPosition(),
+                    rot = objs[i].getRotation() }
     end
     undoStack = snap                                -- one level of undo is enough
+    standUp(objs, yaws)
+
+    local descs = {}
+    for i = 1, n do descs[i] = descOf(objs[i], bases[i], yaws[i]) end
     local dist = MODES[uiMode].dist
-    local pos, note = buildLayout(shape, descs, shapeGap(uiMode), dist, axis)
+    local pos, note = buildLayout(shape, descs, shapeGap(uiMode), axis)
     for i = 1, n do
         local p = { x = pos[i].x, y = descs[i].pos.y, z = pos[i].z }
         objs[i].setPositionSmooth(p, false, true)   -- no collision, fast
@@ -1334,217 +1212,39 @@ local function paint(id, on)
     self.UI.setAttribute(id, "textColor", on and ON_TEXT  or OFF_TEXT)
 end
 
--- The seat this tool serves: the nearest player hand when it loads. Hands do not
--- wander mid-game, so once is enough; no hand near enough keeps the neutral ramp.
-local function findSeat()
-    local p, best, bestD = self.getPosition(), nil, nil
-    for _, c in ipairs(SEAT_COLORS) do
-        local ok, t = pcall(function() return Player[c].getHandTransform() end)
-        if ok and type(t) == "table" and t.position ~= nil then
-            local dx, dz = t.position.x - p.x, t.position.z - p.z
-            local d = dx * dx + dz * dz
-            if bestD == nil or d < bestD then best, bestD = c, d end
-        end
+local AURA_BTN = { "aura3", "aura6", "aura9", "aura12", "aura18" }
+
+-- The five radius buttons and Aura Color all wear the picked colour, so the
+-- column says what the next ring will look like before it is drawn, and the
+-- swatch that is picked is ringed in the popup.
+local function paintAuraButtons()
+    local c = auraColor()
+    local fill, text = hexRGB(c, AURA_BTN_ALPHA), labelOver(c, AURA_BTN_ALPHA)
+    for _, id in ipairs(AURA_BTN) do
+        self.UI.setAttribute(id, "color",     fill)
+        self.UI.setAttribute(id, "textColor", text)
     end
-    if best ~= nil then
-        seatColor = best
-        seatRamp  = SEAT_RAMPS[best] or NEUTRAL_RAMP
+    self.UI.setAttribute("colorBtn", "color",     hexRGB(c, COLOR_BTN_ALPHA))
+    self.UI.setAttribute("colorBtn", "textColor", labelOver(c, COLOR_BTN_ALPHA))
+    for i = 1, #AURA_PRESETS do
+        local on = (i == auraIdx)
+        self.UI.setAttribute("auraCol" .. i, "outline",
+                             on and "#f2f1ec" or "#29313366")
+        self.UI.setAttribute("auraCol" .. i, "outlineSize", on and "4 4" or "2 2")
     end
-    -- The lit fill and the Tag ring both come off the far end of the ramp. The aura
-    -- swatches do not follow: each of those is its own stop.
-    local lit = mixRGB(seatRamp[#seatRamp], ANTHRACITE_RGB, ACTIVE_MIX)
-    ON_COLOR = hexRGB(lit, ACTIVE_ALPHA)
-    FRAME_ON = hexRGB(lit)
 end
 
-local AURA_BTN = { { id = "aura3",  r = 3  }, { id = "aura6",  r = 6 },
-                   { id = "aura9",  r = 9  }, { id = "aura12", r = 12 },
-                   { id = "aura18", r = 18 } }
-
--- Each button is filled with its own ring colour, label left anthracite on top.
-local function paintAuraButtons()
-    for _, b in ipairs(AURA_BTN) do
-        self.UI.setAttribute(b.id, "color", hexRGB(auraColor(b.r), AURA_BTN_ALPHA))
-    end
+local function showColors(on)
+    colorOpen = on
+    self.UI.setAttribute("colorPopup", "active", on and "true" or "false")
 end
 
 refreshUI = function()
     for i = 1, #MODES do paint(MODES[i].id, i == uiMode) end
     for i = 1, #BUDDY_IDS do paint(BUDDY_IDS[i], (i - 1) == buddyOverride) end
     paint("checkBtn", monActive)
-    paint("hlBtn",    hlActive)
+    paint("ovalBtn",  ovalSideways)
     self.UI.setAttribute("customAura", "text", lastCustom)
-end
-
--- TTS fires no selection-changed event, so the Tag / Untag buttons need one poll.
--- It reads at most SEL_SCAN objects per seated player, stops at the first of our
--- own ids, and touches the UI only when the answer flips. This is the one timer
--- that runs while the tool is idle.
---
--- Returns "ours" | "other" | "none": the frame lights for any recognised unit,
--- Untag only for our own ids, since those are the only ones it will take off.
-local function selectionTagState()
-    local players = Player.getPlayers()
-    if players == nil or #players == 0 then
-        if actingColor == nil then return "none" end
-        players = { Player[actingColor] }
-    end
-    local state = "none"
-    for _, pl in ipairs(players) do
-        if pl ~= nil then
-            local sel = pl.getSelectedObjects()
-            if sel ~= nil then
-                for i = 1, min(#sel, SEL_SCAN) do
-                    local t = alive(sel[i]) and unitTagOf(sel[i]) or nil
-                    if t ~= nil then
-                        if isOurTag(t) then return "ours" end
-                        state = "other"
-                    end
-                end
-            end
-        end
-    end
-    return state
-end
-
-local function selWatchTick()
-    local st = selectionTagState()
-    if st == selTagState then return end
-    selTagState = st
-    local known, ours = (st ~= "none"), (st == "ours")
-    -- Ring and inverted fill together, so Tag does not read as another lit toggle.
-    self.UI.setAttribute("tagFrame", "color", known and FRAME_ON or FRAME_OFF)
-    paint("tagBtn", known)
-    self.UI.setAttribute("untagBtn", "interactable", ours and "true" or "false")
-    self.UI.setAttribute("untagBtn", "textColor", ours and OFF_TEXT or DISABLED_TEXT)
-end
-
--- Any model here already carrying another script's unit id, or nil. Adding ours on
--- top would put it in two units at once, so tagging leaves such a unit alone.
-local function foreignTagIn(objs)
-    for _, o in ipairs(objs) do
-        local t = unitTagOf(o)
-        if t ~= nil and not isOurTag(t) then return t end
-    end
-    return nil
-end
-
--- A unit id nothing on the table is using yet: the two 77 bookends and 20 random
--- digits, assembled from four 5-digit chunks because math.random cannot produce an
--- integer that wide in one call. Smart tag applies each tag before asking for the
--- next, so the collision check sees the ids it has already handed out.
-local function newUnitTag()
-    for _ = 1, 20 do                                -- re-roll on collision
-        local t = TAG_PREFIX .. TAG_MARK .. string.format("%05d%05d%05d%05d",
-            math.random(0, 99999), math.random(0, 99999),
-            math.random(0, 99999), math.random(0, 99999)) .. TAG_MARK
-        if #objectsWithTag(t) == 0 then return t end
-    end
-    return nil
-end
-
-function aosTag(player)
-    actingColor = player.color
-    local sel = selectionOf(player.color)
-    if #sel == 0 then return setStatus("Select models first") end
-    if foreignTagIn(sel) ~= nil then return setStatus("Already tagged elsewhere") end
-    local tag = newUnitTag()
-    if tag == nil then return setStatus("No free unit id") end
-    for _, o in ipairs(sel) do
-        stripOurTags(o)                             -- never in two of OUR units
-        o.addTag(tag)
-    end
-    if not sel[1].hasTag(tag) then
-        return setStatus("TTS rejected the tag format")
-    end
-    selTagState = nil                               -- let the watcher re-evaluate
-    setStatus("Tagged " .. #sel .. " models")
-end
-
--- Split the selection into units by how the models are actually standing and give
--- each cluster its own fresh id. Clusters another script has tagged are stepped
--- over rather than refused. Same O(n^2) pass as the check, on a button press only.
-function aosSmartTag(player)
-    actingColor = player.color
-    local sel = selectionOf(player.color)
-    if #sel == 0 then return setStatus("Select models first") end
-    if #sel > SMART_MAX then
-        return setStatus("Too many models: " .. #sel .. "/" .. SMART_MAX)
-    end
-    local descs = {}
-    for i = 1, #sel do descs[i] = buildDesc(sel[i]) end
-    local comp = clusterByGap(descs, SMART_GAP)
-    local keep, kept = {}, 0
-    for i = 1, #sel do
-        local t = unitTagOf(sel[i])
-        if t ~= nil and not isOurTag(t) and not keep[comp[i]] then
-            keep[comp[i]], kept = true, kept + 1
-        end
-    end
-    for i = 1, #sel do
-        if not keep[comp[i]] then stripOurTags(sel[i]) end  -- not in two of OURS
-    end
-    local tags, made = {}, 0
-    for i = 1, #sel do
-        local c = comp[i]
-        if not keep[c] then
-            if tags[c] == nil then
-                tags[c] = newUnitTag()
-                if tags[c] == nil then
-                    selTagState = nil
-                    return setStatus("No free unit id")
-                end
-                made = made + 1
-            end
-            sel[i].addTag(tags[c])
-        end
-    end
-    -- Show the grouping, one colour per unit, so a wrong split is obvious.
-    local flashed = {}
-    for i = 1, #sel do
-        sel[i].highlightOn(UNIT_COLORS[((comp[i] - 1) % #UNIT_COLORS) + 1], SMART_HILITE)
-        flashed[#flashed + 1] = sel[i].getGUID()
-    end
-    -- The flash expiring takes any monitor or highlighter glow on the same models
-    -- with it. Both paint by difference, so tell them: the monitor first, because
-    -- the highlighter steps over whatever the monitor owns.
-    Wait.time(function()
-        if monActive then monGlowState = {}; drawMonitor() end
-        if hlGlowsLost ~= nil then hlGlowsLost(flashed) end
-    end, SMART_HILITE + 0.2)
-    selTagState = nil
-    local msg = "Smart tag: " .. made .. " units"
-    if kept > 0 then msg = msg .. ", " .. kept .. " left alone" end
-    setStatus(msg)
-end
-
--- Untags the whole unit, not just the models the player happened to click. Only our
--- own ids come off; a unit another script tagged is reported and left alone.
-function aosUntag(player)
-    actingColor = player.color
-    local sel = selectionOf(player.color)
-    if #sel == 0 then return setStatus("Select models first") end
-    local seen, n, units, foreign = {}, 0, 0, 0
-    for _, o in ipairs(sel) do
-        local t = unitTagOf(o)
-        if t ~= nil and not seen[t] then
-            seen[t] = true
-            if isOurTag(t) then
-                units = units + 1
-                for _, m in ipairs(objectsWithTag(t)) do
-                    if alive(m) then stripOurTags(m); n = n + 1 end
-                end
-            else
-                foreign = foreign + 1               -- another script's id: leave it
-            end
-        end
-    end
-    selTagState = nil
-    if n == 0 then
-        if foreign > 0 then return setStatus("Not our tag, left alone") end
-        return setStatus("Nothing tagged")
-    end
-    setStatus("Untagged " .. units .. " units")
 end
 
 function aosMode(player, value, id)
@@ -1561,20 +1261,28 @@ function aosBuddy(player, value, id)
     if monActive then drawMonitor() end
 end
 
+function aosOval(player)
+    actingColor = player.color
+    ovalSideways = not ovalSideways
+    refreshUI()
+    setStatus(ovalSideways and "Oval bases turn sideways in formations"
+                            or "Oval bases face forward in formations")
+end
+
 function aosCheck(player)
     actingColor = player.color
     if monActive then
         stopMonitor("Coherency off")
         return refreshUI()
     end
-    local objs, tag, err = resolveUnit(player.color)
+    local objs, err = resolveUnit(player.color)
     if err ~= nil then return setStatus(err) end
     if #objs < 2 then return setStatus("Need 2+ models") end
     if #objs > MAX_UNIT then
         return setStatus("Unit too big: " .. #objs .. "/" .. MAX_UNIT)
     end
     stopMonitor()                                   -- only one monitor per tool
-    monActive, monTag, monGuids = true, tag, {}
+    monActive, monGuids = true, {}
     for _, o in ipairs(objs) do monGuids[#monGuids + 1] = o.getGUID() end
     fullRecompute()
     local r = drawMonitor()
@@ -1594,19 +1302,29 @@ function aosCheck(player)
     refreshUI()
 end
 
-function aosHighlight(player)
+-- ---- the colour picker -----------------------------------------------------
+function aosColors(player)
     actingColor = player.color
-    if hlActive then
-        hlStop()
-        refreshUI()
-        return setStatus("Highlight off")
-    end
-    hlStart()
-    refreshUI()
-    setStatus(seatColor ~= nil and ("Highlight on (" .. seatColor .. ")")
-                                or "Highlight on")
+    showColors(not colorOpen)
 end
 
+function aosColorsClose(player)
+    if player ~= nil then actingColor = player.color end
+    showColors(false)
+end
+
+-- The swatch ids are auraCol1..auraCol12, in AURA_PRESETS order, so the index is
+-- whatever follows the prefix.
+function aosPickColor(player, value, id)
+    actingColor = player.color
+    local i = tonumber(string.sub(id, 8))
+    if i == nil or AURA_PRESETS[i] == nil then return end
+    auraIdx = i
+    paintAuraButtons()
+    showColors(false)
+end
+
+-- ---- auras -----------------------------------------------------------------
 local function auraOnSelection(playerColor, r)
     local sel = selectionOf(playerColor)
     if #sel == 0 then return setStatus("Select models first") end
@@ -1689,6 +1407,7 @@ function aosClearAll(player)
                      or ("Cleared " .. n .. " auras"))
 end
 
+-- ---- formation -------------------------------------------------------------
 function aosShape(player, value, id)
     actingColor = player.color
     local map = { shapeLine = "line", shapeDouble = "double",
@@ -1755,35 +1474,29 @@ end
 
 -- ======================================================= SAVE / LOAD ========
 -- uiMode is deliberately NOT saved: the coherency distance always comes back at
--- 0.5", the value nearly every unit uses. Nor is the highlight, which is a live
--- loop. The other two persist -- they are preferences, not readings.
+-- 0.5", the value nearly every unit uses. The rest persist -- they are
+-- preferences, not readings.
 function onSave()
-    return JSON.encode({ buddy = buddyOverride, custom = lastCustom })
+    return JSON.encode({ buddy = buddyOverride, custom = lastCustom,
+                         color = auraIdx, oval = ovalSideways })
 end
 
 function onLoad(saved)
     local _
     _, VERSION = Updater_stateVersion(saved)   -- the version this copy is on
     ensureUIAssets()
-    -- So the copies of this tool can find each other for the overlap rule.
-    if not self.hasTag(TOOL_TAG) then self.addTag(TOOL_TAG) end
-    findSeat()
     if saved ~= nil and saved ~= "" then
         local ok, d = pcall(JSON.decode, saved)
         if ok and type(d) == "table" then
             -- d.mode, written by versions before this one, is ignored on purpose.
             if type(d.buddy)  == "number" then buddyOverride = d.buddy end
             if type(d.custom) == "string" then lastCustom = d.custom end
+            if type(d.color)  == "number" and AURA_PRESETS[d.color] ~= nil then
+                auraIdx = d.color
+            end
+            if type(d.oval)   == "boolean" then ovalSideways = d.oval end
         end
     end
-    -- Seed from the GUID as well as the clock, so two tools placed in the same
-    -- second do not roll the same unit ids.
-    local seed, g = 0, self.getGUID()
-    for i = 1, #g do seed = seed + string.byte(g, i) * i end
-    pcall(function() seed = seed + os.time() end)
-    math.randomseed(seed)
-    if selWatchTimer ~= nil then Wait.stop(selWatchTimer) end
-    selWatchTimer = Wait.time(selWatchTick, SEL_WATCH, -1)
 end
 
 -- Everything that paints the panel, run once the panel is actually there. The
@@ -1792,17 +1505,12 @@ end
 function onUIReady()
     refreshUI()
     paintAuraButtons()
+    showColors(false)
     self.UI.setAttribute("versionText", "text", "v" .. VERSION)
-    selTagState = nil
-    selWatchTick()
 end
 
 function onDestroy()
-    -- Highlighter first: stopMonitor hands released models back to it, and there is
-    -- no point re-lighting models a moment before the tool that lit them goes away.
-    hlStop()
     stopMonitor()
-    if selWatchTimer ~= nil then Wait.stop(selWatchTimer); selWatchTimer = nil end
 end
 
 -- ===========================================================================
@@ -1815,7 +1523,7 @@ local TOOL_XML = [[
      AoS Coherency Tool - object UI.
 
      Laid out WIDE and SHORT, should sit along the edge of a game table:
-     four columns - Auras, Coherency, Formation, Tags, narrow credit strip.
+     three columns - Auras, Coherency, Formation - and a narrow credit strip.
      Nothing in the Lua depends on the order - the script addresses the buttons
      by id, so the columns can be shuffled here.
 
@@ -1838,12 +1546,18 @@ local TOOL_XML = [[
      re-applies them; both carry a textColor of their own, because the anthracite
      one from Defaults would be invisible on a dark fill. No `colors` attribute in
      Defaults for the same reason - it would override the background the script
-     sets. The five aura buttons carry no colour here: the script fills each
-     with its own ring colour on load, and they wear the ordinary wash until then.
+     sets. The five aura buttons and colorBtn carry no colour here: the script
+     fills them with the chosen aura colour on load, and they wear the ordinary
+     wash until then.
+
+     COLOUR PICKER. colorPopup is the last child of panelField, so it draws over
+     everything else, and starts inactive. Its twelve swatches carry their preset
+     fill here - that list is the one in AURA_PRESETS at the top of the Lua, in
+     the same order, and the script reads a swatch's index out of its id.
 
      Both three-way rows (distance, buddy rule) set childForceExpandWidth="false"
-     and size their buttons by hand, because an equal three-way split of the 350
-     column leaves 112 px per button and "Base Contact" wraps at that width.
+     and size their buttons by hand, so the long labels ("Base Contact", the two
+     "in Range") get the room an equal three-way split would give the short ones.
 
      VERSION in the Lua, which onUIReady writes into versionText here once the
      panel is live. Nothing sets a version by hand in either file. -->
@@ -1853,9 +1567,7 @@ local TOOL_XML = [[
   <!-- fontStyle Bold across every button: the stock face is thin enough at this
        size to go soft as soon as the camera leaves the panel. -->
   <Button color="#ffffff40" textColor="#293133" fontSize="20" fontStyle="Bold"
-          outline="#29313366" outlineSize="2 2"
-          tooltipPosition="Above" tooltipOffset="10"
-          tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+          outline="#29313366" outlineSize="2 2"/>
   <HorizontalLayout spacing="6" childForceExpandWidth="true" preferredHeight="46"/>
   <VerticalLayout spacing="6" childForceExpandHeight="false"/>
   <!-- Same wash, edge and weight as the buttons, so the field reads as one of
@@ -1863,9 +1575,7 @@ local TOOL_XML = [[
   <InputField fontSize="20" fontStyle="Bold" textColor="#293133"
               textAlignment="MiddleCenter"
               colors="#ffffff40|#ffffff73|#ffffff26|#ffffff26"
-              outline="#29313366" outlineSize="2 2"
-              tooltipPosition="Above" tooltipOffset="10"
-              tooltipBackgroundColor="#0d1013f2" tooltipTextColor="#e8eaed"/>
+              outline="#29313366" outlineSize="2 2"/>
 </Defaults>
 
 <Panel id="root" position="665 -95 -500" rotation="0 0 0"
@@ -1887,111 +1597,79 @@ local TOOL_XML = [[
         <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
               alignment="UpperCenter">AURAS (Selected Models)</Text>
         <HorizontalLayout>
-          <Button id="aura3"  onClick="aosAura" text="3&quot;"
-                  tooltip="Ring 3&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura6"  onClick="aosAura" text="6&quot;"
-                  tooltip="Ring 6&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura9"  onClick="aosAura" text="9&quot;"
-                  tooltip="Ring 9&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura12" onClick="aosAura" text="12&quot;"
-                  tooltip="Ring 12&quot; on each selected model. Press it again to clear."/>
-          <Button id="aura18" onClick="aosAura" text="18&quot;"
-                  tooltip="Ring 18&quot; on each selected model. Press it again to clear."/>
+          <Button id="aura3"  onClick="aosAura" text="3&quot;"/>
+          <Button id="aura6"  onClick="aosAura" text="6&quot;"/>
+          <Button id="aura9"  onClick="aosAura" text="9&quot;"/>
+          <Button id="aura12" onClick="aosAura" text="12&quot;"/>
+          <Button id="aura18" onClick="aosAura" text="18&quot;"/>
         </HorizontalLayout>
-        <!-- The field is one aura button wide, so it sits under the 3" button.
-             Extra gap is needed to make the row with the custom input work out in width. -->
+        <!-- The field is one aura button wide, so it sits under the 3" button, and
+             the rest of the row lands on the row below it: Apply ends where Clear
+             (Selected) ends and Aura Color covers Clear (All). 72 + 0 + 105 + 189
+             and three 6 px gaps = 384. gapAfterField has no width of its own and is
+             there as the handle for retuning that split. -->
         <HorizontalLayout childForceExpandWidth="false" spacing="6">
           <InputField id="customAura" preferredWidth="72" text="4"
                       onValueChanged="aosCustomChanged" onEndEdit="aosApplyCustom"
                       placeholder="0.5-60" characterLimit="5"
-                      characterValidation="Decimal"
-                      tooltip="Custom aura radius in inches, 0.5 to 60."/>
+                      characterValidation="Decimal"/>
           <Panel id="gapAfterField" preferredWidth="0" color="#00000000"/>
-          <Button id="applyBtn" onClick="aosApply" text="Apply" preferredWidth="114"
-                  tooltip="Draw the radius in the box on each selected model."/>
-          <Button id="hlBtn" onClick="aosHighlight" text="Enable Highlight"
-                  preferredWidth="200"
-                  tooltip="Toggle: color glow every model in range of an aura. A model two auras reach glows white instead."/>
+          <Button id="applyBtn" onClick="aosApply" text="Apply" preferredWidth="105"/>
+          <Button id="colorBtn" onClick="aosColors" text="Aura Color"
+                  preferredWidth="189"/>
         </HorizontalLayout>
         <HorizontalLayout>
-          <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"
-                  tooltip="Clear auras on the selected models."/>
-          <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"
-                  tooltip="Clear all auras on the table."/>
+          <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"/>
+          <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"/>
         </HorizontalLayout>
       </VerticalLayout>
 
-      <VerticalLayout preferredWidth="350">
+      <VerticalLayout preferredWidth="417">
         <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
-              alignment="UpperCenter">COHERENCY (Selected Unit)</Text>
-        <!-- 80 + 80 + 178 + two 6 px gaps = 350. -->
+              alignment="UpperCenter">COHERENCY (Selection)</Text>
+        <!-- 100 + 100 + 205 + two 6 px gaps = 417. -->
         <HorizontalLayout childForceExpandWidth="false" spacing="6">
-          <Button id="mode1" onClick="aosMode" text="0.5&quot;" preferredWidth="80"
-                  color="#293133cc" textColor="#f2f1ec"
-                  tooltip="Set coherency / formation ranges at 0.5&quot; between models."/>
-          <Button id="mode2" onClick="aosMode" text="2&quot;" preferredWidth="80"
-                  tooltip="Set coherency / formation ranges at 2&quot; between models."/>
-          <Button id="mode3" onClick="aosMode" text="Base Contact" preferredWidth="178"
-                  tooltip="Set coherency / formation ranges to base contact."/>
+          <Button id="mode1" onClick="aosMode" text="0.5&quot;" preferredWidth="100"
+                  color="#293133cc" textColor="#f2f1ec"/>
+          <Button id="mode2" onClick="aosMode" text="2&quot;" preferredWidth="100"/>
+          <Button id="mode3" onClick="aosMode" text="Base Contact" preferredWidth="205"/>
         </HorizontalLayout>
-        <!-- 80 + 129 + 129 + two 6 px gaps = 350. -->
+        <!-- 95 + 155 + 155 + two 6 px gaps = 417. -->
         <HorizontalLayout childForceExpandWidth="false" spacing="6">
-          <Button id="buddyAuto" onClick="aosBuddy" text="Auto" preferredWidth="80"
-                  color="#293133cc" textColor="#f2f1ec"
-                  tooltip="Follow the rules: 2 buddies in range for a unit of 7+ models, otherwise 1."/>
-          <Button id="buddy1"    onClick="aosBuddy" text="1 in Range" preferredWidth="129"
-                  tooltip="Demand 1 buddy in range whatever the unit size."/>
-          <Button id="buddy2"    onClick="aosBuddy" text="2 in Range" preferredWidth="129"
-                  tooltip="Demand 2 buddies in range whatever the unit size."/>
+          <Button id="buddyAuto" onClick="aosBuddy" text="Auto" preferredWidth="95"
+                  color="#293133cc" textColor="#f2f1ec"/>
+          <Button id="buddy1"    onClick="aosBuddy" text="1 in Range" preferredWidth="155"/>
+          <Button id="buddy2"    onClick="aosBuddy" text="2 in Range" preferredWidth="155"/>
         </HorizontalLayout>
         <HorizontalLayout>
-          <Button id="checkBtn" onClick="aosCheck" text="Check Coherency"
-                  tooltip="Toggle: green = OK, orange line to the nearest buddy. Stops itself after 60s."/>
+          <Button id="checkBtn" onClick="aosCheck" text="Check Coherency"/>
         </HorizontalLayout>
       </VerticalLayout>
 
-      <VerticalLayout preferredWidth="350">
+      <VerticalLayout preferredWidth="417">
         <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
-              alignment="UpperCenter">FORMATION (Selected Unit)</Text>
+              alignment="UpperCenter">FORMATION (Selection)</Text>
         <HorizontalLayout>
-          <Button id="shapeLine"   onClick="aosShape" text="Single Line"
-                  tooltip="Rearrange the unit into one rank."/>
-          <Button id="shapeDouble" onClick="aosShape" text="Double Line"
-                  tooltip="Rearrange the unit into two ranks."/>
+          <Button id="shapeLine"   onClick="aosShape" text="Single Line"/>
+          <Button id="shapeDouble" onClick="aosShape" text="Double Line"/>
         </HorizontalLayout>
         <HorizontalLayout>
-          <Button id="shapeTri"   onClick="aosShape" text="Dogbone"
-                  tooltip="Rearrange the unit into a line with a 3-model triangle at each end."/>
-          <Button id="shapeHoney" onClick="aosShape" text="Honeycomb"
-                  tooltip="Rearrange the unit into a honeycomb block."/>
+          <Button id="shapeTri"   onClick="aosShape" text="Dogbone"/>
+          <Button id="shapeHoney" onClick="aosShape" text="Honeycomb"/>
         </HorizontalLayout>
+        <!-- Two buttons share this row, so both labels drop a size to fit half
+             the column. -->
         <HorizontalLayout>
-          <Button id="undoBtn" onClick="aosUndo" text="Undo Last Move"
-                  tooltip="Put the unit back where it stood before the last move."/>
+          <Button id="undoBtn" onClick="aosUndo" text="Undo Last Move" fontSize="18"/>
+          <Button id="ovalBtn" onClick="aosOval" text="Ovals Sideways" fontSize="18"/>
         </HorizontalLayout>
-      </VerticalLayout>
-
-      <VerticalLayout preferredWidth="120">
-        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
-              alignment="UpperCenter">Tags</Text>
-        <Panel id="tagFrame" color="#00000000" padding="3 3 3 3" preferredHeight="46">
-          <Button id="tagBtn" onClick="aosTag" text="Tag"
-                  tooltip="Stamp a unit id on the selected models. Refused if they already carry another script's id."/>
-        </Panel>
-        <Button id="untagBtn" onClick="aosUntag" text="Untag"
-                interactable="false" textColor="#a3a8aa" preferredHeight="46"
-                tooltip="Take the unit id off the whole unit. Only ever removes ids this tool issued."/>
-        <Button id="smartTagBtn" onClick="aosSmartTag" text="Smart Tag"
-                fontSize="17" preferredHeight="46"
-                tooltip="Split the selection into units with tags by how the models are standing together."/>
       </VerticalLayout>
 
       <!-- Credit then version, reading bottom-to-top: a HorizontalLayout turned a
            quarter-turn counter-clockwise, so its width becomes its height on
-           screen. 150 + 6 + 38 = 194, inside the 196 the strip has to give - the
+           screen. 140 + 6 + 50 = 196, the height the strip has to give - the
            panel's 220 less 3 px of border top and bottom and the 9 + 9 padding.
-           140 + 6 + 50 = 196 now: 38 px clipped "v1.2.0" a character short,
-           and 50 leaves room for the version to grow a digit or two.
+           50 px holds a version such as "v1.2.0" with room for another digit.
            versionText's own text is only what shows until onUIReady writes the
            real version into it, so it is left blank. -->
       <Panel preferredWidth="34" color="#00000000">
@@ -2004,6 +1682,38 @@ local TOOL_XML = [[
       </Panel>
 
     </HorizontalLayout>
+
+    <!-- The colour picker, last so it covers the columns while it is up. Six
+         swatches to a row: 6 x 84 + 5 x 6 of spacing + 12 + 12 of padding = 558
+         across, and 44 + 44 + 34 of rows + 2 x 6 + 24 = 158 down. -->
+    <Panel id="colorPopup" active="false" rectAlignment="MiddleCenter"
+           width="558" height="158" color="#1c2224f5" padding="12 12 12 12"
+           outline="#e6e5e1" outlineSize="2 2">
+      <VerticalLayout spacing="6" childForceExpandHeight="false">
+        <HorizontalLayout preferredHeight="44" spacing="6" childForceExpandWidth="false">
+          <Button id="auraCol1"  onClick="aosPickColor" preferredWidth="84" color="#e62626"/>
+          <Button id="auraCol2"  onClick="aosPickColor" preferredWidth="84" color="#fa850d"/>
+          <Button id="auraCol3"  onClick="aosPickColor" preferredWidth="84" color="#f7d926"/>
+          <Button id="auraCol4"  onClick="aosPickColor" preferredWidth="84" color="#8ce033"/>
+          <Button id="auraCol5"  onClick="aosPickColor" preferredWidth="84" color="#1ab847"/>
+          <Button id="auraCol6"  onClick="aosPickColor" preferredWidth="84" color="#00c7bf"/>
+        </HorizontalLayout>
+        <HorizontalLayout preferredHeight="44" spacing="6" childForceExpandWidth="false">
+          <Button id="auraCol7"  onClick="aosPickColor" preferredWidth="84" color="#40a6ff"/>
+          <Button id="auraCol8"  onClick="aosPickColor" preferredWidth="84" color="#264ce6"/>
+          <Button id="auraCol9"  onClick="aosPickColor" preferredWidth="84" color="#9e40eb"/>
+          <Button id="auraCol10" onClick="aosPickColor" preferredWidth="84" color="#ff59b3"/>
+          <Button id="auraCol11" onClick="aosPickColor" preferredWidth="84" color="#8c5c33"/>
+          <Button id="auraCol12" onClick="aosPickColor" preferredWidth="84" color="#ffffff"/>
+        </HorizontalLayout>
+        <!-- Its own colours: the anthracite label the Defaults hand out would be
+             all but invisible on the popup's dark fill. -->
+        <HorizontalLayout preferredHeight="34">
+          <Button id="colorClose" onClick="aosColorsClose" text="Close" fontSize="18"
+                  color="#ffffff26" textColor="#e6e5e1" outline="#e6e5e14d"/>
+        </HorizontalLayout>
+      </VerticalLayout>
+    </Panel>
 
   </Panel>
 </Panel>
