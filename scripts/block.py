@@ -35,7 +35,7 @@ DIVIDER = (
 
 XML_DIVIDER = (
     "\n-- ===========================================================================\n"
-    "-- The tool's UI, spliced in from tool.xml. Edit that file, not this copy.\n"
+    "-- The tool's UI, spliced in from tool.xml. Edits in that file, not this copy.\n"
     "-- ===========================================================================\n\n"
 )
 
