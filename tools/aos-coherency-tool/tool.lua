@@ -1112,10 +1112,10 @@ end
 
 -- The frame EVERY formation is built in, so a unit always lands parallel to the
 -- panel and facing out across the table, whatever way it was standing before:
--- the tool's own long edge is the axis the shape runs along, and the tool's
--- forward -- a quarter turn from that edge, pointing away from the panel -- is
--- the heading every model ends on. Both come off one vector, so they cannot
--- drift apart.
+-- the tool's own long edge is the axis the shape runs along, and every model
+-- ends turned away from the tool: half a turn from the tool's own heading, which
+-- is the way a model faces when it is given the tool's yaw. Both come off one
+-- vector, so they cannot drift apart.
 --
 -- It is read off the object's TRANSFORM rather than its Euler angles. A yaw of t
 -- puts local +X at (cos t, -sin t) and +Z at (sin t, cos t) -- the frame descOf
@@ -1133,7 +1133,7 @@ local function toolFrame()
         if m < EPS then ax, az, m = 1, 0, 1 end     -- and world +x if that fails too
     end
     ax, az = ax / m, az / m
-    return { x = ax, z = az }, deg(atan2(-az, ax)) % 360
+    return { x = ax, z = az }, (deg(atan2(-az, ax)) + 180) % 360
 end
 
 -- Shapes always stand their models up: a leaning model reports its silhouette from
@@ -1354,8 +1354,9 @@ local function customRadius()
     return tonumber((string.gsub(lastCustom, ",", ".")))
 end
 
--- Enter and Apply are one action that can arrive as two events in the same frame:
--- pressing Apply while the field has focus fires onEndEdit as the field lets go,
+-- Enter and Apply Custom are one action that can arrive as two events in the same
+-- frame: pressing Apply Custom while the field has focus fires onEndEdit as the
+-- field lets go,
 -- then the button's own click. Doing the work twice is harmless -- this path SETS
 -- the ring -- but saying so twice is noise, hence the one-frame guard. An empty
 -- selection is silent, so clicking off the field never nags.
@@ -1593,36 +1594,48 @@ local TOOL_XML = [[
 
     <HorizontalLayout padding="9 9 9 9" spacing="14" childForceExpandWidth="false">
 
-      <VerticalLayout preferredWidth="384">
-        <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
+      <!-- AURAS. Placed by coordinates rather than by a layout group, so every rect
+           is exactly the size written here and the right edges of all three rows
+           coincide by construction, whatever the layout groups around them decide.
+           The grid is five 72 px cells with 6 px gaps, (384 - 4 x 6) / 5 = 72, so
+           the cells start at 0, 78, 156, 234 and 312: a radius button and the
+           field take one cell, Apply Custom and Aura Color two (150), Clear
+           (Selected) three (228) and Clear (All) two. Rows are 46 px tall and 6 px
+           apart under the 38 px heading, at 44, 96 and 148 px down, which ends at
+           194 like the other columns: 38 + 6 + 3 x 46 + 2 x 6. rectAlignment sets
+           both the anchor and the pivot to the upper-left corner, so offsetXY is
+           that corner's position and y runs negative going down. -->
+      <Panel preferredWidth="384" color="#00000000">
+        <Text rectAlignment="UpperLeft" offsetXY="0 0" width="384" height="38"
+              fontSize="24" fontStyle="Bold"
               alignment="UpperCenter">AURAS (Selected Models)</Text>
-        <HorizontalLayout>
-          <Button id="aura3"  onClick="aosAura" text="3&quot;"/>
-          <Button id="aura6"  onClick="aosAura" text="6&quot;"/>
-          <Button id="aura9"  onClick="aosAura" text="9&quot;"/>
-          <Button id="aura12" onClick="aosAura" text="12&quot;"/>
-          <Button id="aura18" onClick="aosAura" text="18&quot;"/>
-        </HorizontalLayout>
-        <!-- The field is one aura button wide, so it sits under the 3" button, and
-             the rest of the row lands on the row below it: Apply ends where Clear
-             (Selected) ends and Aura Color covers Clear (All). 72 + 0 + 105 + 189
-             and three 6 px gaps = 384. gapAfterField has no width of its own and is
-             there as the handle for retuning that split. -->
-        <HorizontalLayout childForceExpandWidth="false" spacing="6">
-          <InputField id="customAura" preferredWidth="72" text="4"
-                      onValueChanged="aosCustomChanged" onEndEdit="aosApplyCustom"
-                      placeholder="0.5-60" characterLimit="5"
-                      characterValidation="Decimal"/>
-          <Panel id="gapAfterField" preferredWidth="0" color="#00000000"/>
-          <Button id="applyBtn" onClick="aosApply" text="Apply" preferredWidth="105"/>
-          <Button id="colorBtn" onClick="aosColors" text="Aura Color"
-                  preferredWidth="189"/>
-        </HorizontalLayout>
-        <HorizontalLayout>
-          <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"/>
-          <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"/>
-        </HorizontalLayout>
-      </VerticalLayout>
+
+        <Button id="aura3"  onClick="aosAura" text="3&quot;"
+                rectAlignment="UpperLeft" offsetXY="0 -44"   width="72" height="46"/>
+        <Button id="aura6"  onClick="aosAura" text="6&quot;"
+                rectAlignment="UpperLeft" offsetXY="78 -44"  width="72" height="46"/>
+        <Button id="aura9"  onClick="aosAura" text="9&quot;"
+                rectAlignment="UpperLeft" offsetXY="156 -44" width="72" height="46"/>
+        <Button id="aura12" onClick="aosAura" text="12&quot;"
+                rectAlignment="UpperLeft" offsetXY="234 -44" width="72" height="46"/>
+        <Button id="aura18" onClick="aosAura" text="18&quot;"
+                rectAlignment="UpperLeft" offsetXY="312 -44" width="72" height="46"/>
+
+        <InputField id="customAura" text="4"
+                    rectAlignment="UpperLeft" offsetXY="0 -96" width="72" height="46"
+                    onValueChanged="aosCustomChanged" onEndEdit="aosApplyCustom"
+                    placeholder="0.5-60" characterLimit="5"
+                    characterValidation="Decimal"/>
+        <Button id="applyBtn" onClick="aosApply" text="Apply Custom" fontSize="18"
+                rectAlignment="UpperLeft" offsetXY="78 -96"  width="150" height="46"/>
+        <Button id="colorBtn" onClick="aosColors" text="Aura Color"
+                rectAlignment="UpperLeft" offsetXY="234 -96" width="150" height="46"/>
+
+        <Button id="auraClearSel" onClick="aosClearSel" text="Clear (Selected)"
+                rectAlignment="UpperLeft" offsetXY="0 -148"   width="228" height="46"/>
+        <Button id="auraClearAll" onClick="aosClearAll" text="Clear (All)"
+                rectAlignment="UpperLeft" offsetXY="234 -148" width="150" height="46"/>
+      </Panel>
 
       <VerticalLayout preferredWidth="417">
         <Text preferredHeight="38" fontSize="24" fontStyle="Bold"
@@ -1660,7 +1673,7 @@ local TOOL_XML = [[
         <!-- Two buttons share this row, so both labels drop a size to fit half
              the column. -->
         <HorizontalLayout>
-          <Button id="undoBtn" onClick="aosUndo" text="Undo Last Move" fontSize="18"/>
+          <Button id="undoBtn" onClick="aosUndo" text="Undo Formation" fontSize="18"/>
           <Button id="ovalBtn" onClick="aosOval" text="Ovals Sideways" fontSize="18"/>
         </HorizontalLayout>
       </VerticalLayout>
@@ -1746,7 +1759,7 @@ local TOOL_XML = [[
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "aos-coherency-tool"
-local TOOL_VERSION   = "1.0.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "1.1.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:aos-coherency-tool"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
