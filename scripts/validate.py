@@ -65,25 +65,25 @@ def rank(version):
 
 
 def check_one_write(where, text):
-    """The whole safety story in one line: one script write, and it is on self.
+    """The block's safety story in one line: one script write, and it is on self.
 
-    Docs tell a suspicious mod author to grep for this. The grep is only worth
-    trusting if something enforces it, so this does.
+    Counted inside the block only. A tool writing scripts onto other objects -
+    the importer handing every fighter its card - is the tool's own business
+    and never blocked here; what is enforced is that the updater itself
+    rewrites nothing but the object it lives on.
     """
-    writes = [(n, ln.strip()) for n, ln in enumerate(text.splitlines(), 1)
-              if "setLuaScript" in ln]
-    if len(writes) != 1:
-        fail(where, "expected exactly 1 script write, found %d" % len(writes),
-             "\n".join("  line %d: %s" % w for w in writes))
-    elif not re.search(r"\bself\.setLuaScript\s*\(", writes[0][1]):
-        fail(where, "the script write does not target self",
-             "  line %d: %s" % writes[0])
-
-    # The UI write gets the same treatment, but only inside the block: it is
-    # the line that applies the spliced layout at load. A tool driving its own
-    # XML at runtime as well is ordinary and harmless, so the count cannot be
-    # taken across the whole file the way the script write is.
     block = block_of(text) or text
+    writes = [ln.strip() for ln in block.splitlines() if "setLuaScript" in ln]
+    if len(writes) != 1:
+        fail(where, "expected exactly 1 script write in the block, found %d"
+             % len(writes), "\n".join("  " + w for w in writes))
+    elif not re.search(r"\bself\.setLuaScript\s*\(", writes[0]):
+        fail(where, "the block's script write does not target self",
+             "  " + writes[0])
+
+    # The UI write gets the same treatment, and for the same reason: it is
+    # the line that applies the spliced layout at load. A tool driving its own
+    # XML at runtime as well is ordinary and harmless.
     ui = [ln.strip() for ln in block.splitlines() if "UI.setXml(" in ln]
     if len(ui) != 1:
         fail(where, "expected exactly 1 UI write in the block, found %d" % len(ui),

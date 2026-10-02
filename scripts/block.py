@@ -93,10 +93,24 @@ def set_config(block, key, value):
     return block
 
 
+def opener_at(text):
+    """Where the block's first line starts in `text`, or -1.
+
+    Matched as a whole line, never a prefix: a tool can carry another script
+    of its own whose header opens with the same run of `=`, and that is not
+    the block. The last match wins for the same reason - the block is pasted
+    onto the end, so anything earlier is the tool's.
+    """
+    opener = canonical().splitlines()[0]
+    found = -1
+    for m in re.finditer(r"^%s$" % re.escape(opener), text, re.M):
+        found = m.start()
+    return found
+
+
 def block_of(text):
     """The updater block as embedded in a distributable file, or None."""
-    opener = canonical().splitlines()[0]
-    index = text.find(opener)
+    index = opener_at(text)
     return None if index < 0 else text[index:]
 
 
@@ -107,12 +121,14 @@ def head_of(text):
     for `function onLoad` in here, and a layout is perfectly capable of
     carrying that string somewhere in a comment.
     """
+    # Only the dividers' first two lines are matched, up to the full stop: the
+    # rest is wording, and rewording it must not orphan every file stamped
+    # with the old one - the next --fix would splice the layout in twice.
     for mark in (XML_DIVIDER, DIVIDER):
-        index = text.find(mark)
+        index = text.find(mark[:mark.index(".") + 1])
         if index >= 0:
             return text[:index]
-    opener = canonical().splitlines()[0]
-    index = text.find(opener)
+    index = opener_at(text)
     return text if index < 0 else text[:index]
 
 

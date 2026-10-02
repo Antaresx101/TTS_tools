@@ -95,7 +95,7 @@ function onSave()
 end
 
 -- ===========================================================================
--- The tool's UI, spliced in from tool.xml. Edit that file, not this copy.
+-- The tool's UI, spliced in from tool.xml. Edits in that file, not this copy.
 -- ===========================================================================
 
 local TOOL_XML = [[

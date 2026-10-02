@@ -318,8 +318,9 @@ runtime: the embedded block matches `updater/updater.lua`, `TOOL_ID` matches
 the folder name, `TOOL_VERSION` matches the manifest, `REPO_BASE` is this
 repo's, the payload is bigger than its own `MIN_BYTES` gate, the file contains
 its own signature, the code above the block defines `function onLoad`, there
-is exactly one script write and it targets `self`, the block's one UI write
-targets `self` too, `Global` is touched by exactly the three latch lines and
+is exactly one script write in the block and it targets `self` (what the
+tool's own code writes onto other objects is never checked), the block's one
+UI write targets `self` too, `Global` is touched by exactly the three latch lines and
 nothing else, `SELF_UPDATE` ships as `true`, and the release notes and
 `history` are shaped the way the chat message needs. Where
 there is a `tool.xml`, the copy spliced into `tool.lua` is checked against it
