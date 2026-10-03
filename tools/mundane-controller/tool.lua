@@ -2580,7 +2580,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-controller"
-local TOOL_VERSION   = "2.1.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.1.1"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
