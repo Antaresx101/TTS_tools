@@ -1,11 +1,17 @@
 {
   "stable": {
-    "version": "2.1.1",
+    "version": "2.1.2",
     "notes": [
-      "Added support for Knockback(X+) and Bio-Booster."
+      "Performance improvements and bug fixes."
     ]
   },
   "history": [
+    {
+      "version": "2.1.1",
+      "notes": [
+        "Added support for Knockback(X+) and Bio-Booster."
+      ]
+    },
     {
       "version": "2.1.0",
       "notes": [

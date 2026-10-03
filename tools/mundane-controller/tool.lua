@@ -629,7 +629,13 @@ RULES.conditions = {
 --   burns      true: the first natural 1 on a save taken with its `inv`
 --              burns it out for the rest of the battle -- its name turns
 --              grey, and a left click on it switches it back on or off
---              (Refractor Shield);
+--              (Refractor Shield; the Bio-Booster, which is used up so);
+--   bioBooster N: the first time in the battle a wound that goes through
+--              brings the fighter to 0 wounds, that wound's Lethality is N
+--              less -- down to 0: two Injury dice of their own instead, the
+--              better kept -- and the item is used up (`burns`: grey, a
+--              left click puts it back; see the card's ACTIVATION.damage)
+--              (Bio-Booster: 1);
 --   noAp       words a weapon's name may start with (a list, any case):
 --              hits from such a weapon have no AP against it (Reflec
 --              Shroud: Las, Plasma, Melta);
@@ -793,7 +799,8 @@ RULES.skills = {
 -- roster's statline already counts what armour and mounts do: `mods` are
 -- only for what it doesn't.
 RULES.wargear = {
-    { name = "Bio-Booster",            desc = "" },
+    { name = "Bio-Booster",            desc = "", aka = { "Bio Booster", "Biobooster" },
+      bioBooster = 1, burns = true },
     { name = "Bomb Delivery Rats",     desc = "" },
     { name = "Book Of The Redemption", desc = "" },
     { name = "Chaos Familiar",         desc = "" },
@@ -889,6 +896,8 @@ RULES.traits = {
     assault   = "assault",            -- after a Dash, one Shoot with it, for no action
     toxin     = "toxin",              -- Toxin (N+)  (the card's TRAIT_RULES.toxin)
     shock     = "shock",              -- Shock (N+): a hit roll of N+ wounds automatically, as a 6
+    knockback = "knockback",          -- Knockback (N+): a hit roll of N+ pushes the target back (once an attack)
+    blast     = "blast[^,]*",         -- Blast (3") / (5"): a Knockback with it pushes nobody
     cursed    = "cursed",             -- a target hit makes a Willpower check, failed: Insanity
     flash     = "flash",              -- ranged: no Wound roll; the target hit is Blind and loses its Ready marker
     graviton  = "graviton pulse",     -- ranged: no Wound roll
@@ -970,9 +979,12 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 activation holding it through that activation's end. true:
 --                 a power cast lasts through the end of that activation
 --                 without one, and then goes the same way.
---   shockNatural  Shock (N+): false -- the hit roll with its modifiers must
---                 reach N (Shock (6+) with +1 to hit: a 5 does); true --
---                 the die's own roll.
+--   shockNatural  Shock (N+) and Knockback (N+): false -- the hit roll
+--                 with its modifiers must reach N (Shock (6+) with +1 to
+--                 hit: a 5 does); true -- the die's own roll.
+--   knockback     Knockback (N+): how many inches the target is pushed
+--                 straight away from the attacker, once the attack is over
+--                 (see the card's knockback).
 --   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
 --                 Firepower dice give shares the hit roll, so every one of
 --                 them wounds automatically; true -- only the first does.
@@ -986,7 +998,9 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 attack from within the weapon's Short Range, and from
 --                 beyond it (within Long Range) -- a weapon with only one of
 --                 the two in inches ("T", "-") always gives that one's (see
---                 the card's takeSaves).
+--                 the card's takeSaves);
+--   coverTemplate what cover adds against a ranged attack with neither
+--                 range in inches (a Template's "T").
 RULES.cfg = {
     engageRange   = 1,
     nerveRanges   = { leader = 12, champion = 6 },
@@ -1008,11 +1022,13 @@ RULES.cfg = {
     maintainMod   = 3,
     powersLastNext = false,
     shockNatural  = false,
+    knockback     = 1,
     rapidOneHit   = false,
     saveFails     = 2,
     coverShort    = 1,
     coverLong     = 2,
-    dicePause     = 4.5,
+    coverTemplate = 1,
+    dicePause     = 3,
 }
 
 -- ── Overrides ────────────────────────────────────────────────
@@ -1248,18 +1264,18 @@ local HOMEBREW = {
           offDesc = "A Continuous Power lasts until the end of the Wyrd's activation (if not Maintain Control (S)).",
           desc = "A Continuous Power lasts until the end of the Wyrd's next activation.",
           rules = { cfg = { powersLastNext = true } } },
-        { id = "shock_natural", off = "Shock on modified X+", name = "Shock on natural X+",
-          offDesc = "The Hit roll's modifiers count for Shock (X+): Shock (6+) with +1 to hit triggers on a 5.",
-          desc = "Only the die counts for Shock (X+): Shock (6+) triggers on a natural 6 alone.",
+        { id = "shock_natural", off = "Modified Shock/Knockback", name = "Natural Shock/Knockback",
+          offDesc = "The Hit roll's modifiers count for Shock (X+) and Knockback (X+): (6+) with +1 to hit triggers on a 5.",
+          desc = "Only the die counts for Shock (X+) and Knockback (X+): (6+) triggers on a natural 6 alone.",
           rules = { cfg = { shockNatural = true } } },
         { id = "rapid_one_hit", off = "Rapid Fire has Hit-Rolls", name = "Rapid Fire has 1 Hit-Roll",
           offDesc = "A Shock hit at Rapid Fire makes every hit's Wound roll an automatic 6.",
           desc = "A Shock hit at Rapid Fire makes only the first hit's Wound roll an automatic 6.",
           rules = { cfg = { rapidOneHit = true } } },
-        { id = "fast_dice", off = "Normal Dice Speed", name = "Fast Dice Speed",
-          offDesc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 4.5 s.",
-          desc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 3 s.",
-          rules = { cfg = { dicePause = 3 } } },
+        { id = "slow_dice", off = "Fast Dice Speed", name = "Slow Dice Speed",
+          offDesc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 3 s.",
+          desc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 4.5 s.",
+          rules = { cfg = { dicePause = 4.5 } } },
     },
     on = {},                -- id -> true, for the sets that are on (saved)
     SEP_H = 2,              -- the line between two sets on the page
@@ -1716,9 +1732,12 @@ function BOTTLE.modelAt(n, what)
     end
 end
 
--- Every half second: a model newly put on a victory points plate names
--- that side after its gang (said in chat, the model flashed) -- not while
--- the Homebrew Rules page hides the plates.
+-- Half a second after anything on the table is picked up, put down or
+-- removed (BOTTLE.soon), and every BOTTLE.POLL seconds besides: a model
+-- newly put on a victory points plate names that side after its gang (said
+-- in chat, the model flashed) -- not while the Homebrew Rules page hides
+-- the plates. Looking only when something moved spares a slow machine the
+-- plates' physics casts twice a second all game.
 function BOTTLE.tick()
     if HOMEBREW.page then return end      -- the plates are hidden behind the Homebrew Rules page
     for n = 1, 2 do
@@ -1738,6 +1757,16 @@ function BOTTLE.tick()
         end
     end
 end
+
+BOTTLE.POLL, BOTTLE.soonToken = 2, 0
+function BOTTLE.soon()
+    BOTTLE.soonToken = BOTTLE.soonToken + 1
+    local token = BOTTLE.soonToken
+    Wait.time(function() if token == BOTTLE.soonToken then BOTTLE.tick() end end, 0.5)
+end
+function onObjectDrop() BOTTLE.soon() end
+function onObjectPickUp() BOTTLE.soon() end
+function onObjectDestroy() BOTTLE.soon() end
 
 -- The Bottle Check's two D6, thrown in the dice's line under the panel
 -- (see DICE), then done(faces, digital) -- in the order thrown.
@@ -2547,7 +2576,7 @@ function onLoad(saved)
     for id in pairs(HOMEBREW.on) do HOMEBREW.pick[id] = true end
     pcall(function() if not self.hasTag(CONTROLLER_TAG) then self.addTag(CONTROLLER_TAG) end end)
     self.UI.setXml(detailed(panelXml(), "controllerPanel"), panelAssets())
-    Wait.time(BOTTLE.tick, 0.5, -1)
+    Wait.time(BOTTLE.tick, BOTTLE.POLL, -1)
     -- the cards that loaded before this did asked no one: tell them now
     -- (the table's own rules only -- as written, they already have them)
     if next(RULES.active) then Wait.frames(RULES.push, 2) end
@@ -2580,7 +2609,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-controller"
-local TOOL_VERSION   = "2.1.1"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.1.2"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error

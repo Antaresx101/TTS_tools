@@ -479,6 +479,7 @@ local BASE_SNAP  = 2.5
 local LOOKS_SPOT_CENTER = { 0, 0.25, 0 }   -- the middle spot (x, y up, z)
 local LOOKS_SPOT_GAP    = 2.25             -- from one spot's centre to the next, along x
 local LOOKS_SPOT_COUNT  = 3               -- how many spots, centred on LOOKS_SPOT_CENTER
+local SPOT_POLL         = 2               -- seconds between looks at the spots when nothing moves
 local LOOKS_SPOT_SIZE   = 1.5             -- the square searched for a model on each spot
 local LOOKS_SPOT_TURN   = 0               -- a model snapped onto a spot faces this way (degrees about
                                           -- the vertical, this object's own): towards the panel's side
@@ -1679,7 +1680,9 @@ local function showSections()
     self.UI.setAttribute("importPanel", "position", panelPosition(h))
 end
 
--- Checks the spots every half second: a model newly put on one brings its
+-- Checks the spots half a second after anything on the table is picked
+-- up, put down or removed (see onObjectDrop), and every SPOT_POLL seconds
+-- besides -- not twice a second all game: a model newly put on one brings its
 -- appearance into the editor (the default if it has none; the first
 -- newcomer's if several arrive together), and while any model stands on a
 -- spot the panel shows just the editor, whose changes go to all of them.
@@ -1757,8 +1760,20 @@ function onLoad(saved)
     self.UI.setXml(detailed(panelXml(), "importPanel"), panelAssets())
     addSnapPoint(ok and type(data) == "table" and data.spots or nil)
     Wait.frames(drawEditor, 2)
-    Wait.time(checkSpot, 0.5, -1)
+    Wait.time(checkSpot, SPOT_POLL, -1)
 end
+
+-- Something on the table was picked up, put down or removed: the spots are
+-- checked half a second later (once, however many things moved meanwhile).
+local spotToken = 0
+local function spotSoon()
+    spotToken = spotToken + 1
+    local token = spotToken
+    Wait.time(function() if token == spotToken then checkSpot() end end, 0.5)
+end
+function onObjectDrop() spotSoon() end
+function onObjectPickUp() spotSoon() end
+function onObjectDestroy() spotSoon() end
 
 -- The roster box's text (its hint counts as empty). A pasted roster is
 -- never cleared by the importer: it stays for another import (a model that
@@ -2086,13 +2101,19 @@ local CFG = {
     -- visible only to them, that turns to face them. faceSmooth eases the
     -- turn (seconds; 0 = instant); faceOffset turns the front to the viewer.
     -- Once every copy faces its player the card looks again only every
-    -- faceIdle seconds (until a view turns), not every frame.
+    -- faceIdle seconds (until a view turns), not every frame. While one
+    -- turns it looks every faceEvery seconds, and a copy is turned only
+    -- once it is faceStep degrees off: every turn is sent to every
+    -- player's game and makes their machine lay the card out again, so
+    -- fewer, larger steps are kinder to slow machines and connections.
     -- With billboard = false there is one shared copy, turned `yaw` degrees.
     billboard  = true,
     standAngle = -60,
     faceOffset = 180,
     faceSmooth = 0.05,
     faceIdle   = 0.1,
+    faceEvery  = 0.04,
+    faceStep   = 1,
     yaw        = 0,
 
     -- How finely text is rasterised. TTS draws each glyph once at its
@@ -2238,6 +2259,11 @@ local CFG = {
     importTag    = "Mundane Import",
     gangTag      = "Mundane Gang_",
     oldGangTags  = { "Mundane Gang - ", "Mundane Controller_" },
+    -- The tag a model carries while a Wyrd power of its reaches other
+    -- fighters wherever they stand (an aura, Cacophony Of Silence,
+    -- Maddening Visions): a card looking for those asks only the models
+    -- with it, not every fighter on the table (see ACTIVATION.powerMark).
+    wyrdTag      = "Mundane Wyrd Power",
 
     -- Nerve Check (A's Special tab): 2D6 at or under Cl. A friend of a rank
     -- in nerveRanges within its range, base to base, and in sight lends its
@@ -3195,7 +3221,9 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 attack from within the weapon's Short Range, and from
 --                 beyond it (within Long Range) -- a weapon with only one of
 --                 the two in inches ("T", "-") always gives that one's (see
---                 the card's takeSaves).
+--                 the card's takeSaves);
+--   coverTemplate what cover adds against a ranged attack with neither
+--                 range in inches (a Template's "T").
 RULES.cfg = {
     engageRange   = 1,
     nerveRanges   = { leader = 12, champion = 6 },
@@ -3222,6 +3250,7 @@ RULES.cfg = {
     saveFails     = 2,
     coverShort    = 1,
     coverLong     = 2,
+    coverTemplate = 1,
     dicePause     = 3,
 }
 
@@ -10135,9 +10164,9 @@ local function cancelHide(key)
     v.hoverToken = v.hoverToken + 1
 end
 
--- Turning to face the players: every frame (at most every 20 ms) each copy
--- eases toward its player and sends its rotation only once it has moved a
--- quarter of a degree -- and once every copy faces its player (ui.still),
+-- Turning to face the players: every CFG.faceEvery seconds each copy
+-- eases toward its player and sends its rotation only once it is
+-- CFG.faceStep degrees off -- and once every copy faces its player (ui.still),
 -- only every CFG.faceIdle seconds, until a player's view turns again:
 -- every card on the table does this, so a still camera costs little.
 -- Every 2 s the seated players are checked again, and the card rebuilt
@@ -10157,7 +10186,8 @@ function update()
     end
     if not CFG.billboard then return end
     local dt  = now - (ui.turnAt or 0)
-    if dt < (ui.still and (tonumber(CFG.faceIdle) or 0.02) or 0.02) then return end
+    local every = tonumber(CFG.faceEvery) or 0.02
+    if dt < (ui.still and (tonumber(CFG.faceIdle) or every) or every) then return end
     ui.turnAt = now
     if now - (ui.seatAt or 0) > 2 then
         ui.seatAt = now
@@ -10172,7 +10202,8 @@ function update()
         for _, key in ipairs(ui.viewers) do ui.facing[key] = facingPlayer(key) or false end
     end
     -- (after a still spell the first step eases as from one frame or two)
-    local a = CFG.faceSmooth > 0 and (1 - math.exp(-math.min(dt, 0.05) / CFG.faceSmooth)) or 1
+    local a = CFG.faceSmooth > 0 and (1 - math.exp(-math.min(dt, math.max(every, 0.05)) / CFG.faceSmooth)) or 1
+    local step = math.max(tonumber(CFG.faceStep) or 0.25, 0.01)
     local okR, rot = pcall(function() return self.getRotation() end)
     local own = okR and rot and tonumber(rot.y) or nil
     local still = own ~= nil
@@ -10181,14 +10212,20 @@ function update()
         local yaw = own and p and yawFor(p, own)
         if yaw then
             local v = view(key)
+            -- eased while far off, the last step all the way; sent a step at a
+            -- time while the player's view turns, and square on once it stops
             local turn = wrapAngle(yaw - v.yaw)
-            v.yaw = (v.yaw + turn * a) % 360
-            if math.abs(turn) > 0.25 then still = false end
-            if not v.pushed or math.abs(wrapAngle(v.yaw - v.pushed)) > 0.25 then
+            local moving = v.aim ~= nil and math.abs(wrapAngle(yaw - v.aim)) > 0.05
+            v.aim = yaw
+            local close = math.abs(turn) < step
+            if close then v.yaw = yaw % 360 else v.yaw = (v.yaw + turn * a) % 360 end
+            local off = v.pushed and math.abs(wrapAngle(v.yaw - v.pushed)) or 360
+            if off >= step or (off > 0.05 and close and not moving) then
                 v.pushed = v.yaw
                 self.UI.setAttribute(key .. "_mundaRoot", "rotation",
                                      string.format("0 0 %.1f", v.yaw))
             end
+            if moving or math.abs(wrapAngle(yaw - v.pushed)) > 0.05 then still = false end
         end
     end
     ui.still = still
@@ -11159,9 +11196,11 @@ do
     -- should it be in cover (see takeSaves): CFG.coverShort when it is
     -- within the Short Range (as shown) base to base, CFG.coverLong when
     -- beyond it; a weapon with only one range in inches ("T", "-") always
-    -- gives that one's. Within an enemy's A Perfect Void (`void`) it is
-    -- at Long range. nil for a melee attack, or one with neither range in
-    -- inches (a Template's "T" / "-"): no cover then.
+    -- gives that one's, one with neither (a Template's "T") CFG.coverTemplate.
+    -- Within an enemy's A Perfect Void (`void`) it is at Long range. nil
+    -- for a melee attack: no cover then. Also, when the distance decided
+    -- it, that distance (base to base, inches) and the range it falls in
+    -- ("Short" / "Long"), for the target to say (see takeSaves).
     function ACTIVATION.coverFor(w, p, aim)
         if not (w and p and aim) or isMelee(p) then return nil end
         local R = TRAIT_RULES
@@ -11171,25 +11210,57 @@ do
             return t.num
         end
         local sr, lr = inches("SR"), inches("LR")
-        if not (sr or lr) then return nil end
+        if not (sr or lr) then return CFG.coverTemplate end
         if not lr then return CFG.coverShort end
         if not sr then return CFG.coverLong end
         local me = tableEntry(self)
         local gap = me and aim.x and aim.z and baseGap(me, aim)   -- (no position: unknown)
         if not gap then return CFG.coverShort end
         local slack = CFG.engageSlack or 0
-        if aim.void and gap <= aim.void + slack then return CFG.coverLong end
-        return gap > sr + slack and CFG.coverLong or CFG.coverShort
+        if aim.void and gap <= aim.void + slack then return CFG.coverLong, gap, "Long" end
+        if gap > sr + slack then return CFG.coverLong, gap, "Long" end
+        return CFG.coverShort, gap, "Short"
     end
 
     -- Every fighter on the table (importTag, see tableEntry), and this
     -- one's entry among them -- nil for a card without the import tag,
     -- which the callers then read on its own.
-    function ACTIVATION.everyone()
-        local ok, objs = pcall(function() return getObjectsWithTag(CFG.importTag) end)
+    -- Each other card is asked what it is (engageInfo), which on a full
+    -- table is the costly part, so a look that only needs the fighters
+    -- near this one says how near: o = { within = inches base to base,
+    -- hops = how many such steps from fighter to fighter it follows (an
+    -- enemy's own enemies are two), spots = more places to measure from
+    -- (where this model stood before) }. A model whose centre is further
+    -- from this one and every spot than that could reach, with the biggest
+    -- bases there are (CFG.baseSizes, or this one's) and an inch to spare,
+    -- is left out before its card is asked. o.tag looks only at the models
+    -- with that tag instead (see ACTIVATION.powerMark).
+    function ACTIVATION.everyone(o)
+        o = o or {}
+        local ok, objs = pcall(function() return getObjectsWithTag(o.tag or CFG.importTag) end)
         local all, me = {}, nil
+        local reach, spots = nil, nil
+        if tonumber(o.within) then
+            local big = 0
+            for _, mm in ipairs(CFG.baseSizes or {}) do big = math.max(big, tonumber(mm) or 0) end
+            big = math.max(big / MM_PER_INCH, tonumber(currentBase().diameter) or 0)
+            local hops = tonumber(o.hops) or 1
+            reach = hops * (tonumber(o.within) + CFG.engageSlack + big) + 1
+            spots = { positionOf(self) }
+            for _, s in ipairs(o.spots or {}) do spots[#spots + 1] = s end
+        end
+        local function near(obj)
+            if not reach then return true end
+            local p = positionOf(obj)
+            if p then
+                for _, s in ipairs(spots) do
+                    if (p.x - s.x) ^ 2 + (p.z - s.z) ^ 2 <= reach * reach then return true end
+                end
+            end
+            return isSelf(obj)
+        end
         for _, obj in ipairs(ok and type(objs) == "table" and objs or {}) do
-            local e = tableEntry(obj)
+            local e = near(obj) and tableEntry(obj)
             if e then
                 all[#all + 1] = e
                 if e.self then me = e end
@@ -11252,7 +11323,8 @@ do
     -- roll only ever changes by one. Looked up when a melee weapon's popup
     -- opens, never while moving.
     function TRAIT_RULES.supportNear(player)
-        local all, me = ACTIVATION.everyone()
+        -- (its enemies, their friends, and the enemies those fight: three steps)
+        local all, me = ACTIVATION.everyone({ within = CFG.engageRange, hops = 3 })
         if not me then                      -- a gang's card without the import tag
             me = tableEntry(self)
             if not me then return nil end
@@ -11292,7 +11364,7 @@ do
     -- the test (`assist`: a Medicae Kit's extra Injury dice, as its card's
     -- engageInfo says). Reach is the engagement check's: 1" base to base.
     function ACTIVATION.surroundings()
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ within = CFG.engageRange, hops = 2 })
         me = me or tableEntry(self)
         local foes, helper = {}, nil
         if not me then return { foes = foes } end
@@ -11357,7 +11429,7 @@ do
     -- This fighter's friends (its gang's other fighters on the table) within
     -- `range` inches of it, base to base: a list of table entries.
     function ACTIVATION.friendsWithin(range)
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ within = range })
         me = me or tableEntry(self)
         local out = {}
         for _, o in ipairs(me and all or {}) do
@@ -11374,7 +11446,7 @@ do
     -- (ACTIVATION.seenBy) -- the one with the highest Willpower (of equals
     -- the nearest). nil when there is none.
     function ACTIVATION.disrupter()
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ within = tonumber(CFG.disruptRange) or 18 })
         me = me or tableEntry(self)
         if not me then return nil end
         local near = {}
@@ -11439,7 +11511,7 @@ do
         local h = { label = it.name, by = fighter.name, mods = a.mods, oneAction = a.oneAction, turn = true }
         local id = ACTIVATION.hexId(it.key)
         if a.self and wyrdHex({ id = id, value = h }) then names[#names + 1] = { name = fighter.name } end
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ within = tonumber(a.range) })   -- (no range: everyone)
         me = me or tableEntry(self)
         for _, o in ipairs(me and all or {}) do
             if ACTIVATION.sideOf(me, o, a.side or "all") and ACTIVATION.within(me, o, a.range) then
@@ -11462,7 +11534,9 @@ do
         local w = fighter.wyrd
         if type(w) ~= "table" then return {} end
         local auras = ACTIVATION.auraOf()
-        local all, me = ACTIVATION.everyone()
+        local far = 0                       -- (an aura with no range reaches everyone)
+        for _, a in ipairs(auras or {}) do far = far and tonumber(a.range) and math.max(far, tonumber(a.range)) end
+        local all, me = ACTIVATION.everyone({ within = far or nil })
         me = me or tableEntry(self)
         local had, got, names = w.hexed or {}, {}, {}
         for _, a in ipairs((me and auras) or {}) do
@@ -11490,7 +11564,7 @@ do
     -- those that don't any more taken off (fighter.hexes, `aura`). Run
     -- whenever this model is put down. Returns whether anything changed.
     function ACTIVATION.auraPull()
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ tag = CFG.wyrdTag })
         me = me or tableEntry(self)
         if not me then return false end
         local want = {}
@@ -11521,7 +11595,7 @@ do
     -- effect (its table entry; `cacophony`, the power's name) -- nil when
     -- there is none. Looked up as a ranged attack is made.
     function ACTIVATION.cacophony()
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ tag = CFG.wyrdTag })
         me = me or tableEntry(self)
         for _, o in ipairs(me and all or {}) do
             if o.cacophony and o.gang ~= me.gang then return o end
@@ -11533,7 +11607,7 @@ do
     -- whose visions (see engageInfo) reach it gives it their condition
     -- (Insanity), said in purple. Returns the condition's key, or nil.
     function ACTIVATION.visionsCheck()
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ tag = CFG.wyrdTag })
         me = me or tableEntry(self)
         for _, o in ipairs(me and all or {}) do
             local v = o.visions
@@ -11707,7 +11781,7 @@ do
     function ACTIVATION.knockPath(dx, dz, dist)
         local pos = positionOf(self)
         if not pos then return 0, nil end
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ within = (tonumber(dist) or 0) + CFG.engageRange })
         me = me or tableEntry(self)
         local r = me and me.r or currentBase().diameter / 2
         local rays = CFG.knockRays or {}
@@ -11784,7 +11858,9 @@ do
     function ACTIVATION.nerveSource()
         local own = statNumber("Cl")
         local best = { value = own, own = own }
-        local all, me = ACTIVATION.everyone()
+        local far = 0
+        for _, r in pairs(CFG.nerveRanges or {}) do far = math.max(far, tonumber(r) or 0) end
+        local all, me = ACTIVATION.everyone({ within = far })
         me = me or tableEntry(self)
         if not me then return best end
         local lend = {}
@@ -11816,7 +11892,7 @@ do
         if not CFG.nerveOutRange then return list end
         for _, t in ipairs(CFG.nerveOutNone or {}) do if tags[t] then return list end end
         local prospect = tostring(fighter.rank or ""):lower() == "prospect"
-        local all, me = ACTIVATION.everyone()
+        local all, me = ACTIVATION.everyone({ within = CFG.nerveOutRange })
         me = me or tableEntry(self)
         if not me then return list end
         for _, o in ipairs(all) do
@@ -11874,7 +11950,8 @@ do
     -- Suppressed with an enemy in reach) or back to Active (Engaged with none).
     -- Announced in chat and flashed on the models. Returns how many changed.
     function runEngagement()
-        local all, me = ACTIVATION.everyone()
+        -- (its enemies, and theirs: an enemy left behind may still fight another)
+        local all, me = ACTIVATION.everyone({ within = CFG.engageRange, hops = 2, spots = { engage.spot } })
         if not me then                      -- a gang's card without the import tag
             me = tableEntry(self)
             if not me then                  -- no gang: nothing to engage
@@ -12656,6 +12733,7 @@ function engageInfo()
     end
     local wil = ACTIVATION.wyrdCan() and statNumber("Wil") or nil
     local cacophony, void = ACTIVATION.liveField("rerollHits"), ACTIVATION.liveField("void")
+    local immune = ACTIVATION.immunity()
     return { name = fighter.name, status = fighter.status, diameter = currentBase().diameter,
              ironWill = will > 0 and will or nil, wyrd = wil and true or nil, wil = wil,
              assist = assist > 0 and assist or nil, assistWith = assist > 0 and table.concat(kits, ", ") or nil,
@@ -12668,7 +12746,7 @@ function engageInfo()
              auras = ACTIVATION.auraOf(), cacophony = cacophony and cacophony.name or nil,
              void = void and tonumber(void.void) or nil,
              visions = ACTIVATION.wyrdCan() and type(fighter.wyrd) == "table" and fighter.wyrd.visions or nil,
-             immune = next(ACTIVATION.immunity()) and ACTIVATION.immunity() or nil }
+             immune = next(immune) and immune or nil }
 end
 
 -- What the fighter's skills and wargear make it immune to (`immune`: a
@@ -14199,7 +14277,8 @@ end
 --   What the target's saves then need (see takeSaves): `guid` (its
 -- object's), `by` (this fighter's name), `from` (this model's GUID), `ap`
 -- (how much the AP as shown worsens a save: "-2" 2, "-" 0) and `cover`
--- (what cover would add, see ACTIVATION.coverFor), and what each wound
+-- (what cover would add, see ACTIVATION.coverFor -- with `gap` and `band`,
+-- the distance it was measured at and its range), and what each wound
 -- does (TRAIT_RULES.hurts: l, dmg, rend, shred, conc, gas, web, rad).
 -- `noBlaze`: the item that makes the target immune to Blaze (a Hazard
 -- Suit).
@@ -14210,7 +14289,8 @@ function ACTIVATION.woundPlan(w, p, target)
     local okG, guid = pcall(function() return target.obj.getGUID() end)
     local okS, mine = pcall(function() return self.getGUID() end)
     plan.guid, plan.from, plan.by = okG and guid or nil, okS and mine or nil, fighter.name
-    plan.ap, plan.cover = TRAIT_RULES.apOf(w, p), ACTIVATION.coverFor(w, p, target)
+    plan.ap = TRAIT_RULES.apOf(w, p)
+    plan.cover, plan.gap, plan.band = ACTIVATION.coverFor(w, p, target)
     for k, v in pairs(TRAIT_RULES.hurts(w, p)) do plan[k] = v end
     plan.noBlaze = target.immune and target.immune[TRAIT.blaze] or nil
     if not plan.toxin then
@@ -14498,7 +14578,8 @@ function ACTIVATION.toSaves(seq, per, player, roll)
             local ok, obj = pcall(function() return getObjectFromGUID(plan.guid) end)
             if ok and obj then
                 ACTIVATION.ask(obj, "takeSaves", { wounds = n, list = list, ap = plan.ap, l = plan.l,
-                    dmg = plan.dmg, cover = plan.cover, gas = plan.gas, web = plan.web,
+                    dmg = plan.dmg, cover = plan.cover, gap = plan.gap, band = plan.band,
+                    gas = plan.gas, web = plan.web,
                     concussion = conc > 0 and conc or nil, radphage = (plan.rad and n > 0) or nil,
                     knockback = plan.knock, weapon = plan.weapon, by = plan.by, from = plan.from,
                     color = colorOf(player) })
@@ -14511,18 +14592,22 @@ end
 -- t = { wounds, list (each wound: { ap (how much its AP worsens a save: 2 for
 -- "-2"), l (Lethality), dmg (Damage (N)'s N: the wounds it takes off, nil
 -- 1) }; a wound not in it takes t.ap / l / dmg), cover (what cover would add,
--- nil: none -- a melee attack), gas, web (no armour save), concussion (its
+-- nil: none -- a melee attack; gap / band: the distance base to base and
+-- the range it was measured at), gas, web (no armour save), concussion (its
 -- stacks: Concussive), radphage, weapon, by (the attacker's name), from (its
 -- model's GUID), color (the player to roll in) }.
 --   Concussion and Radphage are put on first, whatever the saves do (see
 -- ACTIVATION.timedCondition). Then each wound is saved against once
 -- (ACTIVATION.rollSaves). Before any die is rolled, with cover to be had
--- and an armour save it betters, the Nerve Check's panel asks "In
--- Cover?": CFG.coverYes saves with it, X without -- the attacker
--- highlighted orange meanwhile; another check opened over the question
--- doesn't lose it. With nothing to ask the saves are thrown CFG.diceShow
--- seconds later, once the Wound roll has shown. No save at all: chat says
--- so and every wound goes through (ACTIVATION.damage). Knockback
+-- and an armour save (a fighter without one counts as 7+, which cover can
+-- still bring within reach), the Nerve Check's panel asks "In Cover?":
+-- CFG.coverYes saves with it, X without -- the attacker highlighted orange
+-- meanwhile; another check opened over the question doesn't lose it; chat
+-- says how far the attack came from, when that decided the cover. With
+-- nothing to ask the saves are thrown CFG.diceShow seconds later, once the
+-- Wound roll has shown. No save that could be made at all (no armour save,
+-- no cover to be had, no invulnerable save): chat says so and every wound
+-- goes through (ACTIVATION.damage). Knockback
 -- (`knockback`, see knockback) pushes the fighter once all that is over
 -- (ACTIVATION.knockSelf). Returns "asked", true (thrown), 0 (no save) or
 -- false (Out of Action, no wounds).
@@ -14542,8 +14627,10 @@ function takeSaves(t)
         ACTIVATION.knockSelf(t)
         return false
     end
-    local sv, inv = ACTIVATION.saveOf(t), ACTIVATION.invOf(t)
-    if not (sv or inv) then
+    local sv, none = ACTIVATION.saveOf(t)
+    local inv = ACTIVATION.invOf(t)
+    local cover = tonumber(t.cover)
+    if not (sv or inv) or (none and not inv and not (cover and cover > 0)) then
         chat(string.format("%s has no save against %s -- %d Wound%s go%s through", fighter.name, from, n,
             n == 1 and "" or "s", n == 1 and "es" or ""), rgbOf(COL.valueMod))
         local all = {}
@@ -14552,8 +14639,12 @@ function takeSaves(t)
         ACTIVATION.damage(t, all, nil, t.color)
         return 0
     end
-    local cover = tonumber(t.cover)
     if cover and cover > 0 and sv then
+        local gap = tonumber(t.gap)
+        if gap and t.band then
+            chat(string.format('%s is %.1f" from %s, base to base -- %s Range: cover +%d', fighter.name,
+                math.max(0, gap), tostring(t.by or "?"), tostring(t.band), cover), rgbOf(COL.valueMod))
+        end
         local ok, obj = pcall(function() return t.from and getObjectFromGUID(t.from) end)
         if ACTIVATION.roll and not ACTIVATION.roll.rolling then ACTIVATION.hideDice() end   -- the question shows
         ACTIVATION.openCheck({ test = "question", cover = true, keep = true, pair = true,
@@ -14587,10 +14678,14 @@ function ACTIVATION.wound(t, i)
 end
 
 -- The armour save against attack t: Sv as shown (Mesh Armour, a Shield /
--- Parry ...) -- none against Gas or Web.
+-- Parry ...) -- none against Gas or Web. A fighter with no save ("-")
+-- counts as 7+, so cover can still give it one; the second value is then
+-- true.
 function ACTIVATION.saveOf(t)
     if t.gas or t.web then return nil end
-    return statNumber("Sv", TRAIT_RULES.saveContext())
+    local sv = statNumber("Sv", TRAIT_RULES.saveContext())
+    if sv then return sv end
+    return 7, true
 end
 
 -- The invulnerable save against attack t, and what gives it: the
@@ -14640,7 +14735,7 @@ function ACTIVATION.rollSaves(t, cover, player)
     local n = clamp(math.floor(tonumber(t.wounds) or 0), 0, ACTIVATION.MAX_SHOWN)
     if n < 1 then return nil end
     cover = tonumber(cover) or 0
-    local sv = ACTIVATION.saveOf(t)
+    local sv, none = ACTIVATION.saveOf(t)
     local proof = ACTIVATION.apProof(t.weapon)
     local function apOf(i) return proof and 0 or math.max(0, math.floor(tonumber(ACTIVATION.wound(t, i).ap) or 0)) end
     local function needOf(i) return sv and sv + apOf(i) - cover or nil end
@@ -14653,8 +14748,10 @@ function ACTIVATION.rollSaves(t, cover, player)
     local parts, seen, v0 = {}, {}, nil
     for i = 1, n do
         local k = needOf(i)
-        if k and not seen[k] then seen[k], parts[#parts + 1] = true, needText(k) end
-        v0 = v0 or invFor(k)
+        local v = invFor(k)
+        -- (no save of its own and no cover: an Inv, if any, is all there is)
+        if k and not seen[k] and not (none and cover <= 0 and v) then seen[k], parts[#parts + 1] = true, needText(k) end
+        v0 = v0 or v
     end
     if v0 then parts[#parts + 1] = needText(v0, true) end
     local title = "Save Roll (" .. (#parts > 0 and table.concat(parts, ", ") or "no save") .. ")"
@@ -14686,7 +14783,8 @@ function ACTIVATION.rollSaves(t, cover, player)
         local each = {}
         for i, r in ipairs(read) do each[i] = mixed and string.format("%d (%s)", r.f, r.mark) or tostring(r.f) end
         local ap = apOf(1)
-        local detail = { sv and string.format("Sv %d+", sv) or (t.gas and "no Sv (Gas)" or t.web and "no Sv (Web)" or "no Sv") }
+        local detail = { sv and not none and string.format("Sv %d+", sv)
+                         or (t.gas and "no Sv (Gas)" or t.web and "no Sv (Web)" or "no Sv") }
         if proof then detail[#detail + 1] = "AP ignored, " .. proof
         elseif ap > 0 then detail[#detail + 1] = "AP -" .. ap end
         if cover > 0 then detail[#detail + 1] = "Cover +" .. cover end
@@ -15775,6 +15873,7 @@ end
 -- longer does.
 function ACTIVATION.wyrdDraw()
     ACTIVATION.wyrdMark()
+    ACTIVATION.powerMark()
     SKILL.drawWyrd()
     drawActions()
     local fire = ACTIVATION.fireOf()
@@ -16135,6 +16234,24 @@ function ACTIVATION.auraOf()
                range = tonumber(a.range), mods = a.mods, lend = lend } }
 end
 
+-- Puts CFG.wyrdTag on this model while engageInfo tells other cards of
+-- a power of its that reaches them wherever they stand -- an aura,
+-- Cacophony Of Silence, Maddening Visions -- and takes it off when none
+-- does: those who look for such powers (ACTIVATION.auraPull, as a model
+-- is put down; ACTIVATION.cacophony; ACTIVATION.visionsCheck) ask only
+-- the models with the tag. Run whenever the Wyrd state changes (see
+-- ACTIVATION.wyrdDraw), as the turn ends and as the card loads.
+function ACTIVATION.powerMark()
+    local wy = fighter.wyrd
+    local want = ACTIVATION.auraOf() ~= nil or ACTIVATION.liveField("rerollHits") ~= nil
+        or (ACTIVATION.wyrdCan() and type(wy) == "table" and wy.visions ~= nil)
+    local ok, has = pcall(function() return self.hasTag(CFG.wyrdTag) end)
+    if not ok or has == want then return end
+    pcall(function()
+        if want then self.addTag(CFG.wyrdTag) else self.removeTag(CFG.wyrdTag) end
+    end)
+end
+
 -- Flaming Weapon: the trait melee profiles of weapon `w` gain (its
 -- `flaming`) while it is the one set alight and the power is in effect --
 -- nil otherwise. ACTIVATION.fireOf: which weapon that is and with what, as
@@ -16256,6 +16373,7 @@ function ACTIVATION.manifest(a, player, aim, roll)
             tostring(st.visions.range), name, c and c.label or key))
     end
     if type(it.target) == "table" then ACTIVATION.hexTarget(it, aim, player, roll) end
+    ACTIVATION.powerMark()
 end
 
 -- A power aimed at an enemy (item `it`, its `target`; `aim` the enemy's
@@ -16427,6 +16545,7 @@ function ACTIVATION.turnOver()
     if type(w) == "table" and w.visions then
         w.visions = nil
         if next(w) == nil then fighter.wyrd = nil end
+        ACTIVATION.powerMark()
     end
     if changed then drawStats() end
 end
@@ -17042,6 +17161,7 @@ function onLoad(savedState)
         setFighter(data)
         currentBase()
         engage.spot = positionOf(self)
+        ACTIVATION.powerMark()
     end, 1)
 end
 
@@ -17102,7 +17222,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-importer"
-local TOOL_VERSION   = "2.1.1"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.1.2"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
