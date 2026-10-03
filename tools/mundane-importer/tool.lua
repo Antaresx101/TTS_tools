@@ -420,9 +420,13 @@ local TEMPLATES_URL = ""
 -- { version =, note =, changes = { "one line each", ... } } -- lines of
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
-    { version = "2.0.0", note = "Mundane Importer, rewritten for N26", changes = {
+    { version = "2.1.1", note = "Minor Update", changes = {"Added Knockback(X+) and Bio-Booster support"
     } },
-    { version = "1.0", note = "Mundane Importer N23 release", changes = {
+    { version = "2.1.0", note = "Major Update", changes = {"Added auto-update feature (use !update in the chat)."
+    } },
+    { version = "2.0.0", note = "Mundane Importer (N26) release", changes = {
+    } },
+    { version = "1.0.0", note = "Mundane Importer (N23) release", changes = {
     } },
 }
 
