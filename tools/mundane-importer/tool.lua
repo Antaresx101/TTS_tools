@@ -5216,9 +5216,9 @@ function ACTIVATION.panelXml()
     -- is one row (nerveRow); a question (see ACTIVATION.questioning) has
     -- another in its place (nerveQuestion): a Continue box (nerveGo, as
     -- wide as Revive's) and X (nerveNo), side by side in the middle
-    -- (nerveQGo) -- or, for a yes / no question (see ACTIVATION.asksPair:
-    -- In Cover?), two diamonds there instead (nerveQPair): CFG.coverYes
-    -- (nerveYes) and X (nerveX)
+    -- (nerveQGo) -- or, for the cover bonus of a save (see
+    -- ACTIVATION.asksPair), three diamonds there instead (nerveQPair): the
+    -- bonus (nerveCover, "+2"), CFG.coverYes (nerveYes) and X (nerveX)
     local v, s = ACTIVATION.nerveValue(), d * LAY.iconPad
     local head, stat = ACTIVATION.nerveTexts()
     local asking = ACTIVATION.questioning()
@@ -5237,8 +5237,9 @@ function ACTIVATION.panelXml()
                    ACTIVATION.button("nerveGo", left + goW / 2, rowY, goW, "Continue", "onNerveGo")
                 .. btn("nerveNo", 3, "X", "onNerveClose", nil, left + goW + LAY.midGap + noW / 2))
             .. group("nerveQPair", ACTIVATION.asksPair(),
-                   btn("nerveYes", 1, CFG.coverYes, "onNerveGo", nil, -step / 2)
-                .. btn("nerveX", 3, "X", "onNerveClose", nil, step / 2)))
+                   btn("nerveCover", 1, ACTIVATION.coverText(), "onNerveCover")
+                .. btn("nerveYes", 2, CFG.coverYes, "onNerveGo")
+                .. btn("nerveX", 3, "X", "onNerveClose")))
     return out .. panel("nervePanel", ACTIVATION.nerveOpen(), head.text, COL.accent, row, d * math.sqrt(2), "nerveTitle")
 end
 
@@ -5266,9 +5267,18 @@ function ACTIVATION.doomed() return fighter.recovery ~= nil and fighter.recovery
 function ACTIVATION.nerveOpen() return ACTIVATION.nerve ~= nil and not fighter.outOfAction end
 function ACTIVATION.nerveAsks() return ACTIVATION.nerve ~= nil and ACTIVATION.nerve.test == "height" end
 function ACTIVATION.questioning() return ACTIVATION.nerve ~= nil and ACTIVATION.nerve.test == "question" end
--- Whether the question open is a yes / no one (`pair`: In Cover?), its
--- answers two diamonds -- CFG.coverYes and X -- not Continue and X.
+-- Whether the question open is a save's cover bonus (`pair`, see
+-- takeSaves): three diamonds -- the bonus, CFG.coverYes and X -- not
+-- Continue and X. Its bonus as the first diamond shows it ("+2"), and the
+-- most it can be set to (the most cover gives).
 function ACTIVATION.asksPair() return ACTIVATION.questioning() and ACTIVATION.nerve.pair == true end
+function ACTIVATION.coverText()
+    local n = ACTIVATION.nerve
+    return string.format("+%d", ACTIVATION.asksPair() and tonumber(n.value) or 0)
+end
+function ACTIVATION.coverMax()
+    return math.max(tonumber(CFG.coverShort) or 0, tonumber(CFG.coverLong) or 0, tonumber(CFG.coverTemplate) or 0)
+end
 function ACTIVATION.nerveValue()
     local n = ACTIVATION.nerve
     if not (n and n.value) then return "-" end
@@ -9390,8 +9400,9 @@ function ACTIVATION.draw()
     local asking = ACTIVATION.questioning()                     -- a question: Continue and X, nothing else
     setAttr("nerveRow", "active", not asking)
     setAttr("nerveQuestion", "active", asking)
-    setAttr("nerveQGo", "active", not ACTIVATION.asksPair())   -- ... or a yes and an X (In Cover?)
+    setAttr("nerveQGo", "active", not ACTIVATION.asksPair())   -- ... or a save's cover bonus, yes and X
     setAttr("nerveQPair", "active", ACTIVATION.asksPair())
+    if ACTIVATION.asksPair() then setText("nerveCoverTxt", ACTIVATION.coverText()) end
 end
 
 -- The name above the card, in place (see ui.nameView): a group
@@ -10384,7 +10395,9 @@ function onDiceExit(player, value, id) ACTIVATION.rollLeave((viewerOf(id))) end
 -- one fewer), its die rolls the check (see rollNerve), X closes it. With
 -- Falling Down's height in it, the first diamond is the inches fallen, and OK
 -- lies over the die (see ACTIVATION.fall). A question has Continue (see
--- ACTIVATION.goOn) and an X of its own, which calls off what was asked about.
+-- ACTIVATION.goOn) and an X of its own, which calls off what was asked about;
+-- a save's cover bonus (see takeSaves) its bonus first (left click one
+-- more, right click one less), then the yes and X.
 function onNerveValue(player, value, id)
     local n = ACTIVATION.nerve
     if n and n.value then setNerveValue(n.value + (tostring(value) == "-2" and -1 or 1)) end
@@ -10393,6 +10406,10 @@ function onNerveRoll(player, value, id) rollNerve(player) end
 function onNerveClose(player, value, id) ACTIVATION.giveUp(player) end
 function onNerveOk(player, value, id) ACTIVATION.fall(player) end
 function onNerveGo(player, value, id) ACTIVATION.goOn(player) end
+function onNerveCover(player, value, id)
+    local n = ACTIVATION.nerve
+    if n and n.cover then setNerveValue(n.value + (tostring(value) == "-2" and -1 or 1)) end
+end
 
 -- A tab over A's panel (Generic / Special): the viewer's panel is swapped
 -- for the other one of the same status, in place. The old one vanished
@@ -11198,9 +11215,7 @@ do
     -- beyond it; a weapon with only one range in inches ("T", "-") always
     -- gives that one's, one with neither (a Template's "T") CFG.coverTemplate.
     -- Within an enemy's A Perfect Void (`void`) it is at Long range. nil
-    -- for a melee attack: no cover then. Also, when the distance decided
-    -- it, that distance (base to base, inches) and the range it falls in
-    -- ("Short" / "Long"), for the target to say (see takeSaves).
+    -- for a melee attack: no cover then.
     function ACTIVATION.coverFor(w, p, aim)
         if not (w and p and aim) or isMelee(p) then return nil end
         local R = TRAIT_RULES
@@ -11217,9 +11232,8 @@ do
         local gap = me and aim.x and aim.z and baseGap(me, aim)   -- (no position: unknown)
         if not gap then return CFG.coverShort end
         local slack = CFG.engageSlack or 0
-        if aim.void and gap <= aim.void + slack then return CFG.coverLong, gap, "Long" end
-        if gap > sr + slack then return CFG.coverLong, gap, "Long" end
-        return CFG.coverShort, gap, "Short"
+        if aim.void and gap <= aim.void + slack then return CFG.coverLong end
+        return gap > sr + slack and CFG.coverLong or CFG.coverShort
     end
 
     -- Every fighter on the table (importTag, see tableEntry), and this
@@ -14277,8 +14291,7 @@ end
 --   What the target's saves then need (see takeSaves): `guid` (its
 -- object's), `by` (this fighter's name), `from` (this model's GUID), `ap`
 -- (how much the AP as shown worsens a save: "-2" 2, "-" 0) and `cover`
--- (what cover would add, see ACTIVATION.coverFor -- with `gap` and `band`,
--- the distance it was measured at and its range), and what each wound
+-- (what cover would add, see ACTIVATION.coverFor), and what each wound
 -- does (TRAIT_RULES.hurts: l, dmg, rend, shred, conc, gas, web, rad).
 -- `noBlaze`: the item that makes the target immune to Blaze (a Hazard
 -- Suit).
@@ -14289,8 +14302,7 @@ function ACTIVATION.woundPlan(w, p, target)
     local okG, guid = pcall(function() return target.obj.getGUID() end)
     local okS, mine = pcall(function() return self.getGUID() end)
     plan.guid, plan.from, plan.by = okG and guid or nil, okS and mine or nil, fighter.name
-    plan.ap = TRAIT_RULES.apOf(w, p)
-    plan.cover, plan.gap, plan.band = ACTIVATION.coverFor(w, p, target)
+    plan.ap, plan.cover = TRAIT_RULES.apOf(w, p), ACTIVATION.coverFor(w, p, target)
     for k, v in pairs(TRAIT_RULES.hurts(w, p)) do plan[k] = v end
     plan.noBlaze = target.immune and target.immune[TRAIT.blaze] or nil
     if not plan.toxin then
@@ -14578,8 +14590,7 @@ function ACTIVATION.toSaves(seq, per, player, roll)
             local ok, obj = pcall(function() return getObjectFromGUID(plan.guid) end)
             if ok and obj then
                 ACTIVATION.ask(obj, "takeSaves", { wounds = n, list = list, ap = plan.ap, l = plan.l,
-                    dmg = plan.dmg, cover = plan.cover, gap = plan.gap, band = plan.band,
-                    gas = plan.gas, web = plan.web,
+                    dmg = plan.dmg, cover = plan.cover, gas = plan.gas, web = plan.web,
                     concussion = conc > 0 and conc or nil, radphage = (plan.rad and n > 0) or nil,
                     knockback = plan.knock, weapon = plan.weapon, by = plan.by, from = plan.from,
                     color = colorOf(player) })
@@ -14592,44 +14603,64 @@ end
 -- t = { wounds, list (each wound: { ap (how much its AP worsens a save: 2 for
 -- "-2"), l (Lethality), dmg (Damage (N)'s N: the wounds it takes off, nil
 -- 1) }; a wound not in it takes t.ap / l / dmg), cover (what cover would add,
--- nil: none -- a melee attack; gap / band: the distance base to base and
--- the range it was measured at), gas, web (no armour save), concussion (its
+-- nil: none -- a melee attack), gas, web (no armour save), concussion (its
 -- stacks: Concussive), radphage, weapon, by (the attacker's name), from (its
 -- model's GUID), color (the player to roll in) }.
 --   Concussion and Radphage are put on first, whatever the saves do (see
 -- ACTIVATION.timedCondition). Then each wound is saved against once
 -- (ACTIVATION.rollSaves). Before any die is rolled, with cover to be had
 -- and an armour save (a fighter without one counts as 7+, which cover can
--- still bring within reach), the Nerve Check's panel asks "In Cover?":
--- CFG.coverYes saves with it, X without -- the attacker highlighted orange
--- meanwhile; another check opened over the question doesn't lose it; chat
--- says how far the attack came from, when that decided the cover. With
--- nothing to ask the saves are thrown CFG.diceShow seconds later, once the
--- Wound roll has shown. No save that could be made at all (no armour save,
--- no cover to be had, no invulnerable save): chat says so and every wound
--- goes through (ACTIVATION.damage). Knockback
+-- still bring within reach), the Nerve Check's panel asks for it under
+-- "Save: Cover Bonus": the bonus the attack's range gives (+1 / +2; a left
+-- click one more, a right click one less, 0 to ACTIVATION.coverMax),
+-- CFG.coverYes rolls the saves with it, X calls the attack off -- no saves,
+-- no Concussion or Radphage, no damage, no Knockback. The attacker is
+-- highlighted orange meanwhile; another check opened over it doesn't lose
+-- it. With nothing to ask the saves are thrown CFG.diceShow seconds later,
+-- once the Wound roll has shown. No save that could be made at all (no
+-- armour save, no cover to be had, no invulnerable save): chat says so
+-- and every wound goes through (ACTIVATION.damage). Knockback
 -- (`knockback`, see knockback) pushes the fighter once all that is over
 -- (ACTIVATION.knockSelf). Returns "asked", true (thrown), 0 (no save) or
 -- false (Out of Action, no wounds).
 function takeSaves(t)
     if type(t) ~= "table" or fighter.outOfAction then return false end
     local from = ACTIVATION.fromText(t)
-    local conc = math.floor(tonumber(t.concussion) or 0)
-    if conc > 0 then ACTIVATION.timedCondition("concussion", conc, nil, from) end
-    if t.radphage then
-        local before = conditionCount("radphage")
-        if (setCondition("radphage", true) or 0) > before then
-            chat(string.format("%s gains Radphage from %s", fighter.name, from), rgbOf(COL.valueMod))
+    local function struck()
+        local conc = math.floor(tonumber(t.concussion) or 0)
+        if conc > 0 then ACTIVATION.timedCondition("concussion", conc, nil, from) end
+        if t.radphage then
+            local before = conditionCount("radphage")
+            if (setCondition("radphage", true) or 0) > before then
+                chat(string.format("%s gains Radphage from %s", fighter.name, from), rgbOf(COL.valueMod))
+            end
         end
     end
     local n = clamp(math.floor(tonumber(t.wounds) or 0), 0, ACTIVATION.MAX_SHOWN)
+    local sv, none = ACTIVATION.saveOf(t)
+    local inv = ACTIVATION.invOf(t)
+    local cover = tonumber(t.cover)
+    if n >= 1 and cover and cover > 0 and sv then     -- (the attack may yet be called off)
+        local ok, obj = pcall(function() return t.from and getObjectFromGUID(t.from) end)
+        if ACTIVATION.roll and not ACTIVATION.roll.rolling then ACTIVATION.hideDice() end   -- the question shows
+        local q = { test = "question", cover = true, keep = true, pair = true, value = cover,
+                    title = "Save: Cover Bonus", obj = ok and obj or nil, ink = rgbOf(COL.valueMod) }
+        q.done = function(yes, _, who)
+            if not yes then
+                chat(string.format("%s - %s called off: no saves", fighter.name, from))
+                return
+            end
+            struck()
+            ACTIVATION.rollSaves(t, q.value, who or t.color)
+        end
+        ACTIVATION.openCheck(q)
+        return "asked"
+    end
+    struck()
     if n < 1 then
         ACTIVATION.knockSelf(t)
         return false
     end
-    local sv, none = ACTIVATION.saveOf(t)
-    local inv = ACTIVATION.invOf(t)
-    local cover = tonumber(t.cover)
     if not (sv or inv) or (none and not inv and not (cover and cover > 0)) then
         chat(string.format("%s has no save against %s -- %d Wound%s go%s through", fighter.name, from, n,
             n == 1 and "" or "s", n == 1 and "es" or ""), rgbOf(COL.valueMod))
@@ -14638,19 +14669,6 @@ function takeSaves(t)
         onSavesRolled(t.color, { wounds = n, saved = 0, through = n, faces = {}, by = t.by, weapon = t.weapon })
         ACTIVATION.damage(t, all, nil, t.color)
         return 0
-    end
-    if cover and cover > 0 and sv then
-        local gap = tonumber(t.gap)
-        if gap and t.band then
-            chat(string.format('%s is %.1f" from %s, base to base -- %s Range: cover +%d', fighter.name,
-                math.max(0, gap), tostring(t.by or "?"), tostring(t.band), cover), rgbOf(COL.valueMod))
-        end
-        local ok, obj = pcall(function() return t.from and getObjectFromGUID(t.from) end)
-        if ACTIVATION.roll and not ACTIVATION.roll.rolling then ACTIVATION.hideDice() end   -- the question shows
-        ACTIVATION.openCheck({ test = "question", cover = true, keep = true, pair = true,
-            title = string.format("In Cover? (+%d Save)", cover), obj = ok and obj or nil, ink = rgbOf(COL.valueMod),
-            done = function(yes, _, who) ACTIVATION.rollSaves(t, yes and cover or 0, who or t.color) end })
-        return "asked"
     end
     Wait.time(function() ACTIVATION.rollSaves(t, 0, t.color) end, CFG.dicePause or CFG.diceShow)
     return true
@@ -15497,11 +15515,17 @@ end
 -- The Nerve Check's Cl, by hand (within STAT.LIMITS): shown in the hand-set
 -- colour unless back at the Cl looked up. A Group Activation's Ld
 -- likewise, anywhere 2D6 can roll (2 to 12). With Falling Down's height
--- in the panel: the inches (1 to ACTIVATION.FALL_MAX).
+-- in the panel: the inches (1 to ACTIVATION.FALL_MAX); with a save's cover
+-- bonus (see takeSaves): the bonus (0 to ACTIVATION.coverMax).
 function setNerveValue(n)
     local nv = ACTIVATION.nerve
     if not nv then return nil end
     if type(n) == "table" then n = n.value end
+    if nv.cover then
+        nv.value = clamp(math.floor(tonumber(n) or nv.value or 0), 0, ACTIVATION.coverMax())
+        ACTIVATION.draw()
+        return nv.value
+    end
     if nv.test == "question" then return nil end      -- nothing to set
     n = math.floor(tonumber(n) or nv.value or 0)
     if nv.test == "height" then
@@ -17222,7 +17246,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-importer"
-local TOOL_VERSION   = "2.1.2"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.1.3"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error

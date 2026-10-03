@@ -1,11 +1,17 @@
 {
   "stable": {
-    "version": "2.1.2",
+    "version": "2.1.3",
     "notes": [
-      "Performance improvements and bug fixes."
+      "Cover save fix."
     ]
   },
   "history": [
+    {
+      "version": "2.1.2",
+      "notes": [
+        "Performance improvements and bug fixes."
+      ]
+    },
     {
       "version": "2.1.1",
       "notes": [
