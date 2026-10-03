@@ -2,7 +2,7 @@
   "stable": {
     "version": "2.1.0",
     "notes": [
-      "Test-Update"
+      "Added auto-update feature."
     ]
   },
   "history": [
