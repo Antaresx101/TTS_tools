@@ -420,11 +420,9 @@ local TEMPLATES_URL = ""
 -- { version =, note =, changes = { "one line each", ... } } -- lines of
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
-    { version = "2.1.0", note = "Added auto-update feature (use !update in the chat)", changes = {
+    { version = "2.0.0", note = "Mundane Importer, rewritten for N26", changes = {
     } },
-    { version = "2.0.0", note = "Mundane Importer (N26) release", changes = {
-    } },
-    { version = "1.0.0", note = "Mundane Importer (N23) release", changes = {
+    { version = "1.0", note = "Mundane Importer N23 release", changes = {
     } },
 }
 
@@ -2120,10 +2118,12 @@ local CFG = {
     wyrdMark = "⏳",
     -- The signs over a die a weapon trait had a hand in (see
     -- ACTIVATION.diceView): Shock (N+) -- the hit die that reached N, and the
-    -- Wound roll dice it made automatic 6s -- and Blaze (N+) -- the Wound
-    -- roll dice that made more hits, and every die of those hits.
+    -- Wound roll dice it made automatic 6s --, Blaze (N+) -- the Wound
+    -- roll dice that made more hits, and every die of those hits -- and
+    -- Knockback (N+) -- the hit dice that reached N.
     shockMark = "🗲",
     blazeMark = "♨",
+    knockMark = "༄",
     -- The cover question's "yes" diamond (see takeSaves); its "no" is X.
     coverYes = "✔",
 
@@ -2254,6 +2254,14 @@ local CFG = {
     -- between the two); any one ray clear will do, and only scenery blocks
     -- them.
     wyrdSight = { from = 0.85, to = { 0.85, 0.35 }, across = { 0, -0.9, 0.9, -0.5, 0.5 } },
+    -- Knockback pushes a model (see knockback) until scenery is in the way:
+    -- rays from its base's middle along the push, at each `up` height (a
+    -- fraction of its bounding box's height) and from each `across` point
+    -- (a fraction of its base's radius to either side), as far as the
+    -- push and the base's front reach; the model stops `gap` inches short
+    -- of the nearest thing they hit. Fighters (importTag) and dice don't
+    -- stop the rays: the bases themselves are kept apart instead.
+    knockRays = { up = { 0.15, 0.5 }, across = { 0, -0.9, 0.9 }, gap = 0.05 },
     -- The Mundane Controller carries this tag: it throws the card's dice
     -- (see throwDice), a fighter going Out of Action tells it (its
     -- Bottle Check), and it keeps the table's own rules (see loadRules).
@@ -2376,6 +2384,7 @@ local COL = {
     -- the signs over a die a weapon trait had a hand in (see CFG.shockMark):
     diceShock    = "#FFE14A",     --     Shock (electric yellow)
     diceBlaze    = "#FF7A2E",     --     Blaze (fire orange)
+    diceKnock    = "#7FD8FF",     --     Knockback (light blue)
 }
 
 --============================================================================
@@ -2813,7 +2822,13 @@ RULES.conditions = {
 --   burns      true: the first natural 1 on a save taken with its `inv`
 --              burns it out for the rest of the battle -- its name turns
 --              grey, and a left click on it switches it back on or off
---              (Refractor Shield);
+--              (Refractor Shield; the Bio-Booster, which is used up so);
+--   bioBooster N: the first time in the battle a wound that goes through
+--              brings the fighter to 0 wounds, that wound's Lethality is N
+--              less -- down to 0: two Injury dice of their own instead, the
+--              better kept -- and the item is used up (`burns`: grey, a
+--              left click puts it back; see the card's ACTIVATION.damage)
+--              (Bio-Booster: 1);
 --   noAp       words a weapon's name may start with (a list, any case):
 --              hits from such a weapon have no AP against it (Reflec
 --              Shroud: Las, Plasma, Melta);
@@ -2977,7 +2992,8 @@ RULES.skills = {
 -- roster's statline already counts what armour and mounts do: `mods` are
 -- only for what it doesn't.
 RULES.wargear = {
-    { name = "Bio-Booster",            desc = "" },
+    { name = "Bio-Booster",            desc = "", aka = { "Bio Booster", "Biobooster" },
+      bioBooster = 1, burns = true },
     { name = "Bomb Delivery Rats",     desc = "" },
     { name = "Book Of The Redemption", desc = "" },
     { name = "Chaos Familiar",         desc = "" },
@@ -3073,6 +3089,8 @@ RULES.traits = {
     assault   = "assault",            -- after a Dash, one Shoot with it, for no action
     toxin     = "toxin",              -- Toxin (N+)  (the card's TRAIT_RULES.toxin)
     shock     = "shock",              -- Shock (N+): a hit roll of N+ wounds automatically, as a 6
+    knockback = "knockback",          -- Knockback (N+): a hit roll of N+ pushes the target back (once an attack)
+    blast     = "blast[^,]*",         -- Blast (3") / (5"): a Knockback with it pushes nobody
     cursed    = "cursed",             -- a target hit makes a Willpower check, failed: Insanity
     flash     = "flash",              -- ranged: no Wound roll; the target hit is Blind and loses its Ready marker
     graviton  = "graviton pulse",     -- ranged: no Wound roll
@@ -3154,9 +3172,12 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 activation holding it through that activation's end. true:
 --                 a power cast lasts through the end of that activation
 --                 without one, and then goes the same way.
---   shockNatural  Shock (N+): false -- the hit roll with its modifiers must
---                 reach N (Shock (6+) with +1 to hit: a 5 does); true --
---                 the die's own roll.
+--   shockNatural  Shock (N+) and Knockback (N+): false -- the hit roll
+--                 with its modifiers must reach N (Shock (6+) with +1 to
+--                 hit: a 5 does); true -- the die's own roll.
+--   knockback     Knockback (N+): how many inches the target is pushed
+--                 straight away from the attacker, once the attack is over
+--                 (see the card's knockback).
 --   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
 --                 Firepower dice give shares the hit roll, so every one of
 --                 them wounds automatically; true -- only the first does.
@@ -3192,11 +3213,12 @@ RULES.cfg = {
     maintainMod   = 3,
     powersLastNext = false,
     shockNatural  = false,
+    knockback     = 1,
     rapidOneHit   = false,
     saveFails     = 2,
     coverShort    = 1,
     coverLong     = 2,
-    dicePause     = 4.5,
+    dicePause     = 3,
 }
 
 -- ── Overrides ────────────────────────────────────────────────
@@ -4616,7 +4638,7 @@ function textEm(s)
     if (CFG.groupMark or "") ~= "" then s = s:gsub(CFG.groupMark, "W") end   -- ... and the group activation's sign
     if (CFG.wyrdMark or "") ~= "" then s = s:gsub(CFG.wyrdMark, "W") end     -- ... and a power in effect's
     if (CFG.coverYes or "") ~= "" then s = s:gsub(CFG.coverYes, "W") end     -- ... and the cover question's yes
-    for _, sym in ipairs({ CFG.shockMark or "", CFG.blazeMark or "" }) do    -- ... and the signs over dice
+    for _, sym in ipairs({ CFG.shockMark or "", CFG.blazeMark or "", CFG.knockMark or "" }) do   -- ... and the signs over dice
         if sym ~= "" then s = s:gsub(sym, "W") end
     end
     for c in s:gmatch(".") do w = w + (GLYPH_EM[c] or GLYPH_EM.default) end
@@ -5460,12 +5482,15 @@ function ACTIVATION.signView(list, D)
     return out
 end
 
--- The signs a weapon trait puts over a die (see CFG.shockMark): `shock`
--- and / or `blaze`, as a die's entry of a roll's `syms`; nil for none.
-function ACTIVATION.signs(shock, blaze)
+-- The signs a weapon trait puts over a die (see CFG.shockMark): `shock`,
+-- `blaze` and / or `knock` (Knockback; never with Blaze, which marks Wound
+-- roll dice: two at most), as a die's entry of a roll's `syms`; nil for
+-- none.
+function ACTIVATION.signs(shock, blaze, knock)
     local out = {}
     if blaze and (CFG.blazeMark or "") ~= "" then out[#out + 1] = { text = CFG.blazeMark, ink = COL.diceBlaze } end
     if shock and (CFG.shockMark or "") ~= "" then out[#out + 1] = { text = CFG.shockMark, ink = COL.diceShock } end
+    if knock and (CFG.knockMark or "") ~= "" then out[#out + 1] = { text = CFG.knockMark, ink = COL.diceKnock } end
     return #out > 0 and out or nil
 end
 
@@ -5808,8 +5833,8 @@ do
     -- master, springUp, catfall, distance, fearsome, ironJaw, steel,
     -- unstoppable, backstab, cutThroat, lieLow, shoots, gunfighter,
     -- hipShooting, marksman, aimed, fastReload, ironWill, label, distribute,
-    -- when, once, boost, reaction, noFall, assist, inv, burns, noAp, immune,
-    -- gasInv, and a Wyrd power's maintained, overLimit, flaming, meleeL,
+    -- when, once, boost, reaction, noFall, assist, inv, burns, bioBooster,
+    -- noAp, immune, gasInv, and a Wyrd power's maintained, overLimit, flaming, meleeL,
     -- target, area, aura, rerollHits, void, visions (see
     -- ACTIVATION.manifest) -- and `bar`: its place among the names under the
     -- stats (every one is shown there, those that are actions too) -- and
@@ -5866,6 +5891,7 @@ do
                                   meleeL = d.meleeL, target = d.target, area = d.area, aura = d.aura,
                                   rerollHits = d.rerollHits, void = d.void, visions = d.visions,
                                   inv = d.inv, burns = d.burns, noAp = d.noAp, immune = d.immune, gasInv = d.gasInv,
+                                  bioBooster = d.bioBooster,
                                   bar = #out + 1, state = state }
             end
         end
@@ -7670,6 +7696,15 @@ do
         if not TRAIT.shock then return nil end
         return R.lowest(p.traits, TRAIT.shock) or (hasTrait(p, TRAIT.shock) and 6) or nil
     end
+    -- Knockback (N+): a hit die that hits and reaches N (read as Shock is,
+    -- see ACTIVATION.hitRead) pushes the target back once the attack is
+    -- over -- once an attack, however many dice reach it -- unless the
+    -- weapon is Blast (R.blast). N, 6 for a Knockback without one, or nil.
+    function R.knockback(p)
+        if not TRAIT.knockback then return nil end
+        return R.lowest(p.traits, TRAIT.knockback) or (hasTrait(p, TRAIT.knockback) and 6) or nil
+    end
+    function R.blast(p) return TRAIT.blast ~= nil and hasTrait(p, TRAIT.blast) end
     -- Blaze (N+): a Wound roll die of N or more makes one more hit (see
     -- ACTIVATION.woundRoll). The lowest N of every Blaze trait profile p
     -- has -- a melee one's of weapon w with the one Flaming Weapon gives it
@@ -11657,6 +11692,85 @@ do
         return false
     end
 
+    -- Knockback (see knockback): how far this model can be pushed, up to
+    -- `dist` inches along (dx, dz) -- a unit vector on the table -- and what
+    -- stopped it short: "terrain" (scenery: CFG.knockRays, the nearest
+    -- thing a ray hits, less the base's front and the gap), "fighter"
+    -- (its base would run into another's) or "enemy" (it would come within
+    -- CFG.engageRange of an enemy's base -- only when it isn't Engaged);
+    -- nil when nothing did. Fighters on another level (CFG.engageLevel)
+    -- are no matter, nor one it would only move away from.
+    function ACTIVATION.knockPath(dx, dz, dist)
+        local pos = positionOf(self)
+        if not pos then return 0, nil end
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        local r = me and me.r or currentBase().diameter / 2
+        local rays = CFG.knockRays or {}
+        local room, why = dist, nil
+        if Physics and Physics.cast then
+            local bottom, h = pos.y, 1
+            local okB, b = pcall(function() return self.getBounds() end)
+            if okB and type(b) == "table" and b.center and b.size then
+                local cy, sy = tonumber(b.center.y or b.center[2]), tonumber(b.size.y or b.size[2])
+                if cy and sy then bottom, h = cy - sy / 2, sy end
+            end
+            local function passes(o)
+                if o == nil or isSelf(o) then return true end
+                local okT, tagged = pcall(function() return o.hasTag(CFG.importTag) end)
+                if okT and tagged == true then return true end
+                local okD, kind = pcall(function() return o.type end)
+                return okD and kind == "Dice"
+            end
+            for _, f in ipairs(rays.up or { 0.15, 0.5 }) do
+                for _, a in ipairs(rays.across or { 0 }) do
+                    local side = a * r
+                    local front = math.sqrt(math.max(0, r * r - side * side))   -- the base's edge ahead of the ray
+                    local o = { x = pos.x - dz * side, y = bottom + h * f, z = pos.z + dx * side }
+                    local ok, hits = pcall(function()
+                        return Physics.cast({ origin = o, direction = { x = dx, y = 0, z = dz },
+                            type = 1, max_distance = front + dist, debug = false })
+                    end)
+                    for _, hit in ipairs(ok and type(hits) == "table" and hits or {}) do
+                        local d = tonumber(hit.distance)
+                        if d and not passes(hit.hit_object) then
+                            local can = math.max(0, d - front - (rays.gap or 0.05))
+                            if can < room then room, why = can, "terrain" end
+                        end
+                    end
+                end
+            end
+        end
+        local engaged = fighter.status == "engaged"
+        local start = { x = pos.x, z = pos.z, r = r }
+        local slack = CFG.engageSlack or 0
+        local others = {}
+        for _, o in ipairs(all) do
+            if not o.self and math.abs(o.y - pos.y) <= (CFG.engageLevel or 1) + slack then
+                others[#others + 1] = { o = o, g0 = baseGap(start, o) }
+            end
+        end
+        local function blocked(s)
+            local at = { x = pos.x + dx * s, z = pos.z + dz * s, r = r }
+            for _, e in ipairs(others) do
+                local g = baseGap(at, e.o)
+                if g < e.g0 then
+                    if g < 0 then return "fighter" end
+                    if not engaged and me and e.o.gang ~= me.gang and g <= CFG.engageRange + slack then return "enemy" end
+                end
+            end
+            return nil
+        end
+        local s, go = 0, 0
+        while s < room - 1e-9 do
+            s = math.min(room, s + 0.05)
+            local b = blocked(s)
+            if b then return go, b end
+            go = s
+        end
+        return go, why
+    end
+
     -- The Cl a Nerve Check is taken against: this fighter's own (as shown,
     -- changes and all), or -- higher -- the best of the friends whose rank
     -- lends it (CFG.nerveRanges: a Leader within 12", a Champion within
@@ -12858,7 +12972,8 @@ end
 
 -- Wargear that burns out (`burns`: the Refractor Shield, whose
 -- invulnerable save is gone for the battle after its first natural 1, see
--- ACTIVATION.rollSaves), by hand: `key` its name or key, `burnt` true /
+-- ACTIVATION.rollSaves; the Bio-Booster, used up once it has lessened a
+-- wound's Lethality, see ACTIVATION.damage), by hand: `key` its name or key, `burnt` true /
 -- false (nil: the other way round). Its name under the stats is grey
 -- while it is, and its save isn't there (the hover view shows Sv again).
 -- From other scripts: obj.call("setBurnt", { key = "Refractor Shield",
@@ -12880,8 +12995,9 @@ function setBurnt(key, burnt)
         if next(fighter.burnt) == nil then fighter.burnt = nil end
         SKILL.drawBurnt()
         drawStats()
-        chat(string.format(burnt and "%s's %s is burnt out (set by hand)" or "%s's %s works again (set by hand)",
-            fighter.name, it.name), rgbOf(burnt and COL.valueMod or COL.valueUp))
+        local words = it.bioBooster and { "is used up", "is ready again" } or { "is burnt out", "works again" }
+        chat(string.format("%s's %s %s (set by hand)", fighter.name, it.name, words[burnt and 1 or 2]),
+            rgbOf(burnt and COL.valueMod or COL.valueUp))
     end
     return burnt
 end
@@ -13675,18 +13791,22 @@ end
 -- roll, nothing modifies them (`only`, `why` its name). Shock (N+) (`shock`,
 -- see TRAIT_RULES.shock): a die that hits and with the modifiers reaches N --
 -- the die's own roll with CFG.shockNatural, and for a die nothing modifies --
--- Shocks (shocked).
+-- Shocks (shocked). Knockback (N+) (`knock`, see TRAIT_RULES.knockback) is
+-- read the same way (knocked).
 function ACTIVATION.hitRead(attack)
     local only, why = ACTIVATION.hitOnly(attack.melee and "melee" or "ranged")
     local mod = only and 0 or (attack.hit or 0)
-    local h = { mod = mod, only = only, why = why, shock = TRAIT_RULES.shock(attack.stats) }
+    local h = { mod = mod, only = only, why = why, shock = TRAIT_RULES.shock(attack.stats),
+                knock = TRAIT_RULES.knockback(attack.stats) }
     h.need = only or ((statNumber(attack.stat or (attack.melee and "WS" or "BS")) or 7) - mod)
     h.shown = clamp(h.need, 2, 6)
     function h.hits(f) return f ~= 1 and (f == 6 or f >= h.need) end
-    function h.shocked(f)
-        if not (h.shock and h.hits(f)) then return false end
-        return f + ((CFG.shockNatural or only) and 0 or mod) >= h.shock
+    local function reaches(f, n)
+        if not (n and h.hits(f)) then return false end
+        return f + ((CFG.shockNatural or only) and 0 or mod) >= n
     end
+    function h.shocked(f) return reaches(f, h.shock) end
+    function h.knocked(f) return reaches(f, h.knock) end
     return h
 end
 
@@ -13705,6 +13825,10 @@ end
 -- the Wound roll at once). A hit die that Shocks (see ACTIVATION.hitRead)
 -- has CFG.shockMark over it and makes the Wound roll die of its hit an
 -- automatic 6 -- at RF every hit's, or (CFG.rapidOneHit) the first's.
+-- Knockback (N+): every hit die that reaches N (a ranged attack's hit die
+-- alone, not its Firepower dice) has CFG.knockMark over it, and if any
+-- does, the target is pushed back once the attack is over -- once, however
+-- many dice did; not with a Blast weapon (see ACTIVATION.knockAfter).
 -- The enemies hit hear what Cursed and Flash do to them (see
 -- ACTIVATION.traitHits); Flash and Graviton Pulse roll no Wound roll. An
 -- Unstable weapon's hit die showing a 1 explodes: "Explosion" at the
@@ -13740,6 +13864,10 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
     local color = colorOf(player)
     local function landed(faces, digital)
         local hls, syms = {}, {}
+        local kb = false                             -- Knockback: a hit die reached its N
+        local function kbText()
+            return kb and (R.blast(p) and ", Knockback (Blast: no push)" or ", Knockback") or ""
+        end
         local roll = { title = title, kinds = kinds, faces = faces, hls = hls }
         local res = { attack = attack, faces = faces, need = shown, digital = digital }
         local dice, struck = {}, {}                  -- the Wound roll's dice, one per hit; the enemies hit
@@ -13748,9 +13876,11 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             -- "(6+, Blind)", "= 2 Hits, 1 Shock")
             local n, read, sh = 0, {}, 0
             for i, f in ipairs(faces) do
-                local ok, s = hits(f), h.shocked(f)
+                local ok, s, k = hits(f), h.shocked(f), h.knocked(f)
                 hls[i], read[i], n = ok and UP or MOD, tostring(f), n + (ok and 1 or 0)
-                if s then syms[i], sh = ACTIVATION.signs(true), sh + 1 end
+                syms[i] = ACTIVATION.signs(s, false, k)
+                if s then sh = sh + 1 end
+                kb = kb or k
                 if ok then dice[#dice + 1] = { plan = 1, auto = s or nil } end
             end
             res.hits, roll.sum = n, "∑" .. n
@@ -13759,8 +13889,8 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             local why = h.why and ", " .. h.why
                         or attack.support == "assist" and ", Assist" or attack.support and ", Interference" or ""
             if attack.rerolls then why = why .. string.format(", %d re-rolled", attack.rerolls) end
-            ACTIVATION.sayAttack(verb, title, string.format("%s (%d+%s) = %d Hit%s%s", table.concat(read, ", "), shown,
-                why, n, n == 1 and "" or "s", sh > 0 and string.format(", %d Shock", sh) or ""),
+            ACTIVATION.sayAttack(verb, title, string.format("%s (%d+%s) = %d Hit%s%s%s", table.concat(read, ", "), shown,
+                why, n, n == 1 and "" or "s", sh > 0 and string.format(", %d Shock", sh) or "", kbText()),
                 n > 0 and UP or MOD, digital)
         else
             -- "Autogun (RF2): Hit 5 (3+), 1 + 2 = ∑3 Hits, 1x AM, Ammo 2 (4+), Reliable, OUT"
@@ -13779,13 +13909,13 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             end
             if not template then
                 local f1 = faces[1] or 1
-                hit, sh = hits(f1), h.shocked(f1)
+                hit, sh, kb = hits(f1), h.shocked(f1), h.knocked(f1)
                 hls[1] = hit and UP or MOD
-                if sh then syms[1] = ACTIVATION.signs(true) end
-                parts[1] = string.format("%s %d (%d+%s%s%s%s%s)%s", hit and "Hit" or "Miss", f1, shown,
+                syms[1] = ACTIVATION.signs(sh, false, kb)
+                parts[1] = string.format("%s %d (%d+%s%s%s%s%s)%s%s", hit and "Hit" or "Miss", f1, shown,
                     attack.stat == "WS" and ", WS" or "", attack.marksman and ", Marksman" or "", attack.prone and ", Seriously Injured -1" or "",
                     h.why and ", " .. h.why or "",
-                    attack.rerolled and string.format(", re-rolled %d", attack.rerolled) or "", sh and ", Shock" or "")
+                    attack.rerolled and string.format(", re-rolled %d", attack.rerolled) or "", sh and ", Shock" or "", kbText())
             elseif not rf then
                 parts[1] = #aims > 0 and ACTIVATION.nameList(aims) .. " hit" or "no enemy selected"
             end
@@ -13856,9 +13986,10 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             if state then setProfileState({ weapon = attack.weapon, profile = attack.profile, ammo = state })
             elseif spare then drawProfile(attack.weapon, attack.profile) end
         end
-        roll.syms = next(syms) and syms or nil       -- Shock over the hit dice that had it
+        roll.syms = next(syms) and syms or nil       -- Shock / Knockback over the hit dice that had it
         if #faces > 0 then ACTIVATION.showDice(roll) else roll = nil end
         res.target, res.targets = attack.target, attack.targets
+        res.knockback = kb or nil
         onAttackRolled(player, res)
         -- a ranged hit on a selected enemy: it is Suppressed (Nerves Of Steel
         -- may save it), unless the weapon is Smoke; Cursed and Flash have
@@ -13877,9 +14008,15 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
                 plan.hits = (plan.hits or 0) + 1
             end
         end
+        -- Knockback: the target is pushed once the attack is over -- after
+        -- its saves when the Wound roll goes on to them (the plan carries
+        -- it), else once these dice have shown
+        local knock = kb and not R.blast(p) and struck[1] and ACTIVATION.knockFrom(attack) or nil
+        if knock and #wound > 0 and plans[1] then plans[1].knock = knock end
         if #wound > 0 then
             ACTIVATION.woundAfter(roll, { plans = plans, dice = wound, blaze = R.blaze(p, w), weapon = name }, player)
         end
+        if knock and not (plans[1] and plans[1].knock) then ACTIVATION.knockAfter(struck[1].obj, knock, roll) end
     end
     if #kinds == 0 then return landed({}, false) end   -- a Template with nothing to throw
     ACTIVATION.rolling(title)
@@ -14029,6 +14166,21 @@ function ACTIVATION.hitTarget(aim, attack)
     if not ok and aim.status == "active" then
         ACTIVATION.ask(aim.obj, "setStatus", "suppressed")
     end
+end
+
+-- Knockback from this fighter's attack `attack` (see
+-- ACTIVATION.attackDice): what the target's card is told -- this model's
+-- GUID and where it stands, this fighter's name and the weapon's.
+function ACTIVATION.knockFrom(attack)
+    local pos = positionOf(self)
+    local ok, guid = pcall(function() return self.getGUID() end)
+    return { from = ok and guid or nil, x = pos and pos.x, z = pos and pos.z, by = fighter.name, weapon = attack.name }
+end
+
+-- The target `obj` is knocked back (its card's knockback, told `knock`)
+-- once `roll` -- the attack's last roll on this card -- has shown.
+function ACTIVATION.knockAfter(obj, knock, roll)
+    ACTIVATION.later(roll, function() ACTIVATION.ask(obj, "knockback", knock) end)
 end
 
 -- What an attack with profile p of weapon w would wound `target` with (a
@@ -14273,7 +14425,7 @@ function ACTIVATION.woundRoll(seq, player)
         if #gen > 0 then
             ACTIVATION.later(roll, function() ACTIVATION.blazeRound(seq, gen, total, per, player) end)
         else
-            ACTIVATION.toSaves(seq, per, player)     -- the last round: the targets save
+            ACTIVATION.toSaves(seq, per, player, roll)   -- the last round: the targets save
         end
     end
     if thrown == 0 then landed({}, false) return seq end   -- every die an automatic 6
@@ -14318,15 +14470,22 @@ end
 -- card is known (plan.guid) is told (takeSaves): each wound with its own AP
 -- and Lethality (as Rending and Shred left them) and Damage, the cover it
 -- would get, what the weapon's traits do to it, and this player's colour to
--- roll in.
-function ACTIVATION.toSaves(seq, per, player)
+-- roll in -- and Knockback (plan.knock), which pushes it once its saves
+-- are over. One that isn't told (no wound) and is to be knocked back is
+-- pushed once the Wound roll (`roll`, as shown) has shown.
+function ACTIVATION.toSaves(seq, per, player, roll)
     local plans, keys = seq.plans or {}, {}
     for k in pairs(plans) do keys[#keys + 1] = k end
     table.sort(keys)
     for _, k in ipairs(keys) do
         local plan, n = plans[k], math.floor(tonumber((per or {})[k]) or 0)
         local conc = (seq.conc or {})[k] or 0
-        if (n > 0 or conc > 0) and plan.guid then
+        local told = (n > 0 or conc > 0) and plan.guid
+        if plan.knock and plan.guid and not told then
+            local okK, aim = pcall(function() return getObjectFromGUID(plan.guid) end)
+            if okK and aim then ACTIVATION.knockAfter(aim, plan.knock, roll) end
+        end
+        if told then
             local list = {}
             for i, h in ipairs((seq.hurt or {})[k] or {}) do
                 list[i] = { ap = (tonumber(plan.ap) or 0) + (h.rend and 1 or 0),
@@ -14337,7 +14496,8 @@ function ACTIVATION.toSaves(seq, per, player)
                 ACTIVATION.ask(obj, "takeSaves", { wounds = n, list = list, ap = plan.ap, l = plan.l,
                     dmg = plan.dmg, cover = plan.cover, gas = plan.gas, web = plan.web,
                     concussion = conc > 0 and conc or nil, radphage = (plan.rad and n > 0) or nil,
-                    weapon = plan.weapon, by = plan.by, from = plan.from, color = colorOf(player) })
+                    knockback = plan.knock, weapon = plan.weapon, by = plan.by, from = plan.from,
+                    color = colorOf(player) })
             end
         end
     end
@@ -14358,8 +14518,10 @@ end
 -- highlighted orange meanwhile; another check opened over the question
 -- doesn't lose it. With nothing to ask the saves are thrown CFG.diceShow
 -- seconds later, once the Wound roll has shown. No save at all: chat says
--- so and every wound goes through (ACTIVATION.damage). Returns "asked",
--- true (thrown), 0 (no save) or false (Out of Action, no wounds).
+-- so and every wound goes through (ACTIVATION.damage). Knockback
+-- (`knockback`, see knockback) pushes the fighter once all that is over
+-- (ACTIVATION.knockSelf). Returns "asked", true (thrown), 0 (no save) or
+-- false (Out of Action, no wounds).
 function takeSaves(t)
     if type(t) ~= "table" or fighter.outOfAction then return false end
     local from = ACTIVATION.fromText(t)
@@ -14372,7 +14534,10 @@ function takeSaves(t)
         end
     end
     local n = clamp(math.floor(tonumber(t.wounds) or 0), 0, ACTIVATION.MAX_SHOWN)
-    if n < 1 then return false end
+    if n < 1 then
+        ACTIVATION.knockSelf(t)
+        return false
+    end
     local sv, inv = ACTIVATION.saveOf(t), ACTIVATION.invOf(t)
     if not (sv or inv) then
         chat(string.format("%s has no save against %s -- %d Wound%s go%s through", fighter.name, from, n,
@@ -14399,6 +14564,17 @@ end
 -- "Kal's Autogun": the attack t (see takeSaves) came from.
 function ACTIVATION.fromText(t)
     return string.format("%s's %s", tostring(t.by or "?"), tostring(t.weapon or "weapon"))
+end
+
+-- The attack t (see takeSaves) is over for this fighter: Knockback, if it
+-- has one (t.knockback), pushes it (knockback) once `roll` -- the last
+-- roll it made of it -- has shown; with none, CFG.dicePause seconds on.
+function ACTIVATION.knockSelf(t, roll)
+    local kb = type(t) == "table" and t.knockback
+    if type(kb) ~= "table" then return end
+    local function go() knockback(kb) end
+    if roll then return ACTIVATION.later(roll, go) end
+    Wait.time(go, CFG.dicePause or CFG.diceShow)
 end
 
 -- Wound `i` of attack t (see takeSaves): its own entry, else the attack's.
@@ -14550,37 +14726,84 @@ end
 -- Lethality to the Injury dice -- which are then rolled
 -- (ACTIVATION.injure). Said in chat: "Bob loses 2 wounds to Kal's Autogun
 -- -- 0 left, 2 Injury dice"; stub onDamaged.
+--   A Bio-Booster (wargear with `bioBooster`, not used up yet, see
+-- ACTIVATION.bioBooster): the first wound that brings the fighter to 0
+-- has that much less Lethality, and the item is used up (fighter.burnt:
+-- grey under the stats). Brought down to 0 that way, the wound has two
+-- Injury dice of its own instead, thrown first, the better kept
+-- (", Bio-Booster: Lethality 1 less -- 2 Injury dice, the better kept");
+-- the other wounds' dice follow as usual.
+--   Once all of it is over, Knockback pushes the fighter (see
+-- ACTIVATION.knockSelf).
 function ACTIVATION.damage(t, failed, roll, player)
-    if #failed == 0 or fighter.outOfAction then return end
+    if fighter.outOfAction then return end
+    if #failed == 0 then return ACTIVATION.knockSelf(t, roll) end
     local from = ACTIVATION.fromText(t)
     if t.web then
         ACTIVATION.timedCondition("webbed", 1, "S", from)
         onDamaged(player, { lost = 0, injury = 0, webbed = true, by = t.by, weapon = t.weapon })
-        return
+        return ACTIVATION.knockSelf(t, roll)
     end
-    local lost, inj, was = 0, 0, fighter.wounds.current
+    local bio = ACTIVATION.bioBooster()
+    local lost, inj, was, boosted, pair = 0, 0, fighter.wounds.current, nil, false
     for _, w in ipairs(failed) do
         local d = math.max(0, math.floor(tonumber(w.dmg) or 1))
+        local l = math.max(0, math.floor(tonumber(w.l) or 0))
         local cur = fighter.wounds.current
         if cur > 0 then
             local now = math.max(0, cur - d)
             lost = lost + cur - now
             if now ~= cur then setWounds(now) end
-            if now == 0 then inj = inj + math.max(0, math.floor(tonumber(w.l) or 0)) end
+            if now == 0 then
+                if bio and not boosted then          -- the Bio-Booster: this wound's Lethality lessened, once
+                    boosted = bio
+                    local less = math.max(0, l - (tonumber(bio.bioBooster) or 1))
+                    pair, l = l > 0 and less == 0, less
+                end
+                inj = inj + l
+            end
         else
-            inj = inj + math.max(0, math.floor(tonumber(w.l) or 0))
+            inj = inj + l
         end
+    end
+    if boosted then
+        fighter.burnt = fighter.burnt or {}
+        fighter.burnt[boosted.key] = true
+        SKILL.drawBurnt()
     end
     local left = fighter.wounds.current
     local msg = lost > 0
         and string.format("%s loses %d wound%s to %s -- %d left", fighter.name, lost, lost == 1 and "" or "s", from, left)
         or string.format("%s %s %s", fighter.name, was == 0 and "is already at 0 wounds --" or "loses no wounds to", from)
-    if inj > 0 then msg = msg .. string.format(", %d Injury dice", inj) end
-    chat(msg, rgbOf(COL.valueMod))
-    onDamaged(player, { lost = lost, wounds = left, injury = inj, by = t.by, weapon = t.weapon })
-    if inj > 0 then
-        ACTIVATION.later(roll, function() ACTIVATION.injure(inj, from, player) end)
+    if boosted then
+        msg = msg .. string.format(", %s: Lethality %d less", boosted.name, tonumber(boosted.bioBooster) or 1)
+            .. (pair and " -- 2 Injury dice, the better kept" or "")
     end
+    if inj > 0 then msg = msg .. string.format(", %d %sInjury dice", inj, pair and "more " or "") end
+    chat(msg, rgbOf(COL.valueMod))
+    onDamaged(player, { lost = lost, wounds = left, injury = inj, bio = boosted and boosted.name or nil, by = t.by,
+                        weapon = t.weapon })
+    local function rest(r)
+        if inj < 1 then return ACTIVATION.knockSelf(t, r) end
+        ACTIVATION.later(r, function()
+            ACTIVATION.injure(inj, from, player, { done = function(r2) ACTIVATION.knockSelf(t, r2) end })
+        end)
+    end
+    if pair then
+        ACTIVATION.later(roll, function() ACTIVATION.injure(2, from, player, { best = boosted.name, done = rest }) end)
+    else
+        rest(roll)
+    end
+end
+
+-- The fighter's Bio-Booster, if it has one that isn't used up yet: the
+-- first item with `bioBooster` (wargear works always) not in
+-- fighter.burnt (see ACTIVATION.damage, setBurnt) -- or nil.
+function ACTIVATION.bioBooster()
+    for _, it in ipairs(SKILL.with("bioBooster")) do
+        if not (fighter.burnt or {})[it.key] then return it end
+    end
+    return nil
 end
 
 -- `n` Injury dice for wounds taken at 0 wounds (see ACTIVATION.damage),
@@ -14588,7 +14811,12 @@ end
 -- Action, then Serious Injury (Seriously Injured), then Injury (nothing
 -- more). Said, that result alone ("Bob - Injury dice (Kal's Autogun): S.
 -- Inj") and shown over the stats, the worst result at the right end.
-function ACTIVATION.injure(n, from, player)
+-- o = { best = the item that lets the better be kept (the Bio-Booster's
+-- two dice: "Injury dice (Kal's Autogun, Bio-Booster): Inj"), done(roll)
+-- -- run once the result is applied, unless the fighter is then Out of
+-- Action }; may be nil.
+function ACTIVATION.injure(n, from, player, o)
+    o = o or {}
     if fighter.outOfAction then return end
     n = clamp(math.floor(tonumber(n) or 0), 0, ACTIVATION.MAX_SHOWN)
     if n < 1 then return end
@@ -14602,15 +14830,19 @@ function ACTIVATION.injure(n, from, player)
             count[k] = (count[k] or 0) + 1
         end
         local worst
-        for _, k in ipairs({ "out", "serious", "injured" }) do worst = worst or (count[k] and k) end
-        ACTIVATION.say(string.format("Injury dice (%s)", from), {}, R[worst].short, { color = color, digital = digital })
+        local order = o.best and { "injured", "serious", "out" } or { "out", "serious", "injured" }
+        for _, k in ipairs(order) do worst = worst or (count[k] and k) end
+        ACTIVATION.say(string.format("Injury dice (%s%s)", from, o.best and ", " .. tostring(o.best) or ""), {},
+            R[worst].short, { color = color, digital = digital })
         ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = worst }
+        local shown = ACTIVATION.roll
         if fighter.outOfAction then return end
         if worst == "out" then
             setOutOfAction{ value = true, why = "Injury dice from " .. from }
         elseif worst == "serious" and fighter.status ~= "seriously_injured" then
             setStatus("seriously_injured")
         end
+        if o.done and not fighter.outOfAction then o.done(shown) end
     end, "injury", title)
 end
 
@@ -14977,6 +15209,56 @@ function nerveCheck(player)
     ACTIVATION.openCheck({ value = src.value, own = src.own, found = src.value,
                            from = src.from and src.from.name, obj = src.from and src.from.obj })
     return src.value
+end
+
+-- Knockback: an enemy's attack has knocked this fighter back (see
+-- ACTIVATION.attackDice; t = { from = the attacker's model's GUID, x, z =
+-- where it stood, by = the attacker's name, weapon = its weapon }, told
+-- once the attack is over): it is pushed CFG.knockback inches straight
+-- away from the attacker -- less where scenery, another fighter's base or,
+-- for a fighter that isn't Engaged, the CFG.engageRange round an enemy's
+-- base is in the way (ACTIVATION.knockPath). Said in chat ('Bob is knocked
+-- back 1" by Kal's Axe', "... -- scenery in the way"), and once the model
+-- stands there its engagement is checked as for a model put down (onDrop):
+-- one pushed out of reach of its enemies is no longer Engaged. Nothing for
+-- a fighter Out of Action or held by a player. Returns how far it went (0:
+-- not at all), or false.
+function knockback(t)
+    t = type(t) == "table" and t or {}
+    if fighter.outOfAction then return false end
+    local okH, held = pcall(function() return self.held_by_color end)
+    if okH and held then return false end
+    local pos = positionOf(self)
+    local ax, az = tonumber(t.x), tonumber(t.z)
+    local okA, att = pcall(function() return t.from and getObjectFromGUID(t.from) end)
+    local ap = okA and att and positionOf(att)
+    if ap then ax, az = ap.x, ap.z end
+    if not (pos and ax and az) then return false end
+    local dx, dz = pos.x - ax, pos.z - az
+    local len = math.sqrt(dx * dx + dz * dz)
+    if len <= 0 then return false end
+    dx, dz = dx / len, dz / len
+    local go, why = ACTIVATION.knockPath(dx, dz, tonumber(CFG.knockback) or 1)
+    local from = ACTIVATION.fromText(t)
+    local WHY = { terrain = "scenery in the way", fighter = "another fighter in the way",
+                  enemy = "stopped short of an enemy" }
+    local moved = go >= 0.05
+    local msg = moved
+        and string.format('%s is knocked back %s" by %s', fighter.name, (string.format("%.1f", go):gsub("%.0$", "")), from)
+        or string.format("%s can't be knocked back by %s", fighter.name, from)
+    if why then msg = msg .. " -- " .. WHY[why] end
+    chat(msg, rgbOf(COL.valueMod))
+    if not moved then return 0 end
+    pcall(function() self.setPositionSmooth({ x = pos.x + dx * go, y = pos.y, z = pos.z + dz * go }, false, true) end)
+    flash(self, rgbOf(COL.diceKnock))
+    -- once it stands there: engagement and auras, as for a model put down
+    local function still()
+        local ok, moving = pcall(function() return self.isSmoothMoving() end)
+        return not (ok and moving)
+    end
+    if Wait.condition then Wait.condition(function() onDrop() end, still, 2, function() onDrop() end)
+    else onDrop() end
+    return go
 end
 
 -- A ranged attack has hit this fighter (the attacker's rollAttack tells
@@ -16548,8 +16830,8 @@ end
 -- Ammo checks that count), spared (Reliable ignored one), state ("out",
 -- "jam", "spent" or nil), target (the selected enemy's name, when a Wound
 -- roll follows: see rollWounds), targets (a Template's: every enemy hit),
--- shock (the hit dice that Shocked: a number, or true for a ranged one's)
--- }, digital }.
+-- shock (the hit dice that Shocked: a number, or true for a ranged one's),
+-- knockback (true: a hit die reached Knockback (N+)'s N) }, digital }.
 function onAttackRolled(player, r)
     -- STUB: what the card leaves out of the sequence -- line of sight.
 end
@@ -16579,8 +16861,8 @@ end
 
 -- Fired once the wounds through have done their damage (see
 -- ACTIVATION.damage): r = { lost (wounds), wounds (left), injury (the
--- Injury dice to roll), webbed (Web: no damage, Webbed instead), by,
--- weapon }.
+-- Injury dice to roll), webbed (Web: no damage, Webbed instead), bio (the
+-- Bio-Booster used up on it), by, weapon }.
 function onDamaged(player, r)
     -- STUB: anything more damage does.
 end
@@ -16816,7 +17098,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-importer"
-local TOOL_VERSION   = "2.1.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.1.1"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error

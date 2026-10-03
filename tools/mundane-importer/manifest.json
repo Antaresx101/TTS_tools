@@ -1,11 +1,17 @@
 {
   "stable": {
-    "version": "2.1.0",
+    "version": "2.1.1",
     "notes": [
-      "Added auto-update feature (use !update in the chat)."
+      "Added support for Knockback(X+) and Bio-Booster."
     ]
   },
   "history": [
+    {
+      "version": "2.1.0",
+      "notes": [
+        "Added auto-update feature (use !update in the chat)."
+      ]
+    },
     {
       "version": "2.0.0",
       "notes": [
