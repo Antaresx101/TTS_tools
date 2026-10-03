@@ -420,6 +420,10 @@ local TEMPLATES_URL = ""
 -- { version =, note =, changes = { "one line each", ... } } -- lines of
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
+    { version = "2.1.3", note = "Minor Update", changes = {"Cover save fix"
+    } },
+    { version = "2.1.2", note = "Minor Update", changes = {"Performance improvements and bug fixes"
+    } },
     { version = "2.1.1", note = "Minor Update", changes = {"Added Knockback(X+) and Bio-Booster support"
     } },
     { version = "2.1.0", note = "Major Update", changes = {"Added auto-update feature (use !update in the chat)."
