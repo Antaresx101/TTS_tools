@@ -1,0 +1,17009 @@
+-- TTS-SELFUPDATE:mundane-importer
+--
+-- ==============================================================
+--  MUNDANE IMPORTER (N26) by Antares77
+--
+--  A MundaManager roster export (N26 layout), pasted into this object's
+--  panel and imported: for every fighter in it, the first model on the
+--  table with the same name (case doesn't matter) gets
+--    * the fighter's profile written into its description, and
+--    * the fighter card (Munda HP Display) as its script, with the
+--      fighter's data built in -- the card shows it as soon as it loads.
+--
+--  Under the paste box is the appearance editor: each model's colors and
+--  background, kept in its GM Notes. Up to three models snapped onto the
+--  appearance spots are changed live, together. An import never changes
+--  a model's appearance: one without gets the default written into its GM
+--  Notes, one with keeps it. Only the spots, "Apply UI to the whole Gang"
+--  and "Reset UI for the whole Gang" change it -- the last two on every
+--  model of a gang (the gang tag each import puts on its models). "Update
+--  History" shows what changed between versions.
+--
+--  The game itself -- the turn, victory points, Bottle Checks and every
+--  roll's dice -- is the Mundane Controller's, an object of its own; before
+--  it calls on every fighter it asks this importer to bring older cards up
+--  to date (upgradeCards).
+--
+--  The fighter card's script is embedded at the bottom of this file
+--  (CARD_SCRIPT).
+-- ==============================================================
+
+local IMPORTER_NAME = "Mundane Importer"
+local VERSION       = "?"   -- the running version, handed over by the updater block
+
+--@@SHARED_BEGIN
+-- ══════════════════════════════════════════════════════════════
+--  Shared: the same in the Mundane Importer and the Mundane
+--  Controller (copied in whole from Mundane_Shared.lua, where it is kept)
+-- ══════════════════════════════════════════════════════════════
+
+-- What concerns no gang in particular (turns, conditions cleared on the
+-- table, a gang yet to be named) starts with this in chat -- as the
+-- cards' lines do (their CFG.infoPrefix is the same [Info]). A line about
+-- one gang starts with its name, "[Goliaths] ".
+local CHAT_PREFIX = "[Info] "
+
+-- Tag added to every model that receives a card, so other scripts can find them.
+local IMPORT_TAG = "Mundane Import"
+
+-- The Mundane Importer's own tag, put on it when it loads: the Controller
+-- asks it to bring older cards up to date (its upgradeCards) before it
+-- calls on every fighter.
+local IMPORTER_TAG = "Mundane Importer"
+
+-- The Mundane Controller's own tag, put on it when it loads: a fighter's
+-- card has whatever carries it throw its dice (throwDice) and tells it
+-- when the fighter goes Out of Action (onFighterOut). The card's
+-- CFG.controllerTag is the same.
+local CONTROLLER_TAG = "Mundane Controller"
+
+-- The tag naming the gang a model was last imported for (the gang's name
+-- from the roster export follows), so the models of one gang can be found
+-- together -- the importer's "Apply UI to the whole Gang" / "Reset UI for
+-- the whole Gang" work on them, the Controller's Bottle Check counts them.
+-- No " - " in it: TTS won't take one in a tag typed by hand, and players
+-- can put a model in a gang themselves ("Mundane Gang_Goliaths").
+-- The card has the same (CFG.gangTag).
+local GANG_TAG = "Mundane Gang_"
+-- earlier versions' tags: removed on import. The first two were gang tags
+-- and still count as one until then (see gangOf; the card's
+-- CFG.oldGangTags).
+local OLD_TAGS = { "Mundane Gang - ", "Mundane Controller_", "Mundane Gang: ", "Mundane Owner: " }
+
+local function trim(s)
+    s = (s or ""):gsub("^%s+", "")
+    return (s:gsub("%s+$", ""))
+end
+
+-- A model's gang tag, if it has one -- or its gang tag from before GANG_TAG
+-- (OLD_TAGS[1] / [2]), until it is imported again.
+local function gangOf(obj)
+    local ok, tags = pcall(function() return obj.getTags() end)
+    for _, pre in ipairs({ GANG_TAG, OLD_TAGS[1], OLD_TAGS[2] }) do
+        for _, t in ipairs(ok and tags or {}) do
+            if t:sub(1, #pre) == pre and #t > #pre then return t end
+        end
+    end
+end
+
+-- obj.call(fn, arg), protected, only if `obj`'s script has the global
+-- function `fn` (its text is looked at first): a call to a function a
+-- script lacks -- a model with no card yet, a card older than the function
+-- -- makes TTS log "Lua Error <fn>: Object reference not set to an
+-- instance of an object", which no pcall hides. Something that can't hand
+-- over its script is called anyway. Whether it ran, and what it returned.
+--   Looking means copying the whole script out of TTS -- a fighter card's
+-- is most of a megabyte, and a new turn asks every one. So a script that
+-- carries MUNDA_STAMP (a mark it sets anew each time it loads: the cards,
+-- this script) is read once: every function it has is noted (KNOWN, by
+-- GUID) and holds for as long as its mark stays the same -- a reload, a
+-- card brought up to date, gives it a new one.
+MUNDA_STAMP = table.concat({ os.time(), os.clock(), math.random(1, 999999999) }, "-")
+local KNOWN = {}
+local function callIfHas(obj, fn, arg)
+    local okG, guid = pcall(function() return obj.getGUID() end)
+    guid = okG and type(guid) == "string" and guid or nil
+    local known, has = guid and KNOWN[guid], nil
+    if known then
+        local ok, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+        if ok and stamp ~= nil and stamp == known.stamp then has = known.fns[fn] == true else KNOWN[guid] = nil end
+    end
+    if has == nil then
+        local ok, script = pcall(function() return obj.getLuaScript() end)
+        has = not (ok and type(script) == "string") or script:find("function " .. fn .. "(", 1, true) ~= nil
+        if ok and type(script) == "string" and guid and script:find("MUNDA_STAMP", 1, true) then
+            local okV, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+            if okV and stamp ~= nil then
+                local fns = {}
+                for name in script:gmatch("function ([%w_]+)%(") do fns[name] = true end
+                KNOWN[guid] = { stamp = stamp, fns = fns }
+            end
+        end
+    end
+    if not has then return false end
+    return pcall(function() return obj.call(fn, arg) end)
+end
+
+-- ── The panel's look ─────────────────────────────────────────────
+
+-- How finely the panel's text is drawn: the panel is built this many times
+-- its size and shown scaled back down, so every glyph has that many times
+-- the texels -- sharper up close (1 = built at its own size).
+local PANEL_DETAIL = 2
+
+-- The parchment picture behind the panel (the AoS Coherency Tool's, by
+-- Antares77), hosted on the Steam Cloud.
+local PANEL_BG = "https://steamusercontent-a.akamaihd.net/ugc/12352082712112839381/58ABA6CE8570F5CB9E72C7E53BE4BE3A2CD8C9F7/"
+local BG_RATIO = 1847 / 1337           -- the parchment picture's height / width
+
+-- The panel's look (after the AoS Coherency Tool by Antares77): an
+-- anthracite border round a parchment field with its
+-- picture, anthracite type, and buttons that are a white wash over the
+-- picture with a soft bevel. A lit button -- Import, Apply, the chosen
+-- background, the Controller's bars and plates -- is anthracite with a
+-- pale label.
+local INK, PALE, PAPER = "#293133", "#F2F1EC", "#E6E5E1"
+local WASH  = "#FFFFFF40|#FFFFFF73|#FFFFFF26|#FFFFFF26"
+local LIT   = "#293133E6|#3A4447E6|#1C2224E6|#29313366"
+local RED   = "#7A2020D9|#963030D9|#5A1515D9|#7A202066"
+local BEVEL = ' outline="#29313366" outlineSize="2 2"'
+local function colors(c) return string.format("%s|%s|%s|%s", c, c, c, c) end
+
+local function xmlEsc(s)
+    return (tostring(s or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"))
+end
+
+-- A text or button label changed in place: TTS takes a button's label as
+-- its "text" attribute, a text's as its value -- both are set.
+local function setLabel(id, text)
+    self.UI.setAttribute(id, "text", text)
+    self.UI.setValue(id, text)
+end
+
+-- ── Where a panel lies on its object ─────────────────────────────
+
+-- A point `x`, `y` panel units from the middle of a panel (position /
+-- rotation / scale like PANEL; the panel's own axes: x to the right, y up
+-- as it reads), in its object's own space: local x and z. An object's UI
+-- x / y lie along its local x / z, 100 UI units to a local unit; a panel
+-- turned half round ("0 0 180") reads the right way up from the object's
+-- +z side.
+local function panelLocal(panel, x, y)
+    local function nums(str)
+        local t = {}
+        for v in tostring(str):gmatch("%-?[%d%.]+") do t[#t + 1] = tonumber(v) end
+        return t
+    end
+    local pos, rot, sc = nums(panel.position), nums(panel.rotation), nums(panel.scale)
+    local px, py = x * (sc[1] or 1), y * (sc[2] or 1)
+    local a = math.rad(rot[3] or 0)
+    local ux = (pos[1] or 0) + px * math.cos(a) - py * math.sin(a)
+    local uy = (pos[2] or 0) + px * math.sin(a) + py * math.cos(a)
+    return ux / 100, uy / 100
+end
+
+-- ── Feedback ─────────────────────────────────────────────────────
+
+-- The header's Feedback button (top right) and the tablet it puts up: a
+-- TTS Tablet showing the feedback form (FEEDBACK.URL), locked, lying past
+-- the panel's top edge and tilted towards the players so it is easy to
+-- read. The importer and the Controller share it: one form, one tablet --
+-- either one's button takes it away again, or moves it to its own panel.
+-- Both buttons are lit (anthracite, pale label) while the tablet is there.
+local FEEDBACK = {
+    MARK = "✉︎", TEXT = "Feedback",   -- the envelope its own text: with the word it leaves a wide gap
+    W = 124, H = 30, MARK_W = 22,           -- the button, and the envelope's room in it (panel units)
+    URL   = "https://docs.google.com/forms/d/e/1FAIpQLSdOTHX_jjUigf9HpH9mRPav5yBvyKPLSV9g1Q09N9dnUHUU7g/viewform?usp=publish-editor",
+    NAME  = "Mundane Feedback",             -- the tablet's name
+    TAG   = "Mundane Feedback",             -- the tablet's tag
+    -- the tags of the tablets older scripts put up, one each: found and
+    -- taken away like the shared one
+    OLD   = { "Mundane Feedback_Mundane Importer", "Mundane Feedback_Mundane Controller" },
+    -- where the tablet lies (see FEEDBACK.spot): from the point across this
+    -- object's middle from the panel's top edge, PAST world units on along
+    -- the panel's down direction (negative: back towards the panel's up)
+    PAST  = -4.5,
+    LIFT  = 2,      -- and this high above this object
+    TILT  = 30,     -- leaned back this far (degrees)
+    TURN  = 0,      -- turned this much more about the vertical, from the panel's down direction
+}
+
+-- Every feedback tablet on the table (the shared one, and any an older
+-- script put up), as a list -- empty also outside TTS.
+function FEEDBACK.tablets()
+    local out = {}
+    local tags = { FEEDBACK.TAG }
+    for _, tag in ipairs(FEEDBACK.OLD) do tags[#tags + 1] = tag end
+    for _, tag in ipairs(tags) do
+        local ok, list = pcall(function() return getObjectsWithTag(tag) end)
+        for _, o in ipairs(ok and type(list) == "table" and list or {}) do
+            local okD, gone = pcall(function() return o.isDestroyed() end)
+            if not (okD and gone) then out[#out + 1] = o end
+        end
+    end
+    return out
+end
+
+-- The feedback tablet, or nil.
+function FEEDBACK.tablet()
+    return FEEDBACK.tablets()[1]
+end
+
+-- The button: a plain button with the envelope and the word over it, lit
+-- while the tablet is up (`on`; FEEDBACK.draw changes it in place).
+function FEEDBACK.xml()
+    local w, h, m = FEEDBACK.W, FEEDBACK.H, FEEDBACK.MARK_W
+    local left = -w / 2 + 8
+    local on = FEEDBACK.tablet() ~= nil
+    local ink = on and PALE or INK
+    return string.format([[
+        <Panel id="feedbackBox" rectAlignment="MiddleRight" width="%d" height="%d" color="#00000000">
+          <Button id="feedbackBtn" width="%d" height="%d" colors="%s" onClick="onFeedback"></Button>
+          <Text id="feedbackMark" offsetXY="%g 0" width="%d" height="%d" fontSize="16" fontStyle="Bold"
+                color="%s" raycastTarget="false">%s</Text>
+          <Text id="feedbackText" offsetXY="%g 0" width="%d" height="%d" fontSize="16" fontStyle="Bold"
+                color="%s" alignment="MiddleLeft" raycastTarget="false">%s</Text>
+        </Panel>]], w, h, w, h, on and LIT or WASH, left + m / 2, m, h, ink, FEEDBACK.MARK,
+        left + m + 4 + (w - 8 - m - 4 - 8) / 2, w - 8 - m - 4 - 8, h, ink, FEEDBACK.TEXT)
+end
+
+-- The button lit (`on`: the tablet is up) or not, in place.
+function FEEDBACK.draw(on)
+    pcall(function()
+        self.UI.setAttribute("feedbackBtn", "colors", on and LIT or WASH)
+        self.UI.setAttribute("feedbackMark", "color", on and PALE or INK)
+        self.UI.setAttribute("feedbackText", "color", on and PALE or INK)
+    end)
+end
+
+-- Asked by the other script when it puts the tablet up or takes it away,
+-- so both buttons agree.
+function feedbackLit(on)
+    FEEDBACK.draw(on == true)
+end
+
+-- This button and every other importer's and Controller's lit or not.
+function FEEDBACK.drawAll(on)
+    FEEDBACK.draw(on)
+    for _, tag in ipairs({ IMPORTER_TAG, CONTROLLER_TAG }) do
+        local ok, list = pcall(function() return getObjectsWithTag(tag) end)
+        for _, o in ipairs(ok and type(list) == "table" and list or {}) do
+            if o ~= self then callIfHas(o, "feedbackLit", on) end
+        end
+    end
+end
+
+-- Where the tablet goes for a panel (position / rotation / scale like
+-- PANEL) `h` tall: its centre and rotation in the world -- nil outside TTS.
+-- It is reckoned from the point across this object's middle from the
+-- panel's top edge, along the panel's down direction (PAST, TURN).
+function FEEDBACK.spot(panel, h)
+    local x, z = panelLocal(panel, 0, h / 2)              -- the panel's top edge
+    local ux, uz = panelLocal(panel, 0, h / 2 + 100)      -- and on up the panel
+    local ok, a, b = pcall(function()                     -- both across the middle
+        return self.positionToWorld({ -x, 0, -z }), self.positionToWorld({ -ux, 0, -uz })
+    end)
+    if not (ok and a and b) then return nil end
+    local ax, ay, az = a.x or a[1], a.y or a[2], a.z or a[3]
+    local dx, dz = (b.x or b[1]) - ax, (b.z or b[3]) - az
+    local len = math.sqrt(dx * dx + dz * dz)
+    if len < 1e-6 then dx, dz, len = 0, 1, 1 end
+    dx, dz = dx / len, dz / len
+    return { ax + dx * FEEDBACK.PAST, ay + FEEDBACK.LIFT, az + dz * FEEDBACK.PAST },
+           { FEEDBACK.TILT, math.deg((math.atan2 or math.atan)(dx, dz)) + FEEDBACK.TURN, 0 }
+end
+
+-- The tablet shows `url` -- left alone if it does already.
+function FEEDBACK.show(tab, url)
+    local ok, cur = pcall(function() return tab.Browser.url end)
+    if not (ok and cur) then ok, cur = pcall(function() return tab.getValue() end) end
+    if ok and cur == url then return end
+    if not pcall(function() tab.Browser.url = url end) then pcall(function() tab.setValue(url) end) end
+end
+
+-- The button pressed: the tablet put up over a panel (PANEL) `h` tall --
+-- or, when it is up already (put up by either script), taken away. A press
+-- while the tablet is still spawning does nothing.
+function FEEDBACK.open(panel, h)
+    if FEEDBACK.spawning then return end
+    local up = FEEDBACK.tablets()
+    if #up > 0 then
+        for _, o in ipairs(up) do pcall(function() o.destruct() end) end
+        return FEEDBACK.drawAll(false)
+    end
+    local at, rot = FEEDBACK.spot(panel, h)
+    if not at then return end
+    local name, tag, url = FEEDBACK.NAME, FEEDBACK.TAG, FEEDBACK.URL
+    FEEDBACK.spawning = true
+    local ok = pcall(function()
+        spawnObject({ type = "Tablet", position = at, rotation = rot, sound = false,
+            callback_function = function(o)
+                FEEDBACK.spawning = nil
+                o.setLock(true)
+                o.setName(name)
+                o.addTag(tag)
+                o.setPosition(at)
+                o.setRotation(rot)
+                FEEDBACK.show(o, url)
+            end })
+    end)
+    if not ok then FEEDBACK.spawning = nil; return end
+    pcall(function() Wait.time(function() FEEDBACK.spawning = nil end, 5) end)   -- a spawn that never came back
+    FEEDBACK.drawAll(true)
+end
+
+-- The whole panel round its content: the defaults, an anthracite border
+-- (3) round the parchment field with its picture, and in it a column
+-- (padding 9, rows 6 apart) of the header (40 tall: version and credit on
+-- the left, the title in the middle) and then `t.body`, its rows; `t.over`
+-- goes over the whole field. t = { id, position, rotation, scale, width,
+-- height, title, version, body, over }.
+local function panelShell(t)
+    return string.format([[
+<Defaults>
+  <Text color="%s" fontSize="16" alignment="MiddleCenter"/>
+  <Button colors="%s" textColor="%s" fontSize="16" fontStyle="Bold" outline="#29313366" outlineSize="2 2"/>
+  <InputField fontStyle="Bold" textColor="%s" colors="#FFFFFF40|#FFFFFF73|#FFFFFF26|#FFFFFF26"
+              outline="#29313366" outlineSize="2 2"/>
+</Defaults>
+<Panel id="%s" position="%s" rotation="%s" scale="%s" width="%d" height="%d"
+       color="%s" padding="3 3 3 3">
+  <Panel id="panelField" color="%s">
+    <Mask id="bgMask">
+      <Image id="bgImage" image="mundanePanelBg" raycastTarget="false"
+             rectAlignment="UpperCenter" width="%d" height="%d"/>
+    </Mask>
+    <VerticalLayout padding="9 9 9 9" spacing="6" childForceExpandHeight="false">
+      <Panel id="headerPanel" preferredHeight="40" color="#00000000">
+        <Text id="titleText" width="%d" height="40" fontSize="22" fontStyle="Bold">%s</Text>
+        <Text id="versionText" rectAlignment="UpperLeft" offsetXY="0 -2" width="120" height="20" fontSize="15"
+              fontStyle="Bold" alignment="MiddleLeft">v%s</Text>
+        <Text rectAlignment="UpperLeft" offsetXY="0 -22" width="140" height="16" fontSize="11"
+              alignment="MiddleLeft">Made by Antares77</Text>
+%s
+      </Panel>
+%s
+    </VerticalLayout>
+%s
+  </Panel>
+</Panel>]], INK, WASH, INK, INK,
+        t.id, t.position, t.rotation, t.scale, t.width, t.height, INK, PAPER,
+        t.width - 6, math.floor((t.width - 6) * BG_RATIO),
+        t.width - 24, xmlEsc(t.title), xmlEsc(t.version), FEEDBACK.xml(), t.body, t.over or "")
+end
+
+-- The panel built PANEL_DETAIL times its size (every size in the XML
+-- multiplied, font sizes kept whole) and scaled back down by the same, so
+-- it covers the same table but its text has that many times the texels.
+-- `root`: the id of the panel whose scale takes it back.
+local SIZE_ATTRS = { "fontSize", "preferredHeight", "preferredWidth", "spacing", "width", "height",
+                     "padding", "outlineSize", "offsetXY" }
+local function detailed(xml, root)
+    local k = PANEL_DETAIL
+    if k == 1 then return xml end
+    for _, a in ipairs(SIZE_ATTRS) do
+        xml = xml:gsub("(%s" .. a .. '=")([^"]*)(")', function(pre, v, post)
+            v = v:gsub("%-?[%d%.]+", function(n)
+                n = tonumber(n) * k
+                return a == "fontSize" and string.format("%d", math.floor(n + 0.5)) or string.format("%g", n)
+            end)
+            return pre .. v .. post
+        end)
+    end
+    return (xml:gsub('(<Panel id="' .. root .. '"[^>]-scale=")([^"]*)(")', function(pre, v, post)
+        return pre .. v:gsub("[%d%.]+", function(n) return string.format("%g", tonumber(n) / k) end) .. post
+    end))
+end
+--@@SHARED_END
+
+-- Every line an import sends to chat starts with IMPORT_PREFIX; the rest
+-- with CHAT_PREFIX, [Info] (a gang yet to be named), or -- a line about
+-- one gang's appearance -- its name, "[Goliaths] ".
+local IMPORT_PREFIX = "[Mundane Importer] "
+
+local CARD_SCRIPT   -- the fighter card's source; set at the bottom of the file
+
+-- ══════════════════════════════════════════════════════════════
+--  Settings
+-- ══════════════════════════════════════════════════════════════
+
+-- The importer's panel on this object: where it sits and how big it is --
+-- on the object's +z side, turned half round so it reads the right way up
+-- from there (see panelLocal).
+local PANEL = { position = "0 450 -5", rotation = "0 0 180", scale = "1 1 1" }
+
+-- Where to get templates for background images of one's own (for Krita,
+-- GIMP and the like), shown in the appearance editor to copy.
+local TEMPLATES_URL = ""
+
+-- The changes history the "Update History" button shows, newest first:
+-- { version =, note =, changes = { "one line each", ... } } -- lines of
+-- at most ~75 characters, so the popup fits them.
+local CHANGELOG = {
+    { version = "2.0.0", note = "Mundane Importer, rewritten for N26", changes = {
+    } },
+    { version = "1.0", note = "Mundane Importer N23 release", changes = {
+    } },
+}
+
+-- Description colours (TTS BBCode) and the reset token.
+local C = {
+    role  = "[FFAA44]",
+    weap  = "[C6C930]",
+    mode  = "[888888]",
+    skey  = "[56F442]",
+    trait = "[7BC596]",
+    skill = "[DC61ED]",
+    rule  = "[BBBBBB]",
+    gear  = "[00aeff]",
+}
+local R = "[-]"
+
+-- Stat-table spacing in the description. Spaces printed after each cell:
+-- HEADER_SPACING for the header row, STAT_SPACING for the value row under
+-- it ("M = 3" means three spaces after M). One space is the minimum.
+-- Descriptions use a proportional font, so these are set by eye.
+local HEADER_SPACING = { M = 3, WS = 3, BS = 3, S = 3, T = 3, W = 3, I = 3, A = 3,
+                         Sv = 3, Ld = 3, Cl = 3, Wil = 3, Int = 3 }
+local STAT_SPACING   = { M = 3, WS = 3, BS = 3, S = 3, T = 4, W = 3, I = 2, A = 3,
+                         Sv = 3, Ld = 4, Cl = 4, Wil = 5, Int = 5 }
+local SPACING_DEFAULT = 3
+local STAT_PER_ROW    = 8     -- the table wraps after this many stats (M ... A | Sv ...)
+
+-- Bases: every model's base is measured on import and snapped to the nearest
+-- of these standard sizes (mm) within BASE_SNAP mm -- the way the card
+-- measures itself: the same as the card's CFG.baseSizes / baseSnap (and the
+-- helpers under "Bases" as its section 10b). A line "Base: 32mm" in a model's
+-- description overrides the measurement and is kept through every import.
+local BASE_SIZES = { 25, 28.5, 32, 40, 50, 60 }
+local BASE_SNAP  = 2.5
+
+-- ══════════════════════════════════════════════════════════════
+--  Appearance
+-- ══════════════════════════════════════════════════════════════
+
+-- Each model's appearance -- the card's five colours and its background --
+-- lives in the model's GM Notes (see the card's LOOKS section), so every
+-- model can look different and keeps it when saved. The appearance editor
+-- on this object edits it: a model snapped onto a spot (LOOKS_SPOT_*) is
+-- changed live.
+
+-- Where models snap onto this object to have their appearance edited: a row
+-- of spots side by side along x, in this object's own space (x, y up, z) --
+-- on its top, clear of the panel. The editor changes every model standing
+-- on one of them at once.
+local LOOKS_SPOT_CENTER = { 0, 0.25, 0 }   -- the middle spot (x, y up, z)
+local LOOKS_SPOT_GAP    = 2.25             -- from one spot's centre to the next, along x
+local LOOKS_SPOT_COUNT  = 3               -- how many spots, centred on LOOKS_SPOT_CENTER
+local LOOKS_SPOT_SIZE   = 1.5             -- the square searched for a model on each spot
+local LOOKS_SPOT_TURN   = 0               -- a model snapped onto a spot faces this way (degrees about
+                                          -- the vertical, this object's own): towards the panel's side
+
+-- Each spot's position, left to right as seen from the panel's side
+-- (+z): from +x to -x.
+local function looksSpots()
+    local spots, c = {}, LOOKS_SPOT_CENTER
+    for i = 1, LOOKS_SPOT_COUNT do
+        local dx = ((LOOKS_SPOT_COUNT + 1) / 2 - i) * LOOKS_SPOT_GAP
+        spots[i] = { c[1] + dx, c[2], c[3] }
+    end
+    return spots
+end
+
+-- The five colours and their defaults -- the same as the card's.
+local LOOKS_DEFAULT = {
+    background = "#1D2027", headers = "#9AA3AE", text = "#F2F2F2",
+    accent = "#E8C97A", edges = "#6B5B33",
+    frame = "none", trim = "", tint = "yes",   -- no background art
+}
+local LOOKS_COLORS = {
+    { key = "background", label = "Background" },
+    { key = "headers",    label = "Headers" },
+    { key = "text",       label = "Text" },
+    { key = "accent",     label = "Accent" },
+    { key = "edges",      label = "Edges" },
+}
+
+-- Whole colour themes, one click each (see SWATCHES for the single colours).
+local THEME_PRESETS = {
+    { name = "Classic", background = "#1D2027", headers = "#9AA3AE", text = "#F2F2F2", accent = "#E8C97A", edges = "#6B5B33" },
+    { name = "Ash",     background = "#1E2124", headers = "#8F979F", text = "#F4F6F8", accent = "#C8D0D8", edges = "#56606A" },
+    { name = "Blood",   background = "#1F1515", headers = "#A38F8F", text = "#F5EDED", accent = "#E0574A", edges = "#6E2B25" },
+    { name = "Toxin",   background = "#141B15", headers = "#8FA795", text = "#EEF6EF", accent = "#A6E05A", edges = "#3F6B2B" },
+    { name = "Azure",   background = "#121923", headers = "#8B9BB1", text = "#EEF3FA", accent = "#6FB5F5", edges = "#2C4F76" },
+    { name = "Wyrd",    background = "#1A1522", headers = "#9A90A8", text = "#F3EFF8", accent = "#C08CF2", edges = "#54336E" },
+    { name = "Brass",   background = "#1E1A12", headers = "#A89A7C", text = "#F7F0E0", accent = "#D9A441", edges = "#7A5A26" },
+    { name = "Ember",   background = "#20140E", headers = "#B39A88", text = "#FBF1E8", accent = "#FF8A3D", edges = "#8A3A12" },
+    { name = "Frost",   background = "#0F1C22", headers = "#8FB3BF", text = "#EAF8FC", accent = "#7FE3F0", edges = "#2D6572" },
+    { name = "Neon",    background = "#150F1C", headers = "#A58FB5", text = "#FFF0FB", accent = "#FF4FD8", edges = "#1F9DA3" },
+}
+local THEMES_PER_ROW = 5   -- theme buttons in a row (two rows)
+
+-- The swatches beside each colour: thirteen columns, one hue each (hue in
+-- degrees, and how colourful it gets: 0 grey, 1 full), shown in every row
+-- at that row's brightness and colourfulness -- dark for the background,
+-- muted for headers, very light for text (pure white in the grey column,
+-- for text only barely coloured elsewhere), strong for the accent, a mid
+-- depth for edges. The columns run grey, then round the colour wheel (red
+-- through magenta), so neighbouring hues sit side by side.
+local SWATCH_HUES = {   -- grey first, then round the colour wheel
+    { 0,  0   },   -- grey
+    { 4,  1.0 },   -- red
+    { 16, 0.85 },  -- rust
+    { 28, 1.0 },   -- orange
+    { 42, 1.0 },   -- gold
+    { 54, 1.0 },   -- yellow
+    { 72, 0.75 },  -- olive
+    { 100, 0.85 }, -- green
+    { 172, 0.9 },  -- teal
+    { 212, 1.0 },  -- blue
+    { 238, 0.9 },  -- indigo
+    { 275, 0.9 },  -- purple
+    { 322, 0.9 },  -- magenta
+}
+local SWATCH_ROWS = {   -- lightness and saturation (0-1) of each row
+    background = { l = 0.14, s = 0.55 },
+    headers    = { l = 0.64, s = 0.40 },
+    text       = { l = 0.93, s = 1.00 },
+    accent     = { l = 0.62, s = 0.95 },
+    edges      = { l = 0.46, s = 0.62 },
+}
+local function hsl(hue, sat, light)
+    local c = (1 - math.abs(2 * light - 1)) * sat
+    local hp = (hue % 360) / 60
+    local x = c * (1 - math.abs(hp % 2 - 1))
+    local r, g, b = 0, 0, 0
+    if hp < 1 then r, g = c, x elseif hp < 2 then r, g = x, c elseif hp < 3 then g, b = c, x
+    elseif hp < 4 then g, b = x, c elseif hp < 5 then r, b = x, c else r, b = c, x end
+    local m = light - c / 2
+    return string.format("#%02X%02X%02X", math.floor((r + m) * 255 + 0.5),
+        math.floor((g + m) * 255 + 0.5), math.floor((b + m) * 255 + 0.5))
+end
+local SWATCHES = {}
+for key, row in pairs(SWATCH_ROWS) do
+    SWATCHES[key] = {}
+    for n, hue in ipairs(SWATCH_HUES) do
+        SWATCHES[key][n] = (key == "text" and hue[2] == 0) and "#FFFFFF" or hsl(hue[1], row.s * hue[2], row.l)
+    end
+end
+
+-- The backgrounds on offer. "None" (the default) is no background at all.
+-- The others need their art: a 2:1 frame and its trim, drawn in white
+-- (tinted with the model's colours), by URL; a preset without a frame URL
+-- isn't offered.
+local FRAME_PRESETS = {
+    { name = "None",         frame = "none", trim = "" },
+    { name = "Hexagon",      frame = "", trim = "", upload = true },
+    { name = "Plate",        frame = "", trim = "", upload = true },
+    { name = "Bracket",      frame = "", trim = "", upload = true },
+    { name = "Riveted",      frame = "", trim = "", upload = true },
+}
+
+-- ══════════════════════════════════════════════════════════════
+--  N26 roster layout
+-- ══════════════════════════════════════════════════════════════
+
+-- "Label: value" fields in a fighter's block.
+local FIELD_LABELS = {
+    { label = "Rating",  key = "rating"  },
+    { label = "Skills",  key = "skills"  },
+    { label = "Wargear", key = "wargear" },
+    { label = "Rules",   key = "rules"   },
+}
+
+-- The stat header row, and the weapon table's header row.
+local STAT_HEADER = "^M%s+WS%s+BS%s+S%s+T%s+W%s+I%s+A%s+Sv%s+Ld"
+local WEAP_HEADER = "^Weapon%s+SR"
+
+-- Columns of a weapon profile row: SR  LR  Str  AP  L  Traits
+local COL = { sr = 1, lr = 2, str = 3, ap = 4, l = 5, traits = 6 }
+
+-- ══════════════════════════════════════════════════════════════
+--  Helpers
+-- ══════════════════════════════════════════════════════════════
+
+local rosterText = ""
+
+local function splitTab(line)
+    local parts = {}
+    for part in ((line or "") .. "\t"):gmatch("([^\t]*)\t") do
+        parts[#parts + 1] = trim(part)
+    end
+    return parts
+end
+
+-- The value after "Label: " on a trimmed line, or nil.
+local function extractField(t, label)
+    return t:match("^" .. label .. ":%s*(.*)")
+end
+
+-- A weapon's name as the roster gives it, split into the name without its
+-- count and the count: "Fighting Knife (x2)" -> "Fighting Knife", 2; a
+-- name with none -> itself, 1. At most MAX_COPIES.
+local MAX_COPIES = 6
+local function splitCount(str)
+    str = str or ""
+    local a, b, n = str:find("%s*%(%s*[xX]%s*(%d+)%s*%)")
+    n = tonumber(n)
+    if not n or n < 1 then return str, 1 end
+    return trim(str:sub(1, a - 1) .. " " .. str:sub(b + 1)), math.min(n, MAX_COPIES)
+end
+
+-- An item name tidied for display: optional (info) removed, title case.
+local function cleanItemName(str, removeInfo)
+    if not str or str == "" then return "" end
+    if removeInfo then str = str:gsub("%s*%b()%s*", "") end
+    str = trim(str)
+    return (str:lower():gsub("(%a)([%w_']*)", function(f, r) return f:upper() .. r end))
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  Roster parser
+-- ══════════════════════════════════════════════════════════════
+
+-- One weapon profile row. Empty cells read as "-" (traits as "").
+local function parseProfile(mode, raw)
+    local p = splitTab((raw or ""):gsub("^\t+", ""))   -- some browsers add a leading tab
+    local function col(key, fallback)
+        local v = p[COL[key]]
+        if v == nil or v == "" then return fallback end
+        return v
+    end
+    return {
+        mode = mode or "",
+        sr = col("sr", "-"), lr = col("lr", "-"), str = col("str", "-"),
+        ap = col("ap", "-"), l = col("l", "-"), traits = col("traits", ""),
+    }
+end
+
+-- A row with no data at all: weapons with several profiles (grenade
+-- launchers, combi-weapons) print one of just "-" under their name.
+local function isEmptyProfile(p)
+    if p.traits ~= "" and p.traits ~= "-" then return false end
+    for _, k in ipairs({ "sr", "lr", "str", "ap", "l" }) do
+        if p[k] ~= "" and p[k] ~= "-" then return false end
+    end
+    return true
+end
+
+-- The lines that start a fighter: its ID number, with a trailing tab -- or
+-- bare, when a "Rating: <value>" row follows within a few lines (some
+-- browsers drop the tab; the roster header's bare "Rating:" label, with its
+-- value on the next line, doesn't count).
+local function findBlockStarts(lines)
+    local starts = {}
+    for i, line in ipairs(lines) do
+        if line:match("^%d+\t%s*$") then
+            starts[#starts + 1] = i
+        elseif trim(line):match("^%d+$") then
+            for j = i + 1, math.min(i + 3, #lines) do
+                if trim(lines[j]):match("^Rating:%s*%d") then
+                    starts[#starts + 1] = i
+                    break
+                end
+            end
+        end
+    end
+    return starts
+end
+
+-- One fighter's block of lines -> { name, role, rating, skills, wargear,
+-- rules, statKeys, statVals, weapons = { { name, profiles } } }.
+local function parseBlock(lines)
+    local f = { name = "", role = "", statKeys = {}, statVals = {}, weapons = {} }
+
+    -- first pass: name, role, fields and the stat block
+    local statValIdx
+    local i = 2                                  -- line 1 is the fighter's ID
+    while i <= #lines do
+        local raw, t = lines[i], trim(lines[i])
+        i = i + 1
+        if t == "" then
+            -- skip
+        elseif f.name == "" then
+            f.name = t
+        elseif t:match("%s•%s") then
+            f.role = t
+        else
+            local matched = false
+            for _, lbl in ipairs(FIELD_LABELS) do
+                local v = extractField(t, lbl.label)
+                if v then f[lbl.key] = trim(v); matched = true; break end
+            end
+            if not matched and t:match(STAT_HEADER) then
+                f.statKeys = splitTab(raw)
+                if i <= #lines then
+                    f.statVals, statValIdx = splitTab(lines[i]), i
+                    i = i + 1
+                end
+            end
+        end
+    end
+
+    -- second pass: the weapon table
+    local cur
+    local function flush()
+        if cur and #cur.profiles > 0 then f.weapons[#f.weapons + 1] = cur end
+        cur = nil
+    end
+    local function isMeta(t, idx)
+        if idx == statValIdx or t == f.name or t:match("%s•%s") or t:match(STAT_HEADER) then
+            return true
+        end
+        for _, lbl in ipairs(FIELD_LABELS) do
+            if t:match("^" .. lbl.label .. ":") then return true end
+        end
+        return false
+    end
+    local function add(p) if not isEmptyProfile(p) then cur.profiles[#cur.profiles + 1] = p end end
+
+    -- the last "- mode" row's name: a "-- mode" row under it is one of its
+    -- profiles (a blunderbuss's grape and purgitation rounds)
+    local group
+    i = 2
+    while i <= #lines do
+        local raw, t, idx = lines[i], trim(lines[i]), i
+        i = i + 1
+        if t == "" or isMeta(t, idx) then
+            -- skip
+        elseif t:match(WEAP_HEADER) then
+            flush()
+        elseif t:match("^%- %a") then            -- "- mode" row: a named profile
+            if cur and i <= #lines then
+                group = t:match("^%- (.*)")
+                add(parseProfile(group, lines[i]))
+                i = i + 1
+            end
+        elseif t:match("^%-%-+ %a") then         -- "-- mode" row: a profile of the "- mode" row above
+            if cur and i <= #lines then
+                local p = parseProfile(t:match("^%-%-+ (.*)"), lines[i])
+                p.group = group
+                add(p)
+                i = i + 1
+            end
+        elseif raw:find("\t") then               -- a profile row for the current weapon
+            if cur then add(parseProfile("", raw)) end
+        else                                     -- a new weapon's name
+            flush()
+            cur, group = { name = t, profiles = {} }, nil
+            local nr = lines[i]
+            if nr and nr:find("\t") and not trim(nr):match("^%- %a") and trim(nr) ~= "" then
+                add(parseProfile("", nr))
+                i = i + 1
+            end
+        end
+    end
+    flush()
+    return f
+end
+
+local function parseExport(raw)
+    local text  = raw:gsub("\r\n", "\n"):gsub("\r", "\n")
+    local lines = {}
+    for ln in (text .. "\n"):gmatch("([^\n]*)\n") do
+        -- Firefox and others put empty rows between table rows when copying;
+        -- the parser looks one line ahead, so gaps would lose data.
+        if trim(ln) ~= "" then lines[#lines + 1] = ln end
+    end
+    local starts, fighters = findBlockStarts(lines), {}
+    -- the gang's name: the export's first line, above the gang's details --
+    -- and its type, the line under that ("House Escher", "House Escher
+    -- (Malstrain Corrupted)"), unless the details ("Credits:") start there
+    local gang = (starts[1] or 1) > 1 and trim(lines[1]) or nil
+    local kind = gang and (starts[1] or 1) > 2 and trim(lines[2]) or nil
+    if kind and (kind:find(":%s*$") or kind:find("^%d")) then kind = nil end
+    for bi, si in ipairs(starts) do
+        local block = {}
+        for k = si, (starts[bi + 1] or (#lines + 1)) - 1 do block[#block + 1] = lines[k] end
+        local f = parseBlock(block)
+        if f.name ~= "" then fighters[#fighters + 1] = f end
+    end
+    return fighters, gang, kind
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  Description
+-- ══════════════════════════════════════════════════════════════
+
+local function fmtRange(sr, lr)
+    if sr == "T" or lr == "T" then return "T" end
+    if sr == "E" or lr == "E" then return "Melee" end
+    local hasS, hasL = sr ~= "-" and sr ~= "", lr ~= "-" and lr ~= ""
+    if hasS and hasL then return sr .. "/" .. lr end
+    if hasS then return sr end
+    if hasL then return lr end
+    return nil
+end
+
+local function buildDesc(f)
+    local out = {}
+    local function ln(s) out[#out + 1] = s or "" end
+
+    if f.role ~= "" then ln(C.role .. f.role .. R) end
+
+    -- the stat table, wrapped after STAT_PER_ROW columns
+    if #f.statKeys > 0 and #f.statVals > 0 then
+        ln("")
+        local k1, v1, k2, v2, n = {}, {}, {}, {}, 0
+        for k, key in ipairs(f.statKeys) do
+            if key ~= "" then
+                n = n + 1
+                local pk = key .. string.rep(" ", math.max(1, HEADER_SPACING[key] or SPACING_DEFAULT))
+                local pv = (f.statVals[k] or "?") ..
+                           string.rep(" ", math.max(1, STAT_SPACING[key] or SPACING_DEFAULT))
+                if n <= STAT_PER_ROW then k1[#k1 + 1], v1[#v1 + 1] = pk, pv
+                else k2[#k2 + 1], v2[#v2 + 1] = pk, pv end
+            end
+        end
+        if #k1 > 0 then ln(C.skey .. table.concat(k1) .. R); ln(table.concat(v1)) end
+        if #k2 > 0 then ln(""); ln(C.skey .. table.concat(k2) .. R); ln(table.concat(v2)) end
+    end
+
+    -- weapons
+    if #f.weapons > 0 then
+        ln("")
+        for _, w in ipairs(f.weapons) do
+            ln(C.weap .. cleanItemName(w.name) .. R)
+            for _, p in ipairs(w.profiles) do
+                local parts = {}
+                if p.mode ~= "" then
+                    local mode = cleanItemName(p.mode, true)
+                    if p.group then mode = cleanItemName(p.group, true) .. ": " .. mode end
+                    parts[#parts + 1] = C.mode .. "> [" .. mode .. "]\n" .. R
+                end
+                local rng = fmtRange(p.sr, p.lr)
+                if rng then parts[#parts + 1] = rng end
+                parts[#parts + 1] = "S:" .. p.str .. " "
+                parts[#parts + 1] = "AP:" .. p.ap .. " "
+                parts[#parts + 1] = "L:" .. p.l .. " "
+                local row = table.concat(parts, " ") .. "\n"
+                if p.traits ~= "" and p.traits ~= "-" then
+                    row = row .. " " .. C.trait .. p.traits .. R .. "\n"
+                end
+                ln(row)
+            end
+        end
+    end
+
+    if f.skills  then ln(C.skill .. f.skills  .. R) end
+    if f.wargear then ln(C.gear  .. f.wargear .. R) end
+    if f.rules   then ln(C.rule  .. f.rules   .. R) end
+    return table.concat(out, "\n")
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  Card data -- the table the card's setFighter takes
+-- ══════════════════════════════════════════════════════════════
+
+-- The value inside a trait like "Ammo (6+)": the first comma-separated
+-- trait matching `pattern` (lower case, its capture is the value).
+local function traitValue(traits, pattern)
+    for t in ((traits or "") .. ","):gmatch("([^,]*),") do
+        local v = trim(t):lower():match("^" .. pattern .. "$")
+        if v then return v end
+    end
+end
+
+-- A fighter's role line: "<type> • <tags>[ • <specialism>]", e.g.
+--   "Demagogue • Leader"                          rank Leader
+--   "Cult Witch • Champion, Wyrd"                 rank Champion, wyrd
+--   "Chaos Spawn • Beast, Brute"                  rank Brute, beast
+--   "Patrol Officer • Ganger, Specialist • Tech"  rank Ganger, tech
+-- -> the type's name, the rank (the tag that is one of RANKS; the card puts
+-- its symbol before the name) and the category (the card's icon on A),
+-- the first that applies of CATEGORY_ORDER.
+local RANKS = { leader = "Leader", champion = "Champion", ganger = "Ganger", prospect = "Prospect", brute = "Brute" }
+local SPECIALISMS = { medic = "medic", tech = "tech", brawler = "melee",
+                      heavy = "ranged", gunner = "ranged", gunslinger = "ranged", scout = "ranged", sniper = "ranged" }
+local CATEGORY_ORDER = { "wyrd", "loner", "medic", "tech", "melee", "ranged", "beast" }
+local function splitRole(role)
+    local parts = {}
+    for p in ((role or "") .. "•"):gmatch("(.-)•") do parts[#parts + 1] = trim(p) end
+    if #parts < 2 then return trim(role), nil, nil end
+    local rank, has = nil, {}
+    for tag in (parts[2] .. ","):gmatch("([^,]*),") do
+        local t = trim(tag):lower()
+        rank = rank or RANKS[t]
+        has[t] = true
+    end
+    if has.specialist then
+        local spec = SPECIALISMS[(parts[3] or ""):lower()]
+        if spec then has[spec] = true end
+    end
+    for _, c in ipairs(CATEGORY_ORDER) do
+        if has[c] then return parts[1], rank, c end
+    end
+    return parts[1], rank, nil
+end
+
+-- Whether a profile is a melee one: its traits include Melee.
+local function meleeProfile(p)
+    for t in ((p.traits or "") .. ","):gmatch("([^,]*),") do
+        if trim(t):lower() == "melee" then return true end
+    end
+    return false
+end
+
+-- A weapon with melee and ranged profiles both (a polearm / autogun) as
+-- the two weapons the card makes of it, melee first, each with its own
+-- profiles -- named after the part of a "/" name ("Cawdor polearm/
+-- autogun") that holds its profiles' name, else that name (a "-- mode"
+-- row's "- mode" above it, or a lone profile's), else the roster's. A
+-- weapon that is one or the other: itself. `name`: the roster's, its
+-- count left out. Each { name, profiles, single = one profile of a split
+-- weapon (its name then goes) }.
+local function splitMixed(name, profiles)
+    local melee, ranged = {}, {}
+    for _, p in ipairs(profiles) do
+        if meleeProfile(p) then melee[#melee + 1] = p else ranged[#ranged + 1] = p end
+    end
+    if #melee == 0 or #ranged == 0 then return { { name = name, profiles = profiles } } end
+    local parts = {}
+    for part in (name .. "/"):gmatch("([^/]*)/") do
+        if trim(part) ~= "" then parts[#parts + 1] = trim(part) end
+    end
+    local function key(s) return trim((tostring(s or ""):lower():gsub("%b()", ""):gsub("%*", ""))) end
+    local function named(list)
+        local own = list[1].group or (#list == 1 and list[1].mode ~= "" and list[1].mode) or nil
+        if own and #parts >= 2 then
+            for _, part in ipairs(parts) do
+                if key(own) ~= "" and key(part):find(key(own), 1, true) then return part end
+            end
+        end
+        return own or name
+    end
+    return { { name = named(melee), profiles = melee, single = #melee == 1 },
+             { name = named(ranged), profiles = ranged, single = #ranged == 1 } }
+end
+
+local function toCardFighter(f)
+    local stats = {}
+    for k, key in ipairs(f.statKeys) do
+        if key ~= "" then stats[key] = f.statVals[k] or "-" end
+    end
+
+    -- A weapon the roster lists with a count ("Fighting Knife (x2)") is
+    -- that many weapons on the card, each with its own profiles (each
+    -- attacks, runs out of ammo ... on its own), the count left out of
+    -- their names. One with melee and ranged profiles is two weapons (see
+    -- splitMixed).
+    local weapons = {}
+    for wi = 1, #f.weapons do
+        local w = f.weapons[wi]
+        local name, copies = splitCount(w.name)
+        for _ = 1, copies do
+            for _, part in ipairs(splitMixed(name, w.profiles)) do
+                local profiles = {}
+                for _, p in ipairs(part.profiles) do
+                    profiles[#profiles + 1] = {
+                        name   = not part.single and p.mode ~= "" and cleanItemName(p.mode, true) or nil,
+                        SR = p.sr, LR = p.lr, S = p.str, AP = p.ap, L = p.l,
+                        D  = traitValue(p.traits, "damage%s*%(%s*(%d+)%s*%)") or "-",
+                        Am = traitValue(p.traits, "ammo%s*%(%s*(%d%+?)%s*%)") or "-",
+                        traits = p.traits,
+                    }
+                end
+                weapons[#weapons + 1] = { name = cleanItemName(part.name), profiles = profiles }
+            end
+        end
+    end
+
+    local ftype, rank, category = splitRole(f.role)
+    return {
+        name = f.name, rank = rank or "None", ftype = ftype ~= "" and ftype or "None", category = category,
+        role = f.role, rating = f.rating,
+        -- "A, B" as the roster has them: the card splits them (the names under
+        -- its stats, the Special tab); "" for none, so the card's demo ones
+        -- don't stand in
+        skills = f.skills or "", wargear = f.wargear or "",
+        rules = f.rules,   -- kept for later use
+        stats = stats, weapons = weapons,
+    }
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  Bases and heights -- measured the card's way (its section 10b)
+-- ══════════════════════════════════════════════════════════════
+
+local MM_PER_INCH = 25.4
+
+-- The smaller of the x and z sizes of a bounds value (a table / Vector
+-- with `size`, or Unity's Bounds with `size` or `extents`), or nil: a round
+-- base is as wide either way, a miniature overhanging it widens one side.
+local function footprint(b)
+    if b == nil then return nil end
+    local s, k = b.size, 1
+    if s == nil then s, k = b.extents, 2 end
+    if s == nil then return nil end
+    local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
+    if not (x and z) or x <= 0 or z <= 0 then return nil end
+    return math.min(x, z) * k
+end
+
+-- A model's base diameter in inches and how it was measured (nil when
+-- nothing worked): its own MeshRenderer, its own colliders, then the whole
+-- model's bounds (which take in the miniature attached on top).
+local function measureRaw(obj)
+    local function try(fn)
+        local ok, v = pcall(fn)
+        return ok and tonumber(v) or nil
+    end
+    local d = try(function() return footprint(obj.getComponent("MeshRenderer").get("bounds")) end)
+    if d then return d, "renderer" end
+    d = try(function()
+        local widest
+        for _, c in ipairs(obj.getComponents()) do
+            if tostring(c.name):find("Collider", 1, true) then
+                local ok, w = pcall(function() return footprint(c.get("bounds")) end)
+                if ok and w and w > (widest or 0) then widest = w end
+            end
+        end
+        return widest
+    end)
+    if d then return d, "collider" end
+    d = try(function() return footprint(obj.getBoundsNormalized()) end)
+        or try(function() return footprint(obj.getBounds()) end)
+    if d then return d, "bounds" end
+end
+
+-- The standard size for a measurement (mm): the nearest within BASE_SNAP,
+-- else the largest below it, flagged as a guess.
+local function snapBase(mm)
+    local near, under
+    for _, s in ipairs(BASE_SIZES) do
+        if not near or math.abs(s - mm) < math.abs(near - mm) then near = s end
+        if s <= mm and (not under or s > under) then under = s end
+    end
+    if not near or math.abs(near - mm) <= BASE_SNAP then return near or mm, false end
+    return under or near, true
+end
+
+-- The "Base: 32mm" line of a description: its size (mm) and the line as
+-- written, or nil.
+local function baseLine(desc)
+    for raw in (tostring(desc or "") .. "\n"):gmatch("([^\n]*)\n") do
+        local line = raw:gsub("\r", "")
+        local bare = line:gsub("%[/?[%w%-]*%]", "")
+        local n = tonumber(bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
+        if n and n > 0 then return n, line end
+    end
+end
+
+-- A model's base for its card: its description's "Base:" line, else a size
+-- set by hand on the card it has (setBase), else measured and snapped. nil
+-- when it can't be measured (the card tries again itself once loaded).
+local function baseFor(obj, desc)
+    local mm = baseLine(desc)
+    if mm then return { diameter = mm / MM_PER_INCH, mm = mm, source = "description" } end
+    local ok, b = callIfHas(obj, "getBase")
+    if ok and type(b) == "table" and b.source == "manual" and tonumber(b.diameter) then
+        return { diameter = tonumber(b.diameter), mm = tonumber(b.mm) or tonumber(b.diameter) * MM_PER_INCH,
+                 source = "manual" }
+    end
+    local d, how = measureRaw(obj)
+    if not d then return nil end
+    local raw = d * MM_PER_INCH
+    local s, guess = snapBase(raw)
+    return { diameter = s / MM_PER_INCH, mm = s, source = "measured",
+             raw = math.floor(raw * 10 + 0.5) / 10, how = how, guess = guess or nil }
+end
+
+-- The model's height -- its top, miniature and all, above its origin -- in
+-- its own local units (the card floats over it, and a rescale carries it
+-- along), and in inches as it stands; nil when it can't be measured. Every
+-- measure is taken and the highest top wins, the card's way (its
+-- modelHeight): a miniature attached to its base in parts can have parts
+-- that a collider or the merged renderers leave out, and a measure that
+-- misses a part only ever comes out lower.
+local function modelHeight(obj)
+    local okP, p = pcall(function() return obj.getPosition() end)
+    local y = okP and p and tonumber(p.y or p[2])
+    if not y then return nil end
+    local okS, s = pcall(function() return obj.getScale() end)
+    local sy = math.max(0.01, math.abs(okS and s and tonumber(s.y or s[2]) or 1))
+    -- the y of a Vector (nil when it has none)
+    local function up(v)
+        local ok, n = pcall(function() return tonumber(v.y or v[2]) end)
+        return ok and n or nil
+    end
+    -- the top (world y) of a bounds value: a table with `center` and
+    -- `size`, or Unity's Bounds with `max`, or `center` and `extents`
+    local function topOf(b)
+        local ok, t = pcall(function()
+            local c, z, e = up(b.center), up(b.size), up(b.extents)
+            return up(b.max) or (c and z and c + z / 2) or (c and e and c + e)
+        end)
+        return ok and tonumber(t) or nil
+    end
+    local best
+    local function take(b)
+        local t = topOf(b)
+        if t and t > y and (not best or t > best) then best = t end
+    end
+    for _, get in ipairs({ "getVisualBoundsNormalized", "getBoundsNormalized", "getBounds" }) do
+        local ok, b = pcall(function() return obj[get]() end)
+        if ok then take(b) end
+    end
+    for _, kind in ipairs({ "MeshRenderer", "SkinnedMeshRenderer" }) do
+        local ok, list = pcall(function() return obj.getComponentsInChildren(kind) end)
+        if ok and type(list) == "table" then
+            for _, c in ipairs(list) do
+                local okE, on = pcall(function() return c.get("enabled") end)
+                if not (okE and on == false) then
+                    local okB, b = pcall(function() return c.get("bounds") end)
+                    if okB then take(b) end
+                end
+            end
+        end
+    end
+    if best then return (best - y) / sy, best - y end
+end
+
+-- How a base reads in the import summary.
+local function baseText(b)
+    if not b then return "not measured (the card assumes its default)" end
+    local t = string.format("%gmm", b.mm)
+    if b.source ~= "measured" then return t .. " (" .. (b.source == "manual" and "set by hand" or "in description") .. ")" end
+    if b.guess then return t .. string.format(" (measured %gmm -- check it)", b.raw) end
+    return t
+end
+
+-- A Lua literal for a value (strings, numbers, booleans and tables of them),
+-- with table keys sorted so the same data always writes the same text.
+local function luaString(s)
+    return '"' .. s:gsub('[%c"\\]', function(c)
+        if c == "\n" then return "\\n" elseif c == "\r" then return "\\r"
+        elseif c == "\t" then return "\\t" elseif c == '"' then return '\\"'
+        elseif c == "\\" then return "\\\\" end
+        return string.format("\\%03d", c:byte())
+    end) .. '"'
+end
+
+local function toLua(v)
+    local t = type(v)
+    if t == "string" then return luaString(v) end
+    if t == "number" or t == "boolean" then return tostring(v) end
+    if t ~= "table" then return "nil" end
+    local keys = {}
+    for k in pairs(v) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b)
+        if type(a) == type(b) then return a < b end
+        return type(a) == "number"
+    end)
+    local parts = {}
+    for _, k in ipairs(keys) do
+        local key = type(k) == "number" and ("[" .. k .. "]") or ("[" .. luaString(k) .. "]")
+        parts[#parts + 1] = key .. " = " .. toLua(v[k])
+    end
+    return "{ " .. table.concat(parts, ", ") .. " }"
+end
+
+-- The card script for one fighter: the embedded card with its IMPORTED line
+-- filled in. `id` tells a fresh import apart from the model's saved state.
+local IMPORT_MARKER = "local IMPORTED = nil --@@MUNDA_IMPORT@@"
+local function cardScriptFor(fighter, id)
+    local a, b = CARD_SCRIPT:find(IMPORT_MARKER, 1, true)
+    if not a then error("the embedded card script has no import line -- rebuild the importer") end
+    return CARD_SCRIPT:sub(1, a - 1)
+        .. "local IMPORTED = " .. toLua({ id = id, fighter = fighter }) .. " --@@MUNDA_IMPORT@@"
+        .. CARD_SCRIPT:sub(b + 1)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  Appearance in GM Notes
+-- ══════════════════════════════════════════════════════════════
+
+-- The appearance block in a model's GM Notes -- the same format the card reads
+-- (its LOOKS section): parsed (nil when there is none), written, and put
+-- into notes, replacing an old block or (with nil) removing it, leaving the
+-- rest of the notes as they were.
+local LOOKS_OPEN, LOOKS_CLOSE = "[Mundane Appearance]", "[/Mundane Appearance]"
+local LOOKS_KEYS = { "background", "headers", "text", "accent", "edges", "frame", "trim", "tint" }
+local function parseLooks(notes)
+    notes = tostring(notes or "")
+    local a = notes:find(LOOKS_OPEN, 1, true)
+    if not a then return nil end
+    local b = notes:find(LOOKS_CLOSE, a, true) or #notes + 1
+    local t = {}
+    for line in notes:sub(a + #LOOKS_OPEN, b - 1):gmatch("[^\r\n]+") do
+        -- split at "=" by hand: no pattern runs over the (long) value, which
+        -- TTS's Lua can refuse as "pattern too complex"
+        local eq = line:find("=", 1, true)
+        local k = eq and trim(line:sub(1, eq - 1)):lower()
+        if k and k ~= "" and not k:find("%A") then t[k] = trim(line:sub(eq + 1)) end
+    end
+    return t
+end
+local function formatLooks(t)
+    local lines = { LOOKS_OPEN }
+    for _, k in ipairs(LOOKS_KEYS) do lines[#lines + 1] = string.format("%-10s = %s", k, tostring(t[k] or "")) end
+    lines[#lines + 1] = LOOKS_CLOSE
+    return table.concat(lines, "\n")
+end
+local function notesWithLooks(notes, block)
+    notes = tostring(notes or "")
+    local a = notes:find(LOOKS_OPEN, 1, true)
+    if a then
+        local _, b = notes:find(LOOKS_CLOSE, a, true)
+        notes = (notes:sub(1, a - 1) .. notes:sub((b or #notes) + 1)):gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    if not block then return notes end
+    return notes == "" and block or (notes .. "\n\n" .. block)
+end
+
+-- "#RRGGBB" from a colour someone typed (with or without #, any case), or nil.
+local function hexColor(v)
+    local h = tostring(v or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
+    return h and ("#" .. h:upper()) or nil
+end
+
+-- A complete, tidy looks table: `t` over the defaults.
+local function fullLooks(t)
+    t = type(t) == "table" and t or {}
+    local out = {}
+    for _, c in ipairs(LOOKS_COLORS) do out[c.key] = hexColor(t[c.key]) or LOOKS_DEFAULT[c.key] end
+    out.frame = trim(tostring(t.frame or ""))
+    out.trim  = trim(tostring(t.trim or ""))
+    out.tint  = tostring(t.tint or "yes"):lower():match("^%s*n") and "no" or "yes"
+    return out
+end
+
+local function sameLooks(a, b)
+    for _, k in ipairs(LOOKS_KEYS) do if (a[k] or "") ~= (b[k] or "") then return false end end
+    return true
+end
+
+-- Writes looks `t` into a model's GM Notes (nil: takes them out, back to
+-- the defaults) and has its card show them now: a card that is this
+-- importer's own reloads its appearance; an older one is brought up to
+-- date first (see upgradeCard), keeping its fighter, and reads them as it
+-- starts.
+local upgradeCard, cardIsCurrent   -- set in the Import section
+local function writeLooks(obj, t)
+    obj.setGMNotes(notesWithLooks(obj.getGMNotes(), t and formatLooks(t) or nil))
+    local ok, script = pcall(function() return obj.getLuaScript() end)
+    script = ok and tostring(script or "") or ""
+    if not script:find("@@MUNDA_IMPORT@@", 1, true) then return end   -- no card on it
+    if cardIsCurrent(script) then
+        pcall(function() obj.call("reloadLooks") end)
+    else
+        upgradeCard(obj, script)
+    end
+end
+
+-- A gang's tag: GANG_TAG and its name, kept to letters, digits, spaces and
+-- _ - . ' (nil for no name).
+local function gangTag(name)
+    name = trim((tostring(name or ""):gsub("[^%w%s_%-%.']", ""):gsub("%s+", " ")))
+    return name ~= "" and (GANG_TAG .. name:sub(1, 60)) or nil
+end
+
+-- Puts a model in gang `tag`: any other gang tag (and earlier versions'
+-- gang and owner tags) comes off first.
+local function setGang(obj, tag)
+    local ok, tags = pcall(function() return obj.getTags() end)
+    for _, t in ipairs(ok and tags or {}) do
+        local old = t:sub(1, #GANG_TAG) == GANG_TAG
+        for _, o in ipairs(OLD_TAGS) do old = old or t:sub(1, #o) == o end
+        if old and t ~= tag then obj.removeTag(t) end
+    end
+    if tag and not obj.hasTag(tag) then obj.addTag(tag) end
+end
+
+-- The models that have a card (tagged by an import) in gang `tag`.
+local function cardModels(tag)
+    local out = {}
+    for _, obj in ipairs(getAllObjects()) do
+        if IMPORT_TAG ~= "" and obj.hasTag(IMPORT_TAG) and obj.hasTag(tag) then out[#out + 1] = obj end
+    end
+    return out
+end
+
+-- The gang imported last with this importer (its tag).
+local lastGang = nil
+
+-- The appearance in the editor, and the models standing on the appearance
+-- spots, left to right (`target` is the first; nil: none -- then the editor
+-- sets what "Apply UI to the whole Gang" hands out).
+local edit    = fullLooks(nil)
+local targets = {}
+local target  = nil
+
+-- ══════════════════════════════════════════════════════════════
+--  Import
+-- ══════════════════════════════════════════════════════════════
+
+-- Give a model its card script and reload it, so the card starts up.
+local function installCard(obj, script)
+    if IMPORT_TAG ~= "" and not obj.hasTag(IMPORT_TAG) then obj.addTag(IMPORT_TAG) end
+    obj.setLuaScript("")
+    Wait.time(function()
+        if obj and not obj.isDestroyed() then
+            obj.setLuaScript(script)
+            Wait.time(function()
+                if obj and not obj.isDestroyed() then obj.reload() end
+            end, 0.1)
+        end
+    end, 0.1)
+end
+
+-- The first model named `name` (any case) not used yet in this import.
+local function findUnused(name, used)
+    local low = name:lower()
+    for _, obj in ipairs(getAllObjects()) do
+        if obj.getName():lower() == low and not used[obj.getGUID()] then return obj end
+    end
+end
+
+local importCount = 0
+
+-- A model's card script split round its import line (its fighter and
+-- import id): what comes before, the line, what comes after -- found with
+-- plain finds, as the line can be long.
+local function splitCard(script)
+    local a = script:find("local IMPORTED = ", 1, true)
+    local _, b = script:find("--@@MUNDA_IMPORT@@", a or 1, true)
+    if not (a and b) then return nil end
+    return script:sub(1, a - 1), script:sub(a, b), script:sub(b + 1)
+end
+
+-- Whether a model's card is this importer's own, whatever fighter it holds.
+-- The embedded card's parts round its import line are cut once (CARD_PARTS);
+-- a card of another length isn't compared at all.
+local CARD_PARTS = {}
+cardIsCurrent = function(script)
+    if not CARD_PARTS.pre then
+        local a, b = CARD_SCRIPT:find(IMPORT_MARKER, 1, true)
+        if not a then return false end
+        CARD_PARTS.pre, CARD_PARTS.post = CARD_SCRIPT:sub(1, a - 1), CARD_SCRIPT:sub(b + 1)
+    end
+    local pre, _, post = splitCard(script)
+    return pre ~= nil and #pre == #CARD_PARTS.pre and #post == #CARD_PARTS.post
+       and pre == CARD_PARTS.pre and post == CARD_PARTS.post
+end
+
+-- An older card brought up to date: this importer's card with the model's
+-- own import line kept, so the saved state -- wounds and all -- carries on
+-- after the reload.
+upgradeCard = function(obj, script)
+    local _, line = splitCard(script)
+    local a, b = CARD_SCRIPT:find(IMPORT_MARKER, 1, true)
+    if not (line and a) then return end
+    installCard(obj, CARD_SCRIPT:sub(1, a - 1) .. line .. CARD_SCRIPT:sub(b + 1))
+end
+
+local function runImport(rawText, player)
+    local ok, fighters, gang, gangType = pcall(parseExport, rawText)
+    if not ok then
+        printToAll(IMPORT_PREFIX .. "Parse error: " .. tostring(fighters), { 1, 0.2, 0.2 })
+        return
+    end
+
+    importCount = importCount + 1
+    local batch = string.format("%s-%d-%d", self.getGUID(), os.time(), importCount)
+    local applied, notFound, used, bases = 0, {}, {}, {}
+    local tag = gangTag(gang)
+    if tag then lastGang = tag end
+
+    for fi, f in ipairs(fighters) do
+        local obj = findUnused(f.name, used)
+        if obj then
+            used[obj.getGUID()] = true
+            -- the base, before the description (and its Base: line) is replaced
+            local okD, oldDesc = pcall(function() return obj.getDescription() end)
+            oldDesc = okD and oldDesc or ""
+            local base, kept = baseFor(obj, oldDesc), select(2, baseLine(oldDesc))
+            obj.setDescription(buildDesc(f) .. (kept and ("\n\n" .. kept) or ""))
+            -- which gang it belongs to now
+            setGang(obj, tag)
+            -- appearance: it belongs to the model, in its GM Notes. One
+            -- that has it keeps it; one without gets the default written
+            -- down -- never the editor's, which still holds whatever model
+            -- was last on a spot.
+            if not parseLooks(obj.getGMNotes()) then
+                obj.setGMNotes(notesWithLooks(obj.getGMNotes(), formatLooks(fullLooks(nil))))
+            end
+            local cf = toCardFighter(f)
+            local height, tall = modelHeight(obj)
+            cf.base, cf.height = base, height
+            cf.gangType = gangType             -- what some rules go by (the card's Agility tests, Coup de Grace)
+            -- a card raised or lowered by hand on this model stays so
+            local okL, lift = callIfHas(obj, "getLift")
+            cf.lift = okL and tonumber(lift) or nil
+            installCard(obj, cardScriptFor(cf, batch .. "-" .. fi))
+            obj.highlightOn({ 0, 1, 0 }, 0.8)
+            applied = applied + 1
+            bases[#bases + 1] = f.name .. ": " .. baseText(base)
+                .. (tall and string.format(', %.1f" tall', tall) or ", height not measured")
+        else
+            notFound[#notFound + 1] = f.name
+        end
+    end
+
+    printToAll(string.format(IMPORT_PREFIX .. "Imported %d fighter(s) onto their models.", applied),
+               { 0.3, 1, 0.4 })
+    if #notFound > 0 then
+        printToAll(IMPORT_PREFIX .. "No model named:", { 1, 0.7, 0.2 })
+        for _, n in ipairs(notFound) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 1, 0.85, 0.5 }) end
+    end
+    if #bases > 0 then
+        printToAll(IMPORT_PREFIX .. "Bases / Heights (put \"Base: XXmm\" in descriptions before import, if it is not recognized correctly):",
+                   { 0.6, 0.85, 1 })
+        for _, n in ipairs(bases) do printToAll(IMPORT_PREFIX .. "    * " .. n, { 0.8, 0.92, 1 }) end
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  Panel
+-- ══════════════════════════════════════════════════════════════
+
+-- The frame presets on offer: those with their art uploaded.
+local function framePresets()
+    local out = {}
+    for _, f in ipairs(FRAME_PRESETS) do
+        if not f.upload or f.frame ~= "" then out[#out + 1] = f end
+    end
+    return out
+end
+
+-- Which preset the editor's frame is (nil: a custom URL).
+local function currentFrame()
+    for i, f in ipairs(framePresets()) do
+        if edit.frame == f.frame and edit.trim == (f.trim or "") then return i end
+    end
+end
+
+-- The hints in the roster box and the background URL box. Each is the
+-- box's text, not a TTS placeholder (which stays until something is
+-- typed): clicking into a box selects all of it, like the Templates link,
+-- so a paste replaces it. Taken as empty when read back.
+local ROSTER_HINT = "Paste the roster here (Print Options -> Roster -> Copy the table)..."
+local FRAME_URL_HINT = "...or paste your own image URL (Format 2:1 - Length x Height)"
+
+-- What the background URL box shows: a URL of one's own, else the hint.
+local function frameUrlText()
+    if currentFrame() or not tostring(edit.frame or ""):match("^https?://") then return FRAME_URL_HINT end
+    return edit.frame
+end
+
+-- The panel's size: as wide as a colour row (label, swatch, hex and the
+-- swatches, with their gaps), plus the layout's padding and the border.
+-- SWATCH_W sets the width: 25 makes the panel 600.
+local SWATCH_W = 25
+local ROW_W   = 92 + 28 + 86 + #SWATCH_HUES * SWATCH_W + (2 + #SWATCH_HUES) * 3
+local PANEL_W = ROW_W + 2 * 9 + 2 * 3
+local SECTION_H = 426                  -- the appearance editor, top to bottom
+local IMPORT_H  = 162                  -- the import part above it (text, paste box, buttons)
+local PANEL_H = 664                    -- the column below, top to bottom, with its gaps
+local EDIT_H  = SECTION_H + 2 * 9 + 2 * 3   -- just the appearance editor (a model on the spot)
+
+-- The appearance editor, under the import: a colour per row (its swatch,
+-- its hex, then a column of swatches per hue), the themes, the
+-- backgrounds and the two buttons for the whole gang.
+local function looksXml()
+    local rows = {}
+    local function add(s) rows[#rows + 1] = s end
+    add(string.format('<VerticalLayout id="appearanceSection" preferredHeight="%d" spacing="6" childForceExpandHeight="false">',
+        SECTION_H))
+    add('<Text preferredHeight="28" fontSize="20" fontStyle="Bold">UI Appearance</Text>')
+    for _, c in ipairs(LOOKS_COLORS) do
+        local sw = {}
+        for n, hex in ipairs(SWATCHES[c.key]) do
+            sw[#sw + 1] = string.format('<Button id="pre_%s_%d" preferredWidth="%d" colors="%s"%s onClick="onSwatch" />',
+                c.key, n, SWATCH_W, colors(hex), BEVEL)
+        end
+        add(string.format(
+            '<HorizontalLayout preferredHeight="32" spacing="3" childForceExpandWidth="false">' ..
+            '<Text preferredWidth="92" fontSize="15" fontStyle="Bold" alignment="MiddleLeft">%s</Text>' ..
+            '<Image id="sw_%s" preferredWidth="28" color="%s"%s />' ..
+            '<InputField id="hex_%s" preferredWidth="86" fontSize="13" characterLimit="7" textAlignment="MiddleCenter" text="%s" onEndEdit="onHexEdit" />' ..
+            '%s</HorizontalLayout>', c.label, c.key, edit[c.key], BEVEL, c.key, edit[c.key], table.concat(sw)))
+    end
+    -- the themes, THEMES_PER_ROW to a row (the last row filled with blanks,
+    -- so every button is the same width)
+    for first = 1, #THEME_PRESETS, THEMES_PER_ROW do
+        local th = {}
+        for n = first, first + THEMES_PER_ROW - 1 do
+            local t = THEME_PRESETS[n]
+            th[#th + 1] = t and string.format('<Button id="theme_%d" fontSize="14" onClick="onTheme">%s</Button>', n, t.name)
+                or '<Panel color="#00000000" />'
+        end
+        add('<HorizontalLayout preferredHeight="28" spacing="4">' .. table.concat(th) .. '</HorizontalLayout>')
+    end
+    local fr, cur = {}, currentFrame()
+    for n, f in ipairs(framePresets()) do
+        fr[#fr + 1] = string.format('<Button id="frame_%d" fontSize="14" colors="%s" textColor="%s" onClick="onFramePreset">%s</Button>',
+            n, n == cur and LIT or WASH, n == cur and PALE or INK, f.name)
+    end
+    add('<HorizontalLayout preferredHeight="28" spacing="4">' ..
+        '<Text preferredWidth="92" fontSize="15" fontStyle="Bold" alignment="MiddleLeft">Background</Text>' ..
+        table.concat(fr) .. '</HorizontalLayout>')
+    add(string.format('<HorizontalLayout preferredHeight="28" spacing="4" childForceExpandWidth="false">' ..
+        '<Text preferredWidth="92" fontSize="15" fontStyle="Bold" alignment="MiddleLeft">Templates</Text>' ..
+        '<InputField id="templatesUrl" preferredWidth="%d" fontSize="12" readOnly="true" textAlignment="MiddleLeft"' ..
+        ' text="%s" />' ..
+        '</HorizontalLayout>', ROW_W - 96, xmlEsc(TEMPLATES_URL)))
+    add(string.format('<InputField id="frameUrl" preferredHeight="32" fontSize="13" textAlignment="MiddleLeft" text="%s"' ..
+        ' onEndEdit="onFrameUrl" />', xmlEsc(frameUrlText())))
+    add(string.format(
+        '<HorizontalLayout preferredHeight="28" spacing="6">' ..
+        '<Button id="applyAll" fontSize="15" colors="%s" textColor="%s" onClick="onApplyAll">Apply UI to the whole Gang</Button>' ..
+        '<Button id="resetAll" fontSize="15" colors="%s" textColor="%s" onClick="onResetAll">Reset UI for the whole Gang</Button>' ..
+        '</HorizontalLayout>', LIT, PALE, RED, PALE))
+    add('</VerticalLayout>')
+    return table.concat(rows)
+end
+
+-- The changes history, shown by the "Update History" button over the whole
+-- parchment field (the panel inside its border).
+local HISTORY_BTN_W = 150
+local function historyXml()
+    local lines = {}
+    for _, v in ipairs(CHANGELOG) do
+        lines[#lines + 1] = "v" .. v.version .. (v.note and ("  --  " .. v.note) or "")
+        for _, c in ipairs(v.changes) do lines[#lines + 1] = "   - " .. c end
+        lines[#lines + 1] = ""
+    end
+    return string.format([[
+    <Panel id="historyPopup" active="false" rectAlignment="MiddleCenter" width="%d" height="%d"
+           color="#1C2224F5" padding="14 14 12 12" outline="%s" outlineSize="2 2">
+      <VerticalLayout spacing="8" childForceExpandHeight="false">
+        <Text preferredHeight="30" fontSize="22" fontStyle="Bold" color="%s">Update History</Text>
+        <Text preferredHeight="%d" fontSize="14" color="%s" alignment="UpperLeft">%s</Text>
+        <Button preferredHeight="34" fontSize="16" colors="#FFFFFF26|#FFFFFF40|#FFFFFF1A|#FFFFFF1A"
+                textColor="%s" outline="#E6E5E14D" onClick="onHistory">Close</Button>
+      </VerticalLayout>
+    </Panel>]], PANEL_W - 6, PANEL_H - 6, PAPER, PAPER, PANEL_H - 6 - 26 - 30 - 34 - 16, PAPER,
+        xmlEsc(table.concat(lines, "\n")), PAPER)
+end
+
+-- The whole panel (see panelShell): under the header the import, then the
+-- appearance editor, and the history over them when asked for.
+--   The roster box sits in a plain panel (rosterBox) that the layout
+-- sizes, the box itself a fixed size inside it: a multi-line InputField
+-- tells a layout group its text's height as its own preferred height, and
+-- the group takes the larger of that and preferredHeight -- so a pasted
+-- roster would, whenever the layout is rebuilt, stretch the box over the
+-- Import button and push the lines above it up.
+local function panelXml()
+    local body = string.format([[
+      <VerticalLayout id="importSection" preferredHeight="%d" spacing="6" childForceExpandHeight="false">
+      <Text preferredHeight="18" fontSize="14" fontStyle="Bold" verticalOverflow="Overflow">Paste a MundaManager roster export and press Import.</Text>
+      <Text preferredHeight="18" fontSize="14" fontStyle="Bold" verticalOverflow="Overflow">Fighter info goes onto the models with the same name as the Fighter.</Text>
+      <Text preferredHeight="18" fontSize="14" fontStyle="Bold" verticalOverflow="Overflow">You can edit the UI of the Fighters by putting them on the pedestal.</Text>
+      <Panel id="rosterBox" preferredHeight="47" color="#00000000">
+        <InputField id="rosterInput" width="%d" height="47" lineType="MultiLineNewline" fontSize="13"
+                    textAlignment="MiddleLeft" text="%s" onValueChanged="onRosterInputChanged"
+                    onEndEdit="onRosterInputDone" />
+      </Panel>
+      <HorizontalLayout preferredHeight="28" spacing="6" childForceExpandWidth="false">
+        <Button id="importBtn" preferredWidth="%d" fontSize="17" colors="%s" textColor="%s" onClick="confirmImport">Import</Button>
+        <Button id="historyBtn" preferredWidth="%d" fontSize="15" onClick="onHistory">Update History</Button>
+      </HorizontalLayout>
+      <Image preferredHeight="3" color="#29313399" />
+      </VerticalLayout>
+      %s]], IMPORT_H, ROW_W, xmlEsc(ROSTER_HINT), ROW_W - HISTORY_BTN_W - 6, LIT, PALE, HISTORY_BTN_W, looksXml())
+    return panelShell({ id = "importPanel", position = PANEL.position, rotation = PANEL.rotation, scale = PANEL.scale,
+        width = PANEL_W, height = PANEL_H, title = IMPORTER_NAME .. " (N26)", version = VERSION,
+        body = body, over = historyXml() })
+end
+
+-- The picture behind the panel, as the panel's own UI asset.
+local function panelAssets()
+    return { { name = "mundanePanelBg", url = PANEL_BG } }
+end
+
+-- The gang "the whole Gang" means: that of the (first) model on a spot,
+-- otherwise the one imported last.
+local function currentGang()
+    return (target and gangOf(target)) or lastGang
+end
+
+-- The editor's fields shown for `edit`, and who they apply to.
+local function drawEditor()
+    for _, c in ipairs(LOOKS_COLORS) do
+        self.UI.setAttribute("sw_" .. c.key, "color", edit[c.key])
+        self.UI.setAttribute("hex_" .. c.key, "text", edit[c.key])
+    end
+    local cur = currentFrame()
+    for n in ipairs(framePresets()) do
+        self.UI.setAttribute("frame_" .. n, "colors", n == cur and LIT or WASH)
+        self.UI.setAttribute("frame_" .. n, "textColor", n == cur and PALE or INK)
+    end
+    self.UI.setAttribute("frameUrl", "text", frameUrlText())
+end
+
+-- The editor changed: shown, and written onto every model on the spots.
+local function editChanged()
+    drawEditor()
+    for _, o in ipairs(targets) do
+        if not o.isDestroyed() then writeLooks(o, edit) end
+    end
+end
+
+-- The models standing on the appearance spots, left to right: on each, the
+-- first thing in the square above it, bar this object (each model once).
+local function modelsOnSpots()
+    local found, seen = {}, {}
+    if not (Physics and Physics.cast and self.positionToWorld) then return found end
+    for _, spot in ipairs(looksSpots()) do
+        local p = self.positionToWorld(spot)
+        local hits = Physics.cast({ origin = { p.x, p.y + 1.5, p.z }, direction = { 0, 1, 0 }, type = 3,
+            size = { LOOKS_SPOT_SIZE, 3, LOOKS_SPOT_SIZE }, max_distance = 0 }) or {}
+        for _, h in ipairs(hits) do
+            local o = h.hit_object
+            if o and o ~= self and o.type ~= "Surface" and o.tag ~= "Surface" then
+                if not seen[o] then seen[o] = true; found[#found + 1] = o end
+                break
+            end
+        end
+    end
+    return found
+end
+
+-- Where the panel's centre goes for a panel `h` tall, so that its top edge
+-- stays where the full panel's is: moved along the panel's own up
+-- direction (turned by PANEL.rotation, Unity's order: z, then x, then y)
+-- by half the height it lost.
+local function panelPosition(h)
+    local function nums(str)
+        local t = {}
+        for n in tostring(str):gmatch("%-?[%d%.]+") do t[#t + 1] = tonumber(n) end
+        return t
+    end
+    local pos, rot, sc = nums(PANEL.position), nums(PANEL.rotation), nums(PANEL.scale)
+    local d = (PANEL_H - h) / 2 * (sc[2] or 1)
+    local rx, ry, rz = math.rad(rot[1] or 0), math.rad(rot[2] or 0), math.rad(rot[3] or 0)
+    local x, y, z = -d * math.sin(rz), d * math.cos(rz), 0                 -- about z
+    y, z = y * math.cos(rx) - z * math.sin(rx), y * math.sin(rx) + z * math.cos(rx)   -- about x
+    x, z = x * math.cos(ry) + z * math.sin(ry), -x * math.sin(ry) + z * math.cos(ry)  -- about y
+    local function f(v) return (string.format("%.2f", v):gsub("%.?0+$", "")) end
+    return f((pos[1] or 0) + x) .. " " .. f((pos[2] or 0) + y) .. " " .. f((pos[3] or 0) + z)
+end
+
+-- Which parts of the panel show: with a model on the appearance spot only
+-- the appearance editor (the header and the import step aside while it is
+-- edited, and the panel shrinks to fit); otherwise all of it.
+local function showSections()
+    local function show(id, on) self.UI.setAttribute(id, "active", on and "true" or "false") end
+    local editing = target ~= nil
+    show("headerPanel", not editing)
+    show("importSection", not editing)
+    -- editing: the panel just as tall as the editor, its top where it was
+    local h = editing and EDIT_H or PANEL_H
+    self.UI.setAttribute("importPanel", "height", tostring(h * PANEL_DETAIL))
+    self.UI.setAttribute("importPanel", "position", panelPosition(h))
+end
+
+-- Checks the spots every half second: a model newly put on one brings its
+-- appearance into the editor (the default if it has none; the first
+-- newcomer's if several arrive together), and while any model stands on a
+-- spot the panel shows just the editor, whose changes go to all of them.
+-- When the last one leaves, the editor keeps the appearance and the panel
+-- goes back to what it was.
+local function checkSpot()
+    local now = modelsOnSpots()
+    local same = #now == #targets
+    for i = 1, #now do same = same and now[i] == targets[i] end
+    if same then return end
+    local was, newcomer = {}, nil
+    for _, o in ipairs(targets) do was[o] = true end
+    for _, o in ipairs(now) do
+        if not was[o] then
+            newcomer = newcomer or o
+            pcall(function() o.highlightOn({ 0.9, 0.8, 0.4 }, 1) end)
+        end
+    end
+    local changed = (#now == 0) ~= (#targets == 0)
+    targets, target = now, now[1]
+    if newcomer then edit = fullLooks(parseLooks(newcomer.getGMNotes())) end
+    drawEditor()
+    if changed then showSections() end
+end
+
+-- The appearance spots as snap points on this object. Snap points are saved
+-- with the object, so the spots of an earlier load stay unless removed --
+-- after LOOKS_SPOT_* changed they would pile up beside the new ones. So the
+-- old spots go first: those remembered in the save (`old`), and any on the
+-- row's line near it (for objects saved before spots were remembered).
+-- The object's other snap points are kept.
+local function addSnapPoint(old)
+    if not (self.getSnapPoints and self.setSnapPoints) then return end
+    local c = LOOKS_SPOT_CENTER
+    local reach = (LOOKS_SPOT_COUNT + 1) / 2 * LOOKS_SPOT_GAP + LOOKS_SPOT_GAP
+    local function ours(q)
+        local x, z = q.x or q[1] or 0, q.z or q[3] or 0
+        for _, s in ipairs(old or {}) do
+            if math.abs(x - (s[1] or 0)) < 0.01 and math.abs(z - (s[3] or 0)) < 0.01 then return true end
+        end
+        return math.abs(z - c[3]) < 0.01 and math.abs(x - c[1]) <= reach
+    end
+    local pts = {}
+    for _, sp in ipairs(self.getSnapPoints() or {}) do
+        if not ours(sp.position or {}) then pts[#pts + 1] = sp end
+    end
+    for _, spot in ipairs(looksSpots()) do
+        pts[#pts + 1] = { position = spot, rotation = { 0, LOOKS_SPOT_TURN, 0 }, rotation_snap = true }
+    end
+    self.setSnapPoints(pts)
+end
+
+function onSave()                            -- the editor, the last gang, the spots
+    return JSON.encode({ version = VERSION, looks = edit, gang = lastGang, spots = looksSpots() })
+end
+
+-- Tagged as the importer -- and, an object that was the Mundane Controller
+-- too before the Controller had an object of its own, no longer tagged as
+-- that: cards would ask it for dice and Bottle Checks. The version comes
+-- from the updater block at the end of the published script (none: "?").
+function onLoad(saved)
+    if Updater_stateVersion then
+        local _
+        _, VERSION = Updater_stateVersion(saved)
+    end
+    local ok, data = pcall(function() return JSON.decode(saved or "") end)
+    if ok and type(data) == "table" then
+        if data.looks then edit = fullLooks(data.looks) end
+        lastGang = data.gang
+    end
+    pcall(function()
+        if self.hasTag(CONTROLLER_TAG) then self.removeTag(CONTROLLER_TAG) end
+        if not self.hasTag(IMPORTER_TAG) then self.addTag(IMPORTER_TAG) end
+    end)
+    self.UI.setXml(detailed(panelXml(), "importPanel"), panelAssets())
+    addSnapPoint(ok and type(data) == "table" and data.spots or nil)
+    Wait.frames(drawEditor, 2)
+    Wait.time(checkSpot, 0.5, -1)
+end
+
+-- The roster box's text (its hint counts as empty). A pasted roster is
+-- never cleared by the importer: it stays for another import (a model that
+-- was missing) until someone deletes it or the table is reloaded (it
+-- isn't saved).
+function onRosterInputChanged(player, value, id)
+    rosterText = value or ""
+    if rosterText == ROSTER_HINT then rosterText = "" end
+end
+
+-- Leaving the box with a roster in it shows it from the top again: the text
+-- is emptied and put back, which moves the caret -- and with it the view --
+-- to the start (TTS leaves it where the paste ended, at the bottom).
+function onRosterInputDone(player, value, id)
+    local text = value or rosterText
+    if text == nil or text == "" or text == ROSTER_HINT then return end
+    self.UI.setAttribute("rosterInput", "text", "")
+    self.UI.setAttribute("rosterInput", "text", text)
+    rosterText = text
+end
+
+-- The header's Feedback button: the feedback form on a tablet past the panel.
+function onFeedback(player, value, id)
+    FEEDBACK.open(PANEL, PANEL_H)
+end
+
+function confirmImport(player, value, id)
+    if (rosterText or ""):match("^%s*$") then
+        printToAll(IMPORT_PREFIX .. "Nothing to import -- paste a roster export first.", { 1, 0.5, 0.1 })
+        return
+    end
+    runImport(rosterText, player)
+end
+
+-- The changes history: shown over the panel, and hidden again.
+local historyOpen = false
+function onHistory(player, value, id)
+    historyOpen = not historyOpen
+    self.UI.setAttribute("historyPopup", "active", historyOpen and "true" or "false")
+end
+
+-- A colour typed in: taken if it is one, otherwise the field goes back.
+function onHexEdit(player, value, id)
+    local key = tostring(id or ""):match("^hex_(%a+)$")
+    local c = hexColor(value)
+    if key and c then edit[key] = c end
+    editChanged()
+end
+
+-- A swatch beside a colour, a whole theme, a background preset.
+function onSwatch(player, value, id)
+    local key, n = tostring(id or ""):match("^pre_(%a+)_(%d+)$")
+    local hex = key and SWATCHES[key] and SWATCHES[key][tonumber(n) or 0]
+    if hex then edit[key] = hex; editChanged() end
+end
+
+function onTheme(player, value, id)
+    local th = THEME_PRESETS[tonumber(tostring(id or ""):match("^theme_(%d+)$")) or 0]
+    if not th then return end
+    for _, c in ipairs(LOOKS_COLORS) do edit[c.key] = th[c.key] end
+    editChanged()
+end
+
+function onFramePreset(player, value, id)
+    local f = framePresets()[tonumber(tostring(id or ""):match("^frame_(%d+)$")) or 0]
+    if not f then return end
+    edit.frame, edit.trim, edit.tint = f.frame, f.trim or "", "yes"
+    editChanged()
+end
+
+-- A background of one's own: shown as it is (untinted, no trim). Emptied:
+-- back to none. (Trimmed with trim(): TTS's Lua fails a URL-long string
+-- with "pattern too complex" on a trimming pattern with a lazy capture.)
+function onFrameUrl(player, value, id)
+    local url = trim(tostring(value or ""))
+    if url == FRAME_URL_HINT then url = "" end
+    if url == "" then edit.frame, edit.trim, edit.tint = "none", "", "yes"
+    else edit.frame, edit.trim, edit.tint = url, "", "no" end
+    editChanged()
+end
+
+-- "Apply UI to the whole Gang" and "Reset UI for the whole Gang": every
+-- model of the gang (see currentGang), at once; without a gang, they say so.
+local function wholeGang(looks, done, colour)
+    local gang = currentGang()
+    if not gang then
+        printToAll(CHAT_PREFIX .. "No gang yet: import one, or put one of its models on the appearance spot.",
+            { 1, 0.7, 0.2 })
+        return
+    end
+    local n = 0
+    for _, obj in ipairs(cardModels(gang)) do writeLooks(obj, looks); n = n + 1 end
+    local name = gang                           -- the gang's name, without its tag's prefix
+    for _, pre in ipairs({ GANG_TAG, OLD_TAGS[1], OLD_TAGS[2] }) do
+        if name:sub(1, #pre) == pre then name = name:sub(#pre + 1) end
+    end
+    printToAll(string.format("[%s] %s on %d model(s) of %s.", name, done, n, name), colour)
+end
+
+function onApplyAll(player, value, id)
+    wholeGang(edit, "This appearance is now", { 0.3, 1, 0.4 })
+end
+
+function onResetAll(player, value, id)
+    wholeGang(nil, "Appearance reset to the default", { 1, 0.7, 0.2 })
+end
+
+-- Every card on the table older than this importer's brought up to date
+-- (see upgradeCard) -- the Mundane Controller asks for it before it calls
+-- on every fighter (a new turn, Clear All Conditions). Returns the GUIDs
+-- of the models whose card was: they take calls again once reloaded.
+--   A card found current is remembered with its MUNDA_STAMP (CURRENT, by
+-- GUID: the mark a card sets anew each time it loads), so its script --
+-- most of a megabyte -- isn't read again every turn, only once it has
+-- loaded again.
+local CURRENT = {}
+function upgradeCards()
+    local out = {}
+    for _, obj in ipairs(getAllObjects()) do
+        if IMPORT_TAG ~= "" and obj.hasTag(IMPORT_TAG) then
+            local guid = obj.getGUID()
+            local seen, same = CURRENT[guid], false
+            if seen then
+                local okV, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+                same = okV and stamp ~= nil and stamp == seen
+            end
+            if not same then
+                CURRENT[guid] = nil
+                local ok, script = pcall(function() return obj.getLuaScript() end)
+                script = ok and tostring(script or "") or ""
+                if script:find("@@MUNDA_IMPORT@@", 1, true) then
+                    if not cardIsCurrent(script) then
+                        upgradeCard(obj, script)
+                        out[#out + 1] = guid
+                    elseif script:find("MUNDA_STAMP", 1, true) then
+                        local okV, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+                        if okV and stamp ~= nil then CURRENT[guid] = stamp end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  The fighter card (Munda HP Display), embedded: the script every
+--  imported model gets (copied in whole from Munda_HP_Display.lua, where
+--  it is kept).
+-- ══════════════════════════════════════════════════════════════
+--@@CARD_BEGIN
+CARD_SCRIPT = [=[
+--[[ ==========================================================================
+     MUNDA HP DISPLAY -- Necromunda fighter card (XML UI) for Tabletop Simulator
+     ==========================================================================
+
+     The script of a fighter model. The card builds itself from the
+     `fighter` table, so an importer only ever has to call:
+
+         obj.call("setFighter", { ... })
+
+     LAYOUT (mirrors hp_bar_sketch.jpg)
+
+         S                 [ ####  health segments  #### ]                  W1
+           A               [  M  I  T  Sv  BS  WS  S  A  ]            W2
+           C               [ 4"  5  4  6+  3+  5+  6  2  ]            W3
+                           [   Skill  ◆  Skill  ◆  Skill ]   (hovered, or
+                                                             at 0 wounds:
+                                                             the wargear)
+                                  ()  ()  conditions
+
+         S  = status (the big diamond on the left point)
+         A  = actions          C  = conditions          (left, small diamonds)
+         W1 = primary weapon   W2 / W3 = other slots    (right, mirrored)
+         Entering the stat headers swaps BS / WS / S / A for Ld / Wil / Int /
+         Cl until the cursor leaves the stats. A left click on a stat tests
+         it (real dice, thrown under the Mundane Controller's panel -- or
+         beside the model without one -- their faces then shown over the
+         stats for a few seconds; see DICE ROLLS); a right click raises it by one
+         (violet), round from its highest to its lowest (see STAT.LIMITS),
+         and while it is changed a Set plate above it keeps the number
+         (light blue while it differs from the statline) -- otherwise it
+         goes back when the cursor leaves. Hovering a stat that something
+         changes lights up where that comes from -- the skill or wargear
+         under the stats, the weapon's diamond, the condition's icon -- in
+         the colour it gives the stat.
+         Under the stats, the fighter's skills (see SKILLS) by name -- or,
+         while the cursor is on them or the fighter is at 0 wounds or
+         Seriously Injured (skills disabled: nothing a skill gives counts,
+         see SKILL.off), its wargear (see WARGEAR); hovering a name shows
+         it, and what it does, over the stats. The conditions that are on
+         hang under the card.
+
+     FLYOUTS -- the panels that open beside the card, one at a time. Hovering
+     a trigger shows its flyout, which closes again once the cursor has left
+     both.
+         S   the status picker: the other statuses as three more diamonds,
+             which together with S make one big diamond. S also runs the
+             fighter's round: a new turn (or a right click on S) readies
+             it -- S turns green; a left click then activates it -- A and
+             C turn green, its two actions (one if it was Suppressed, which
+             it no longer is -- unless it has Spring Up and passes its
+             Agility test); once they are spent, another left click
+             finishes the activation. One that started it Seriously
+             Injured then goes Out of Action (an enemy within 1") or makes
+             a Recovery test -- both panels over the stats (see
+             ACTIVATION, activate, completeActivation)
+         A   the actions panel, off the card's left tip, with two tabs on
+             top: Generic -- the actions the current status allows (see
+             STATUS_ACTIONS) -- and Special: the dice, Agility Test,
+             Falling Down, Nerve Check, Recovery Test and Out of Action,
+             then the fighter's Wyrd powers and the skills and wargear that
+             are actions (Medicate, Sprint; a Drop Rig's Descend -- the
+             wargear's stay at 0 wounds, when the skills' go)
+         C   the conditions panel, off the left tip: named toggles, each with
+             its icon. A condition that is on also shows its icon in the bar
+             under the card; clicking it there takes it off again
+         W#  that weapon's profiles, off W1's tip on the right (the buttons
+             in each profile's row: see PROFILE_MODES), under its name --
+             without the accessories the roster puts in brackets after it
+             ("Lasgun (Mono-Sight)"): those follow each profile's traits
+             (see TRAIT_RULES.named)
+
+     HOW IT UPDATES -- setXml rebuilds every element, so the card is only
+     rebuilt when its structure changes (a new fighter, weapon or stat line,
+     new art). Everything that changes in play -- wounds, status,
+     conditions, the stat hover, which flyout is open -- is changed in place
+     through setAttr / setText, which remember what TTS already shows and
+     send only what differs.
+
+     Every diamond is a square turned 45 degrees, built from stacked pieces so
+     its icon stays upright inside the turned frame:
+         1. rotated <Image>  -- the diamond fill / art
+         2. upright <Image>  -- the icon (or a <Text> stand-in)
+         3. rotated <Button> -- transparent hit area + hover tint, drawn on top
+     Their borders come from the diamond_frame art (ASSETS diamond_frame),
+     one image per diamond, turned with it.
+
+     BORDERS. Best as art: an image with its border drawn in (ASSETS
+     diamond_frame, edge_line) is one element, and the GPU filters it
+     smoothly as the camera pulls back. Thin UI geometry is crisp up close
+     but shimmers at range (nothing anti-aliases it), and TTS's `outline`
+     attribute is worse still (four soft offset copies: haze), so nothing
+     here uses it. Text is bold throughout, which also holds up better at
+     range.
+
+     BASES AND ENGAGEMENT -- each fighter knows its base size (measured,
+     snapped to a standard size; see CFG.baseSizes). Putting a fighter down
+     sets Engaged on it and on every enemy within 1" base to base, and back
+     to Active for those left with no enemy in range (see checkEngagement).
+
+     DICE ROLLS -- every roll the card makes (stat tests, A's Special tab,
+     Recovery tests, Nerve Checks, a weapon's ATK / RF, a Reload) is thrown
+     by the Mundane Controller, in a line under its panel, when there is
+     one on the table -- else beside the model (see throwDice). While they
+     fall the panel over the stats says "Rolling Dice..." and the bar under
+     them names the roll (a test with the number to reach: "Check: Cool
+     (7)", "Check: Ballistic Skill (4+)"; an attack its weapon: "Autogun
+     (RF1)"); then the faces show, in the order thrown -- a test's and an
+     attack's hit dice in green passed, orange failed; "∑9", "∑4", "Miss"
+     or an Injury result at the panel's right end, what the Ammo checks
+     came to (OUT / JAM) at its left end -- on every player's copy for at
+     least CFG.diceShow seconds, longer while the cursor stays on them
+     (ACTIVATION.showDice), and the result is said in chat. Firepower and
+     Injury dice have faces of their own (ACTIVATION.FIREPOWER /
+     INJURY_DICE). An attack's hits on the one enemy fighter the player
+     has selected are rolled to wound once the hit roll has shown: S
+     against the enemy's T, or Toxin (N+)'s N (see rollWounds).
+
+     THE RULES IT PLAYS -- conditions, skills and wargear change the
+     stats they affect (see CONDITIONS, SKILLS, WARGEAR). A weapon's ATK /
+     RF rolls its hit dice, Firepower dice and Ammo checks (see
+     rollAttack), then its Wound roll on a selected enemy, whose own card
+     rolls its saves and takes the damage that gets through (see
+     takeSaves); a Reload puts a profile that is OUT back (see
+     reloadWeapon). Two actions
+     act on the fighters their player has selected: Treat Ally gives a
+     Seriously Injured friend within 1" one more Injury dice in its next
+     Recovery test, Group Activation makes its Leadership check and, when
+     passed, marks the Ready friends within 3" as group activated (see
+     useAction, groupActivation). In close combat a melee weapon's Hit
+     takes in an Assist or Interference, a second melee weapon makes one
+     attack only, and the combat skills give what they give (see
+     TRAIT_RULES.supportNear, TRAIT_RULES.opening, RULES.skills). A fall
+     (Falling Down on A's Special tab) takes its height, makes its
+     Agility test and does what the height left does: Suppressed, a wound
+     and an Injury dice, Out of Action (see fallingDown, ACTIVATION.land).
+     Wargear does what RULES.wargear says of it, at 0 wounds too: a save
+     bettered while Engaged, an action on the Special tab, a fall that
+     does no harm, one more Injury dice for a friend's Recovery test, a
+     boost to the stats until the next activation. A Wyrd's powers are
+     cast, disrupted and maintained, and do what they do (see
+     ACTIVATION.cast, ACTIVATION.manifest).
+     What is left of the game's rules (line of sight, what the other
+     actions do) has its clearly marked stubs in the STUBS section.
+========================================================================== ]]
+
+--============================================================================
+-- 1. CONFIG -- the card's settings
+--============================================================================
+
+local CFG = {
+    -- Where the card floats, in the object's local UI space: x and y along
+    -- the table, z up (negative is above the model); 100 UI units make a
+    -- world inch on a model of scale 1. The card's bottom edge floats headGap
+    -- inches above the model's head -- its height, measured on import (see
+    -- modelHeight) -- and `position` is only used while that is unknown.
+    -- `scale` is the card's size on a model of scale 1; it is divided by the
+    -- model's own scale, so the card looks the same on every model (and
+    -- follows a rescale).
+    position  = "0 0 -260",
+    scale     = "0.15 0.15 0.15",
+    headGap   = 0.25,
+    -- A card that sits too low or too high on its model is moved by hand:
+    -- while the cursor is on the fighter's name an arrow shows either side
+    -- of it (nameArrows: down on the left, up on the right), and each
+    -- press lowers / raises the card liftStep inches -- at most liftMax
+    -- either way. Kept with the fighter (see setLift).
+    nameArrows = { down = "▼", up = "▲" },
+    liftStep   = 0.1,
+    liftMax    = 5,
+
+    -- Facing the players. The card stands upright (standAngle: -90 upright,
+    -- 0 flat on the table) and every seated player gets a copy of their own,
+    -- visible only to them, that turns to face them. faceSmooth eases the
+    -- turn (seconds; 0 = instant); faceOffset turns the front to the viewer.
+    -- Once every copy faces its player the card looks again only every
+    -- faceIdle seconds (until a view turns), not every frame.
+    -- With billboard = false there is one shared copy, turned `yaw` degrees.
+    billboard  = true,
+    standAngle = -60,
+    faceOffset = 180,
+    faceSmooth = 0.05,
+    faceIdle   = 0.1,
+    yaw        = 0,
+
+    -- How finely text is rasterised. TTS draws each glyph once at its
+    -- fontSize, and the card is built large and scaled down (scale above),
+    -- so at 1 every glyph has far more texels than the screen shows and is
+    -- minified hard from a normal table camera. Lower values (0.5, 0.35)
+    -- build text at that fraction and scale it back up -- sharper at range,
+    -- a little softer right up close. Layout is unaffected.
+    textDetail = 0.425,
+
+    startVisible = true,
+
+    -- "" = everyone. Otherwise a TTS visibility string, e.g. "Black|White":
+    -- only those players get a copy.
+    visibility = "",
+
+    -- The symbol in front of the fighter's name for its rank (fighter.rank,
+    -- any case), rankScale times the name's size; an unknown rank shows none.
+    rankSymbols = { leader = "♛", champion = "♚", ganger = "♞", prospect = "♟", brute = "♜" },
+    rankScale = 0.75,
+    -- ... and the sign after it while the fighter is group activated (taken
+    -- along by a friend's Group Activation, see groupActivation), until it
+    -- activates.
+    groupMark = "🗲",
+    -- ... and the sign before the name of a Wyrd power in effect, under the
+    -- stats (its name purple too, see SKILL.label).
+    wyrdMark = "⏳",
+    -- The signs over a die a weapon trait had a hand in (see
+    -- ACTIVATION.diceView): Shock (N+) -- the hit die that reached N, and the
+    -- Wound roll dice it made automatic 6s -- and Blaze (N+) -- the Wound
+    -- roll dice that made more hits, and every die of those hits.
+    shockMark = "🗲",
+    blazeMark = "♨",
+    -- The cover question's "yes" diamond (see takeSaves); its "no" is X.
+    coverYes = "✔",
+
+    -- The stat block, left to right, in equal columns. Once the cursor
+    -- enters the header row the hover list shows instead, until it leaves
+    -- the block (both lists the same length). A header or value too wide
+    -- for its column shrinks.
+    statOrder      ={ "M", "I", "T", "Sv", "BS", "WS",  "S",   "A"  },
+    statOrderHover = { "M", "I", "T", "Sv", "Ld", "Wil", "Int", "Cl" },
+
+    -- How long a flyout lingers after the cursor leaves it (seconds).
+    popupLinger = 0.25,
+    -- ... and after a click on the tabs over A's panel swapped it for the
+    -- other one, which may be shorter or taller: longer, so the cursor can
+    -- follow the tabs to where they are now.
+    tabLinger = 1,
+
+    -- Dice (stat tests, A's Special tab, Recovery tests, Nerve Checks): the
+    -- Mundane Controller (controllerTag, below) throws them in a line under
+    -- its panel; its answer comes once they have settled, or after
+    -- diceWait seconds the roll is made digitally. Meanwhile the panel over
+    -- the stats says "Rolling Dice..." and the bar under them what is
+    -- rolled; then the faces (a stat check's green passed, orange failed)
+    -- and the result beside them show for diceShow seconds whatever the
+    -- cursor does -- longer while the cursor is on either, going diceLeave
+    -- seconds after it has left them (never before diceShow). A roll that
+    -- follows another (a Wound roll after its hit roll) is thrown dicePause
+    -- seconds after that one showed (a rule: see RULES.cfg). Clicks on the
+    -- Special tab's Roll Dice / Firepower / Injuries within diceJoin
+    -- seconds of each other add a die to one roll.
+    -- Without a Controller on the table: real D6, dropped on a clear
+    -- square diceArea across, diceGap beyond the model's base (world units,
+    -- ~inches), on the side facing the player who rolled if that is free.
+    -- They stay diceKeep seconds, then vanish. With no clear spot nearby
+    -- the roll is made digitally instead. Each die spawns tumbling --
+    -- diceSpin (radians a second, at least half of it about every axis) --
+    -- and pushed up to dicePush sideways, for a livelier roll.
+    diceShow = 4.5,
+    diceLeave = 1,
+    diceWait = 45,
+    diceJoin = 1,
+    diceArea = 3,
+    diceGap  = 0.5,
+    diceKeep = 6,
+    diceSpin = 14,
+    dicePush = 1.5,
+
+    -- Chat: every line the card sends starts with its gang's name in
+    -- brackets ("[Goliaths] ", from its gang tag -- see gangTag), or
+    -- infoPrefix for a model in no gang. A status change is announced in
+    -- the new status's colour (STATUSES) and flashes the model in it for
+    -- statusFlash seconds.
+    infoPrefix  = "[Info] ",
+    statusFlash = 0.5,
+    -- Fight and the Shoot actions, taken from A's panel, light up the
+    -- diamonds of the weapons they are for this many seconds (see
+    -- ACTIVATION.pulseWeapons).
+    weaponFlash = 1.5,
+
+    -- The glow round the card (ASSETS status_glow): the white art tinted in
+    -- the fighter's status colour (STATUSES), this strong (0-1; 0 = none).
+    statusGlow = 0.9,
+
+    -- The chevrons either side of the card while the fighter is activated
+    -- (see ui.activeXml): the status's colour, this strong (0-1; 0 = none).
+    activeMark = 1,
+
+    -- The diamond gradient (ASSETS diamond) multiplies its tint -- 0.88 in
+    -- the middle, 0.30 at the tips -- so on the dark plain fill (COL.diamond)
+    -- and the dice's faces it hardly shows. With the art set those tints are
+    -- brightened this many times (each channel, up to white; see
+    -- ui.gradTint): the middle a little lighter than the flat colour, the
+    -- tips darker. 1 = the gradient on the colour as it is.
+    diamondDepth = 1.35,
+
+    -- A / C are lit in the fighter's status colour (like the glow round the
+    -- card) while their action is still to use; the ones a hovered attack
+    -- or action would spend go this much of the way to black.
+    spendShade = 0.55,
+
+    -- Bases. Every range in Necromunda is measured base to base, so each
+    -- fighter knows its base: measured from the model (see measureBase) and
+    -- snapped to the nearest of baseSizes (mm; 1" = 25.4 mm) within baseSnap
+    -- mm, so a miniature overhanging its base or a slightly scaled model
+    -- still lands on a real size. A line "Base: 32mm" in the model's
+    -- description overrides it; baseDefault is used while nothing can be
+    -- measured.
+    baseSizes   = { 25, 28.5, 32, 40, 50, 60 },
+    baseSnap    = 2.5,
+    baseDefault = 32,
+
+    -- Engaged, automatically: when a fighter is put down, it and every enemy
+    -- whose base is within engageRange inches of its base (a rule: see
+    -- RULES.cfg; the limit included, engageSlack absorbs float error)
+    -- become Engaged -- Active and Suppressed ones only; Seriously Injured
+    -- ones neither change nor engage anyone. One left with no enemy in range
+    -- goes back to Active. Bases more than engageLevel apart vertically
+    -- (another floor) never engage. The check waits up to engageSettle
+    -- seconds for the model to come to rest. Fighters are found by the
+    -- importer's tags: importTag on every card, gangTag + the gang's name
+    -- telling friend from enemy (a tag a player can type on a model by
+    -- hand, so no " - " in it: TTS won't take one typed in). oldGangTags:
+    -- the importer's earlier gang tags, still understood.
+    autoEngage   = true,
+    engageSlack  = 0.005,
+    engageLevel  = 1,
+    engageSettle = 3,
+    importTag    = "Mundane Import",
+    gangTag      = "Mundane Gang_",
+    oldGangTags  = { "Mundane Gang - ", "Mundane Controller_" },
+
+    -- Nerve Check (A's Special tab): 2D6 at or under Cl. A friend of a rank
+    -- in nerveRanges within its range, base to base, and in sight lends its
+    -- Cl when that is higher (the ranges, and who must test when a fighter
+    -- goes Out of Action, are rules: see RULES.cfg). Sight is nerveRays
+    -- rays from this model's upper part to the other's (its middle, then
+    -- either side, nerveSpread of its width out); any one clear will do.
+    -- Only scenery blocks them: fighters (importTag) never do.
+    nerveRays   = 3,
+    nerveSpread = 0.35,
+    -- An enemy Wyrd disrupting a cast must have sight of the caster. The
+    -- caster is taken as a cylinder round its base's centre, its base's
+    -- radius wide and as tall as its bounding box; rays go from the
+    -- disrupter's head -- `from`, a fraction of its bounding box's height,
+    -- straight above its base's centre -- to the cylinder at each `to`
+    -- height (a fraction of its height) and, at each, at every `across`
+    -- point (a fraction of its radius to either side, square to the line
+    -- between the two); any one ray clear will do, and only scenery blocks
+    -- them.
+    wyrdSight = { from = 0.85, to = { 0.85, 0.35 }, across = { 0, -0.9, 0.9, -0.5, 0.5 } },
+    -- The Mundane Controller carries this tag: it throws the card's dice
+    -- (see throwDice), a fighter going Out of Action tells it (its
+    -- Bottle Check), and it keeps the table's own rules (see loadRules).
+    controllerTag = "Mundane Controller",
+}
+
+--============================================================================
+-- 2. COLOURS -- the built-in look, and the fallback whenever an icon or
+--    background image has not been supplied yet.
+--============================================================================
+
+local COL = {
+    frame        = "#14161Af2",   -- the tint of tintable frame art
+    frameTrim    = "#B08C40ff",   -- the tint of a frame's trim art (the looks' trim)
+    diamond      = "#20242Bff",   -- every diamond's fill: the tint of the diamond
+                                  -- gradient (flat until the art is set)
+    ready        = "#62F384ff",   -- S while ready to activate: the tint of the
+                                  -- diamond gradient (a darker shade of it until
+                                  -- the art is set). A / C's "action to use" is
+                                  -- the status's colour (see ui.actionLit)
+    iconText     = "#E8C97Aff",   -- text shown on a button with no icon art yet
+    statusInk    = "#15171Bff",   -- ... on S's picker's options, in their status colours
+    hover        = "#FFFFFF33",   -- hover tint on every button
+    press        = "#FFFFFF55",
+    clear        = "#00000000",
+
+    hpFull       = "#C0392Bff",   -- a wound the fighter still has
+    hpEmpty      = "#4B515Cff",   -- a wound lost: kept well clear of
+                                  -- the card colour so it stays visible far off
+    hpHover      = "#E05A4Bff",
+    hpOut        = "#FF5A1Fff",   -- frame round the bar at 0 wounds, and its
+                                  -- "Skills disabled" over the bar
+    hpBack       = "#000000ff",   -- behind the bar on the compact card (its edges)
+
+    label        = "#9AA3AE",     -- M / I / Sv ... header row
+    value        = "#F2F2F2",     -- 4" / 5 / 6+ ... value row
+    valueMod     = "#F0916E",     -- a value made worse (orange): a condition, an
+                                  -- open Unwieldy weapon's I ...
+    valueUp      = "#6EE07A",     -- ... made better (green): I attacking at "A + 1" ...
+    valueBoth    = "#F2D24B",     -- ... both at once, or a bonus the stat's limit
+                                  -- swallows (yellow)
+    valueUser    = "#7FD6FF",     -- a stat whose hand-set number was kept as its
+                                  -- base; every other colour beats it, so a
+                                  -- condition or weapon still shows. Top is ...
+    valuePending = "#E9A6FF",     -- ... a stat changed by clicks and not kept yet
+                                  -- (it goes back when the cursor leaves the stats)
+    statPlate    = "#0C0E12f2",   -- the Set plate over a hovered, changed value
+    accent       = "#E8C97A",     -- weapon names
+    nameShadow   = "#000000FF",   -- the shadow under the fighter's name (which is
+                                  -- in the text colour, `value`)
+
+    popupBg      = "#0C0E12f2",   -- every flyout's background (plain, never art)
+    popupHead    = "#8A93A0",
+    popupText    = "#EDEDED",
+    popupTraits  = "#B9A46A",
+    profileFill  = "#171A20ff",   -- the framed box around each weapon profile
+    profileEdge  = "#6B5B33",     -- its border, the rule above the traits, and
+                                  -- the edge of every toggle in A's / C's panel
+    profileOut   = "#5A2E96ff",   -- the box of a profile that is out of ammo ...
+    profileJam   = "#8A2020ff",   -- ... and of one that is jammed (or SPENT); both
+                                  -- bright enough to tell from the plain box at range
+    ammoOut      = "#B48CF0",     -- OUT on its button and OUT OF AMMO on the traits line
+    ammoJam      = "#E06B6B",     -- JAM on its button and JAMMED on the traits line
+    ammoSpent    = "#E06B6B",     -- SPENT on a Limited / Single Shot profile's button: red like JAM
+    ammoCombi    = "#F2D24B",     -- Combi on its button: yellow like the Hit it lowers
+    wyrdInk      = "#B47AFF",     -- everything a Wyrd action says in chat, and a Continuous
+                                  -- power's name under the stats while it is in effect (purple)
+    traitOn      = "#4CFF6A",     -- a trait at work in the traits line: Reliable still
+                                  -- to use, a Shield / Parry bettering the save (bright green)
+    traitUsed    = "#FF4A4A",     -- ... and Reliable once used (red)
+    itemSpent    = "#5C6168",     -- wargear burnt out for the battle under the stats
+                                  -- (a Refractor Shield: dark grey, below the headers' grey)
+    ammoSpared   = "#7CC8FF",     -- the Ammo check Reliable ignored, on its die and
+                                  -- beside the dice (light blue)
+    marksman     = "#7CC8FF",     -- a Marksman's SR and LR, and the sign between
+                                  -- them (light blue)
+    weaponBlocked = "#E35049ff",  -- a weapon's diamond while it can't be used (see
+                                  -- TRAIT_RULES.usable): the diamond art's tint
+                                  -- (darker without it)
+    actionBg     = "#262B35ff",   -- the buttons beside each weapon profile
+
+    toggleOff    = "#1D2027ff",   -- an action / condition that is off
+    toggleOn     = "#6B5B33ff",   -- ... and one that is on
+    toggleTextOff = "#FFFFFFff",   -- the names in A's / C's panels, off ...
+    toggleTextOn  = "#FFFFFFff",   -- ... and on (the box colour shows which)
+    ammoFine      = "#9AA3AE",     -- AM on a profile's ammo button, while fine
+    iconPlate    = "#2B303Bff",   -- stands in for a condition icon with no art
+
+    -- An action's fill in A's panel, by its type (see ACTION_TYPES). Dark,
+    -- so the white names stay readable.
+    actMovement  = "#4E3F0Cff",   -- dark yellow
+    actClose     = "#5A1A1Aff",   -- dark red
+    actShooting  = "#1A2C52ff",   -- dark blue
+    actUtility   = "#12494Aff",   -- dark turquoise
+    actWyrd      = "#4A2A6Eff",   -- semi-dark purple
+    actCost      = "#FFFFFFff",   -- the S / D in an action's diamond
+    actDimInk    = "#80868Fff",   -- a dimmed action's name and S / D (used this
+                                  -- activation, or a D with one action left);
+                                  -- its fill fades toward the panel background
+    badge        = "#0C0E12e6",   -- plate behind a stacked condition's "x2"
+
+    -- A roll's dice, shown over the stats (see ACTIVATION.diceXml), each
+    -- face like the Mundane Controller's custom dice:
+    dicePanel    = "#000000ff",   -- the panel behind them: black
+    skillBack    = "#262A31ff",   -- the skills' plate with no frame art, over the
+                                  -- hp_segment gradient (black multiplied stays
+                                  -- black): near black, with depth; without the
+                                  -- art the plate is dicePanel's black
+    diceFace     = "#1D2027ff",   -- a D6's face ...
+    diceInk      = "#E8C97A",     -- ... its pips, and every face's edge (gold)
+    diceFire     = "#4A1616ff",   -- a Firepower dice's face (dark red) ...
+    diceFireInk  = "#F2EAD8",     -- ... its hits (ivory) ...
+    diceAmmo     = "#FF8C3A",     -- ... and the Ammo check on its 1 (orange)
+    diceAmmoMark = "#F2EAD81A",   -- the Ammo trait's D6: its faint cartridge behind the
+                                  -- pips (ivory, so green / orange pips stay clear on it)
+    diceHurt     = "#141416ff",   -- an Injury dice's face (near black), its results:
+    diceInjured  = "#F2D24B",     --     Injury (yellow)
+    diceSerious  = "#FF8C3A",     --     Serious Injury (orange)
+    diceOut      = "#FF4040",     --     Out of Action (red)
+    -- the signs over a die a weapon trait had a hand in (see CFG.shockMark):
+    diceShock    = "#FFE14A",     --     Shock (electric yellow)
+    diceBlaze    = "#FF7A2E",     --     Blaze (fire orange)
+}
+
+--============================================================================
+-- 2b. LOOKS -- the appearance: the five colours (and the background art)
+--     each model can have its own of. They live in the model's GM Notes as
+--     a block the Mundane Importer's appearance editor writes (or one
+--     typed by hand):
+--         [Mundane Appearance]
+--         background = #1D2027
+--         headers    = #9AA3AE
+--         text       = #F2F2F2
+--         accent     = #E8C97A
+--         edges      = #6B5B33
+--         frame      = none             (a URL; blank or none: no frame)
+--         trim       = https://...png   (the frame's trim art, or blank)
+--         tint       = yes              (tint the frame art with background)
+--         [/Mundane Appearance]
+--     Every everyday colour in COL is one of the five or a fixed shade of
+--     one (LOOKS_SHADES): a shade keeps its default offset from its base,
+--     so picking one colour moves the whole family. The other colours --
+--     wounds, conditions, hand-set stats, action types, ready -- mean
+--     something and stay as they are.
+--============================================================================
+
+local LOOKS_DEFAULT = {
+    background = "#1D2027",   -- anthracite: the card, diamonds, flyouts, boxes
+    headers    = "#9AA3AE",   -- gray: stat and column headers, AM, dimmed text
+    text       = "#F2F2F2",   -- white: values, the fighter's name, names in the panels, S / D
+    accent     = "#E8C97A",   -- gold: weapon names, diamond borders, button letters
+    edges      = "#6B5B33",   -- dark gold: box borders, rules, arrow frames
+    frame = "none", trim = "", tint = "yes",   -- no background art
+}
+local LOOKS_COLORS = { "background", "headers", "text", "accent", "edges" }
+
+-- Which of the five each COL entry follows.
+local LOOKS_SHADES = {
+    frame = "background", diamond = "background", popupBg = "background",
+    profileFill = "background", actionBg = "background", toggleOff = "background",
+    iconPlate = "background", badge = "background", statPlate = "background",
+    diceFace = "background",
+    label = "headers", popupHead = "headers", ammoFine = "headers", actDimInk = "headers",
+    value = "text", popupText = "text", toggleTextOff = "text", toggleTextOn = "text",
+    actCost = "text",
+    accent = "accent", iconText = "accent", popupTraits = "accent", diceInk = "accent",
+    profileEdge = "edges", toggleOn = "edges", frameTrim = "edges",
+}
+local looks = {}                   -- this model's looks, in force (see applyLooks)
+for k, v in pairs(LOOKS_DEFAULT) do looks[k] = v end
+
+-- `s` without its leading and trailing spaces, by two plain gsubs: TTS's
+-- Lua gives up with "pattern too complex" on a trimming pattern with a lazy
+-- capture once the string is long (a URL).
+local function trimText(s)
+    s = tostring(s or ""):gsub("^%s+", "")
+    return (s:gsub("%s+$", ""))
+end
+
+-- "#RRGGBB" from a colour a person typed (with or without #, any case), or
+-- nil when it isn't one.
+local function hexColor(v)
+    local h = tostring(v or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
+    return h and ("#" .. h:upper()) or nil
+end
+
+-- Sets the looks in force: the five colours (anything missing or not a
+-- colour falls back to the default) and the frame settings, and every COL
+-- shade from them. Takes effect with the next build (refresh). COL_BASE is
+-- COL as written above, the shades' reference (kept in a block: the main
+-- chunk is at Lua's 200-local limit).
+local applyLooks
+do
+local COL_BASE = {}
+for k, v in pairs(COL) do COL_BASE[k] = v end
+function applyLooks(t)
+    t = type(t) == "table" and t or {}
+    for _, k in ipairs(LOOKS_COLORS) do looks[k] = hexColor(t[k]) or LOOKS_DEFAULT[k] end
+    for _, k in ipairs({ "frame", "trim" }) do looks[k] = trimText(t[k]) end
+    looks.tint = tostring(t.tint or "yes"):lower():match("^%s*n") and "no" or "yes"
+    local function ch(hex, i) return tonumber(hex:sub(i, i + 1), 16) end
+    for key, base in pairs(LOOKS_SHADES) do
+        local from, to, c = LOOKS_DEFAULT[base], looks[base], COL_BASE[key]
+        local out = "#"
+        for i = 2, 6, 2 do
+            out = out .. string.format("%02X", math.max(0, math.min(255, ch(c, i) + ch(to, i) - ch(from, i))))
+        end
+        COL[key] = out .. c:sub(8, 9)             -- any alpha as it was
+    end
+end
+end
+
+--============================================================================
+-- 3. ASSETS -- the card's art, by URL (any image URL TTS can load). One
+--    left "" falls back to a coloured shape plus a text label, so the card
+--    works before any art exists. The art that follows the looks is drawn
+--    in white and tinted here.
+--============================================================================
+
+local ASSETS = {
+    -- structural art
+    diamond      = "https://steamusercontent-a.akamaihd.net/ugc/16547195976271425103/49D2C958CA710AA5E444E2D02E739373CA6CFED6/",   -- a diamond's fill, drawn unturned (the card turns it):
+                         -- one white gradient, bright in the middle, dark at the tips,
+                         -- tinted with each colour -- every diamond's own fill
+                         -- (COL.diamond), the lit fill of S / A / C (ready,
+                         -- COL.ready green), a weapon an Engaged fighter can't
+                         -- use (COL.weaponBlocked red) and a hovered stat's
+                         -- weapon sources
+    edge_line    = "https://steamusercontent-a.akamaihd.net/ugc/13432909356284909624/B129FFCF81BACF983676DFEE7F7E71473280818C/",   -- every thin gold rule: the flyouts' edges and slants and
+                         -- the 0-wounds lines on the health bar: a white line with
+                         -- soft clear margins, tinted -- see edgeLineXml
+    diamond_frame = "https://steamusercontent-a.akamaihd.net/ugc/14782607483565015523/5A66DA23DFB6BD38FFD1692D8E5F435717D1134D/",  -- a diamond's frame, drawn unturned (the card turns it)
+                         -- with a clear middle, in white (tinted with the accent
+                         -- colour): the border of every diamond button --
+                         -- S, A, C, W1-W3 and the weapons past them, the status
+                         -- diamonds around S, the panels' diamond buttons, the
+                         -- dice -- drawn for LAY.frameArt: a soft line with a
+                         -- clear margin round it (art with its line on the
+                         -- image's edge would show every border outside its
+                         -- diamond)
+    action_bg    = "",   -- background of the buttons beside each profile
+    stat_die     = "https://steamusercontent-a.akamaihd.net/ugc/12001738551517573707/F2E806437431BEE65DD78832C9C5A286D327A301/",   -- the 3D die on the Recovery Test's roll button,
+                         -- in white
+    active_mark  = "https://steamusercontent-a.akamaihd.net/ugc/9281115089520461063/F53E226583EE872913D80FBF0C8F7B4628221C57/",   -- the "activated" chevrons beside the card (a bold >
+                         -- and its thinner echo, with a soft glow), in white,
+                         -- pointing right: tinted with the status's colour,
+                         -- turned round for the left side (see ui.activeXml)
+    status_glow  = "https://steamusercontent-a.akamaihd.net/ugc/11856102754185019043/36BA8FF309C1B7B07526BA0D1184035FE72C620D/",   -- the glow round the card's outline, in white:
+                         -- tinted with the status's colour (CFG.statusGlow); drawn
+                         -- for the box LAY.glowPad gives it
+
+    -- the health bar (its 0-wounds lines are edge_line, see hpOutXml)
+    hp_segment   = "https://steamusercontent-a.akamaihd.net/ugc/11541277657115134292/5B419CCE6C18B70D7A5D406D2000B5EFD8783580/",   -- every health segment: a white vertical
+                         -- gradient, dim - bright - dim, tinted with the segment's
+                         -- colour (full, lost, lit by the hover preview); also
+                         -- under the panels' strips, the weapon profiles' boxes
+                         -- and the skills' plate
+
+    -- status icons: the key must be  status_<key from STATUSES below>
+    status_active            = "",
+    status_suppressed        = "",
+    status_engaged           = "",
+    status_seriously_injured = "",
+
+    -- condition icons, drawn as they are: the key must be  cond_<key from
+    -- CONDITIONS below>
+    cond_intoxicated = "https://steamusercontent-a.akamaihd.net/ugc/12427786278172164376/AA173745B2A38A177D61660DBFAB78228C24D88F/",
+    cond_radphage    = "https://steamusercontent-a.akamaihd.net/ugc/11283545823330145507/00AF00B8C681D41AC21C1645D4D3333C3FF324E6/",
+    cond_concussion  = "https://steamusercontent-a.akamaihd.net/ugc/16460778255637512568/815E86C426D99F2AB9A3A39FBE9F7ED67EEDAD7C/",
+    cond_shackled    = "https://steamusercontent-a.akamaihd.net/ugc/11680554426613227028/7641F82C42A1B8070CF6A1C2303284BD63E885D0/",
+    cond_webbed      = "https://steamusercontent-a.akamaihd.net/ugc/9237916920720992997/255FB43CED5FBECDDD141DA6FBB6A52362F8E38A/",
+    cond_insanity    = "https://steamusercontent-a.akamaihd.net/ugc/18236725464291472752/C7B3F095D440FF3D5B1985EADB7DAB3BDA7EE8A1/",
+    cond_blind       = "https://steamusercontent-a.akamaihd.net/ugc/12149855709979826673/013CB13F42E3144D863E36F64AB61D890D240B70/",
+    cond_feared      = "https://steamusercontent-a.akamaihd.net/ugc/11151711576388475026/5CF74011F69D348EC17DDE57B18E82F26501266F/",
+    cond_maintaining_power = "https://steamusercontent-a.akamaihd.net/ugc/13568058608364494798/6E01547915A468E0DF55AE722FF1DECC72111E24/",
+    cond_special     = "https://steamusercontent-a.akamaihd.net/ugc/16116723763441808920/A54859B6D2FA77FE9B9B61FFF8C7F91B8E6B5C28/",
+
+    -- the two menu buttons on the left: A (actions) and C (conditions)
+    menu_actions    = "",
+    menu_conditions = "",
+
+    -- weapon icons, on W1-W3, by the weapon's type (see weaponType):
+    -- wpn_<type>. A weapon's own `icon` field (an ASSETS key, or a raw URL,
+    -- registered on the fly) overrides it. Until set, the type's short name
+    -- shows instead.
+    wpn_primary   = "",
+    wpn_secondary = "",
+    wpn_melee     = "",
+    wpn_grenade   = "",
+
+    -- the fighter's type, on A in place of its own icon / letter (see
+    -- fighter.category): the key must be  type_<category>
+    type_wyrd    = "",
+    type_loner   = "",
+    type_medic   = "",   -- Specialist (Medic)
+    type_tech    = "",   -- Specialist (Tech)
+    type_melee   = "",   -- Specialist (Brawler)
+    type_ranged  = "",   -- Specialist (Heavy, Gunner, Gunslinger, Scout, Sniper)
+    type_beast   = "",
+
+    -- a roll's faces over the stats (see ACTIVATION.diceXml), drawn in
+    -- white and tinted: the Firepower dice's Ammo check (also the
+    -- cartridge behind the Ammo trait's die), the Injury dice's three
+    -- results. Until set, "!",
+    -- INJ, S.I. and a dagger stand in. dice_out is Out of Action's icon
+    -- everywhere, tinted red elsewhere: the Special tab's Out of Action and
+    -- the Recovery Test's dagger button ("†" until set).
+    dice_ammo    = "https://steamusercontent-a.akamaihd.net/ugc/11665480591323161820/4F28BC74E0066C560A47499AB8AA53F03DE6EA92/",
+    dice_injured = "https://steamusercontent-a.akamaihd.net/ugc/17020447175444252033/0056BCF18973FB6173680CDE23D66B3B77A6330A/",
+    dice_serious = "https://steamusercontent-a.akamaihd.net/ugc/10099668034452400088/BB4C08CA9320F632D2C594299F3E9F7D0D2ED658/",
+    dice_out     = "https://steamusercontent-a.akamaihd.net/ugc/17529322079219295649/569C26E282F3EE462E95EDF52DE2058C62063133/",
+}
+
+--============================================================================
+-- 4. REFERENCE TABLES
+--============================================================================
+
+--@@RULES_BEGIN
+-- ══════════════════════════════════════════════════════════════
+--  Rules: the same in the fighter card and the Mundane Controller
+--  (copied in whole from Mundane_Rules.lua, where it is kept)
+-- ══════════════════════════════════════════════════════════════
+
+-- The game's rules as data: every action, condition, skill, piece of
+-- wargear and weapon accessory the card knows, the dice's faces, the
+-- stats' limits, the weapon traits it reacts to and the ranges it
+-- measures. Everything here is the default -- the N26 rules. A table's own
+-- rules (homebrew) are kept by the Mundane Controller as overrides and laid
+-- over these (see RULES.merge): the card asks the Controller for them when
+-- it loads and whenever the Controller says they have changed. One table,
+-- RULES; the card knows its parts by their old names too (ACTIONS =
+-- RULES.actions, ...).
+local RULES = {}
+
+-- The kinds of action, each with its colour in A's panel: a colour of the
+-- card's (a COL key) or one of its own ("#RRGGBB").
+RULES.actionTypes = {
+    movement = "actMovement",   -- Movement
+    close    = "actClose",      -- Close Combat
+    shooting = "actShooting",   -- Shooting
+    utility  = "actUtility",    -- Utility
+    wyrd     = "actWyrd",       -- Wyrd
+}
+
+-- Every action a fighter can take. `cost` is S (a simple action), D (a
+-- double one) or F (a free one, which spends no action but still counts as
+-- used), shown in the arrow's diamond
+-- (a cost like "S/C" -- C: continuous, only shown -- or "S/D" spends as
+-- its first letter, see the card's SKILL.cost); actions have no icons.
+-- `type` picks its colour (actionTypes); one with none keeps the plain
+-- toggle colour. Clicking one spends it (see the card's useAction) and
+-- calls the onActionChosen stub -- what an action does is up to the rules
+-- layer, but for four the card knows by their keys: treat_ally,
+-- group_activation, coup_de_grace and reload (see useAction) -- and after
+-- dash no ranged weapon can be fired, but for one with Assault (see the
+-- card's TRAIT_RULES.shot). Fight and the Shoot actions pay for the
+-- weapons' attacks: taken from the panel, they light up the weapons they
+-- are for, and the attack after them spends nothing more (see the card's
+-- ACTIVATION.attackCost). `desc`, when filled in, shows over the stats
+-- while the cursor is on the action.
+RULES.actions = {
+    { key = "move",             label = "Move",             cost = "S", type = "movement", desc = "" },
+    { key = "dash",             label = "Dash",             cost = "D", type = "movement", desc = "" },
+    { key = "engage",           label = "Engage",           cost = "S", type = "close",    desc = "" },
+    { key = "charge",           label = "Charge",           cost = "D", type = "close",    desc = "" },
+    { key = "coup_de_grace",    label = "Coup de Grace",    cost = "S", type = "close",    desc = "" },
+    { key = "interact",         label = "Interact",         cost = "S", type = "utility",  desc = "" },
+    { key = "shoot",            label = "Shoot",            cost = "S", type = "shooting", desc = "" },
+    { key = "braced_shot",      label = "Braced Shot",      cost = "D", type = "shooting", desc = "" },
+    { key = "aimed_shot",       label = "Aimed Shot",       cost = "D", type = "shooting", desc = "" },
+    { key = "reload",           label = "Reload",           cost = "S", type = "shooting", desc = "" },
+    { key = "treat_ally",       label = "Treat Ally",       cost = "S", type = "utility",  desc = "" },
+    { key = "group_activation", label = "Group Activation", cost = "S", type = "utility",  desc = "" },
+    { key = "fight",            label = "Fight",            cost = "D", type = "close",    desc = "" },
+    { key = "retreat",          label = "Retreat",          cost = "D", type = "movement", desc = "" },
+    { key = "crawl",            label = "Crawl",            cost = "D", type = "movement", desc = "" },
+    { key = "desperate_escape", label = "Desperate Escape", cost = "D", type = "movement", desc = "" },
+    { key = "tend_wounds",      label = "Tend Wounds",      cost = "D", type = "utility",  desc = "" },
+    -- not an action of the rules: it opens the Recovery Test panel (see
+    -- the card's recoveryTest). `always`: never dimmed, spends no action,
+    -- never used
+    { key = "recovery_test",    label = "Recovery Test",    cost = "RT", type = "utility", always = true, desc = "" },
+    -- `wyrd`: not in any status's panel -- a fighter that can use Wyrd
+    -- powers (a Wyrd, fighter.category "wyrd", or one with a Wyrd power)
+    -- has these on its Special tab while Active, Suppressed or Engaged
+    { key = "maintain_control_f", label = "Maintain Control", cost = "F", type = "wyrd", wyrd = true, desc = "" },
+    { key = "maintain_control_s", label = "Maintain Control", cost = "S", type = "wyrd", wyrd = true, desc = "" },
+    { key = "concentrate",        label = "Concentrate",      cost = "S", type = "wyrd", wyrd = true, desc = "" },
+}
+
+-- What A's panel offers in each status, as its two columns: `right` next to
+-- A, `left` beyond it, each top to bottom (keys of actions; one that isn't
+-- there is left out). A status can leave a column out.
+-- (Suppressed is Active without the double actions.)
+RULES.statusActions = {
+    active = {
+        left  = { "move", "dash", "engage", "charge", "coup_de_grace", "interact" },
+        right = { "shoot", "braced_shot", "aimed_shot", "reload", "treat_ally", "group_activation" },
+    },
+    suppressed = {
+        left  = { "move", "engage", "coup_de_grace", "interact" },
+        right = { "shoot", "reload", "treat_ally", "group_activation" },
+    },
+    engaged = {
+        right = { "fight", "retreat" },
+    },
+    seriously_injured = {
+        right = { "crawl", "desperate_escape", "tend_wounds", "recovery_test" },
+    },
+}
+
+-- C's panel: conditions, each a named toggle with its icon (the card's
+-- ASSETS cond_<key>; `short` stands in until the icon exists). None stack
+-- except those marked `stacks`, which count up one per click in the panel
+-- and down one per click in the bar under the stats. Hovering one's icon
+-- in that bar shows its name and `desc` over the stats; hovering it in
+-- C's panel shows them only when `desc` is filled in.
+--   mods  = what the condition does to the stats, per stack. The card shows
+--           the lowered number (never past RULES.limits) and stat tests use it.
+--   set   = stats the condition sets to a number, whatever the changes above
+--           make of it ({ WS = 6 }: Feared); shown green / orange for better
+--           / worse than it would be.
+--   hitOnly = the fighter's attacks of a kind ("melee", "ranged") hit only
+--           on this natural roll or more, whatever modifies them
+--           ({ melee = 6 }: Blind).
+-- What a condition does beyond changing stats is the card's
+-- onConditionChanged's.
+RULES.conditions = {
+    { key = "intoxicated", label = "Intoxicated", short = "ITX", desc = "" },
+    { key = "radphage",    label = "Radphage",    short = "RAD", desc = "",
+      mods = { T = -1 } },                    -- -1 Toughness while active
+    { key = "concussion",  label = "Concussion",  short = "CON", desc = "", stacks = true,
+      mods = { I = -1 } },                    -- -1 Initiative per stack (min 1)
+    { key = "shackled",    label = "Shackled",    short = "SHK", desc = "" },
+    { key = "webbed",      label = "Webbed",      short = "WEB", desc = "" },
+    { key = "insanity",    label = "Insanity",    short = "INS", desc = "" },
+    -- put on a fighter hit by a Flash weapon (the card's traitHit): its
+    -- melee attacks hit only on a natural 6
+    { key = "blind",       label = "Blind",       short = "BLD", desc = "",
+      set = { WS = 6 }, hitOnly = { melee = 6 } },
+    -- put on a fighter by a Fearsome enemy (the card's rollAttack), gone when
+    -- its activation is over
+    { key = "feared",      label = "Feared",      short = "FEA", desc = "",
+      set = { WS = 6 } },                     -- WS 6+ while active
+    -- on a Wyrd while a Continuous power is in effect (the card puts it on and
+    -- takes it off with the power)
+    { key = "maintaining_power", label = "Maintaining Power", short = "PWR", desc = "" },
+    -- nothing of its own: a reminder for a custom condition
+    { key = "special",     label = "Special",     short = "SPC", desc = "" },
+}
+
+-- Skills (fighter.skills: the names as the roster lists them), matched by
+-- name in any case. They show by name in a row under the stats, each
+-- capitalised word by word (Counter-attack -> Counter-Attack) -- or as
+-- `short`, if given. Hovering a name shows the full name and `desc`.
+-- `mods` is what the skill does to the stats, as the conditions' (+1 is one
+-- higher: { I = 1 }): the card shows the changed number (never past
+-- RULES.limits) in green where that is better, orange where worse, and
+-- hovering the stat lights the skill's name up in that colour. A skill
+-- that is really an action has `action`, its cost (S, D or F, or a
+-- combination like "F/C", as in the actions) and `type` (its colour,
+-- actionTypes): it also goes into A's panel, under the Special tab. One
+-- with `costs` changes what actions cost its fighter ({ <action key> =
+-- new cost }, see the card's SKILL.costOf): Inspiring makes Group
+-- Activation free. A skill not listed here still shows, with no
+-- description. What else a skill can say:
+--   weapon     a weapon it arms its fighter with (name and profiles, as a
+--              weapon of the roster's: Headbutt) -- a roster that lists a
+--              weapon of that name already keeps its own, which then is
+--              the skill's all the same: no use while the skills are
+--              disabled;
+--   meleeS     what it adds to the Strength of the melee profiles with a
+--              trait, { <key in traits> = N } (Heavy Blows: +1 with Heavy);
+--   secondary  how many attacks the second melee weapon of an activation
+--              starts at, instead of one (Two-Weapon Fighter; see the
+--              card's TRAIT_RULES.opening);
+--   master     true: it always assists a friend and interferes with an
+--              enemy in close combat, however many enemies it is fighting
+--              itself (Combat Master; see the card's TRAIT_RULES.supportNear).
+--   springUp   true: activated while Suppressed, it makes an Agility test
+--              and, passing it, keeps both its actions (Spring Up; see the
+--              card's activate);
+--   catfall    true: a fall counts one level less for it (never less than
+--              the lowest), and an Agility test then saves it from being
+--              Suppressed by the fall (Catfall; see the card's fallingDown);
+--   distance   for a skill that is an action: the inches it moves its
+--              fighter, said in chat when it is taken -- a list of { stat,
+--              times }, added up (Sprint: M + 2x I);
+--   fearsome   true: an enemy that starts a fight against it makes a
+--              Willpower check first, and fails into the Feared condition
+--              (see the card's rollAttack) -- unless it is Fearsome itself;
+--   ironJaw    N: against attacks with no AP (and Light weapons used while
+--              engaged), it counts N higher in Toughness (Iron Jaw: 2; see
+--              the card's woundPlan);
+--   steel      true: hit by a ranged attack, it may make a Cool check to
+--              keep from being Suppressed (Nerves Of Steel; see the card's
+--              rangedHit);
+--   unstoppable  true: activating with a wound lost, it makes a Willpower
+--              check at once, and regains a wound when it passes;
+--   backstab   true: its melee weapons have the Backstab trait -- one that
+--              has it already adds 2 to its Strength, not 1 (Backstab; see
+--              the card's TRAIT_RULES.stab);
+--   cutThroat  true: its Coup de Grace, when the enemy rolls more, is
+--              rolled again, once (Cut-Throat; see the card's
+--              ACTIVATION.coup);
+--   lieLow     true: while it is Suppressed it can't be the target of a
+--              ranged attack -- an enemy about to shoot it is told so, and
+--              asked whether to go on (Lie Low; see the card's rollAttack);
+--   shoots     N: it may make N Shoot actions in an activation, not one
+--              (Fast Shot: 2) -- Shoot only, so never a second shot with a
+--              Heavy weapon, which is a Braced Shot;
+--   gunfighter true: its Shoot with a Light weapon lets it fire a second
+--              weapon with Light as part of that action, for no action of
+--              its own (Gunfighter; see the card's TRAIT_RULES.shot);
+--   hipShooting  true: its ranged weapons without Heavy have the Assault
+--              trait (Hip-Shooting);
+--   marksman   N: while it isn't Engaged, its ranged attacks on an enemy
+--              beyond the weapon's Short Range but within its Long Range
+--              are N better to hit (Marksman: 1; see the card's
+--              TRAIT_RULES.marksman);
+--   aimed      N: its Aimed Shot is N better to hit, not 1 (Sharpshooter: 2);
+--   fastReload true: its Reload reloads every profile that is out of ammo,
+--              not one (Fast Reload; see the card's reloadWeapon);
+--   ironWill   N: while it is on the table, its gang's Bottle Checks are
+--              taken against N more (Iron Will: 1; see the Mundane
+--              Controller's Bottle Check);
+--   label      for a skill that is an action: what the action is called
+--              on the Special tab, when not by the skill's own name
+--              (Munitioneer: Distribute Ammo);
+--   distribute N: its action hands out ammo -- every fighter of its gang
+--              within N inches with a weapon out of ammo makes an
+--              Intelligence check at once, and reloads on passing it
+--              (Munitioneer: 6; see the card's ACTIVATION.distribute);
+--   aka        other names the roster may list it under (a list: another
+--              spelling finds the same entry);
+--   when       a status's key: its `mods` count only while the fighter is
+--              in that status (Mesh Armour: "engaged");
+--   once       true, for one that is an action: it can be taken once a
+--              game -- dimmed from then on, until the Mundane Controller's
+--              Start Game (the Stimm-Slug);
+--   boost      for one that is an action: what taking it does to the
+--              stats, as `mods`, until the fighter is next activated
+--              ({ M = 2, S = 2, T = 2 }: the Stimm-Slug);
+--   reaction   what that boost costs as it ends: { roll = N, wounds = W }
+--              -- a D6 as the fighter activates, W wounds lost on N or
+--              less (see the card's ACTIVATION.comedown);
+--   noFall     true: a fall does nothing to it -- no Agility test, no
+--              wound, never Suppressed (Grav Chute; see the card's
+--              fallingDown);
+--   assist     N: a friend's Recovery test it assists is rolled with N
+--              more Injury dice on top of the assist's own (Medicae Kit:
+--              1; see the card's recoveryTest);
+--   inv        N: an invulnerable save of N+ -- never worsened by AP, never
+--              bettered by cover or anything else that betters a save; each
+--              wound takes whichever of the two saves is better (see the
+--              card's takeSaves) (Refractor Shield: 5);
+--   burns      true: the first natural 1 on a save taken with its `inv`
+--              burns it out for the rest of the battle -- its name turns
+--              grey, and a left click on it switches it back on or off
+--              (Refractor Shield);
+--   noAp       words a weapon's name may start with (a list, any case):
+--              hits from such a weapon have no AP against it (Reflec
+--              Shroud: Las, Plasma, Melta);
+--   immune     weapon traits (RULES.traits keys) that do nothing to it,
+--              and conditions (keys) it never gets (Hazard Suit: Blaze,
+--              Radphage);
+--   gasInv     N: an invulnerable save of N+ against Gas weapons only
+--              (Respirator: 5).
+-- What a Wyrd power (`type = "wyrd"`) does once manifested -- nothing
+-- before: a power that fails, or is disrupted out of it, does none of it.
+-- "While in effect" is for a Continuous power, until it ends (see the
+-- card's ACTIVATION.cast); "until the end of the turn", until the fighter
+-- is next readied (the Mundane Controller's next turn). Ranges are base to
+-- base. Only an Active fighter can be Suppressed.
+--   maintained { stat = N }: what it does to its Wyrd's own stats while in
+--              effect, as `mods` (Quickening: +3 M, +2 I) -- shown purple;
+--   overLimit  true: those may take a stat past its highest (RULES.limits);
+--   weapon     (Continuous) the Wyrd is equipped with it only while in
+--              effect (Force Blast, Scouring);
+--   flaming    a trait one melee weapon of the Wyrd's gains while in
+--              effect: its melee weapons light up purple, and the first
+--              one clicked is the one (Flaming Weapon: "Blaze (5+)");
+--   meleeL     N: its melee profiles' L, that much higher while in effect
+--              (Warp Strength: 1);
+--   target     what it does to the one enemy the player has selected as
+--              it is cast (none selected, or too far: nothing):
+--                range   inches (none: any distance);
+--                roll    a stat the Wyrd tests first, nothing on a fail
+--                        (Assail: "BS");
+--                suppress  the enemy is Suppressed;
+--                test    the test the enemy makes ("Cl", "Wil", "agility",
+--                        "nerve" -- a Nerve Check, Suppressed on a fail);
+--                ifReady the test only while the enemy has its Ready
+--                        marker; needReady: nothing at all without it;
+--                fail    what a failed test does: "unready" (it loses its
+--                        Ready marker) or a condition's key ("insanity");
+--                hit     a hit of { S, AP, L }: the Wound roll follows;
+--                base    stats set to these, before any modifier, while in
+--                        effect (Paroxysm: BS and WS 6+);
+--                needStatus  only an enemy in this status; out: it goes Out
+--                        of Action (Eternal Slumber);
+--   area       what it does at once, until the end of the turn, to every
+--              fighter of `side` ("friends", "enemies", "all") within
+--              `range` -- and the Wyrd itself with `self`: `mods` (as a
+--              condition's: Warp Shield, Sv one better) or `oneAction`
+--              (one action when activated, Suppressed or not: Freeze Time);
+--   aura       what it does while in effect to every fighter of `side`
+--              within `range` (none: anywhere) -- as they come and go:
+--              `mods`, or `lend` (stats it lends them where its own are
+--              better: Unbreakable Will, Wil and Cl);
+--   rerollHits true: while in effect, enemies re-roll every ranged hit
+--              die that hits, once (Cacophony Of Silence);
+--   void       N: while in effect, an enemy within N inches shooting the
+--              Wyrd counts it as at Long range, never Short (A Perfect Void);
+--   visions    { range, condition }: until the end of the turn, an enemy
+--              ending its activation within range gains the condition
+--              (Maddening Visions).
+-- A fighter's skills do nothing while it is at 0 wounds, Seriously Injured
+-- or Out of Action (the card's SKILL.off).
+RULES.skills = {
+    { name = "Counter-Attack", desc = "" },
+    { name = "Inspiring",      desc = "", costs = { group_activation = "F" } },
+    { name = "Juggernaut",     desc = "" },
+    -- savant
+    { name = "Fast Reload",    desc = "", fastReload = true },
+    { name = "Iron Will",      desc = "", ironWill = 1 },
+    { name = "Medicate",       desc = "", action = "S", type = "utility" },
+    { name = "Munitioneer",    desc = "", action = "S", type = "utility",
+      label = "Distribute Ammo", distribute = 6 },   -- within 6"
+    -- agility
+    { name = "Catfall",        desc = "", catfall = true },
+    { name = "Spring Up",      desc = "", springUp = true },
+    { name = "Sprint",         desc = "", action = "D", type = "movement",
+      distance = { { "M", 1 }, { "I", 2 } } },   -- M + 2x I
+    -- close combat
+    { name = "Berserker",          desc = "", mods = { A = 1 } },   -- +1 Attacks
+    { name = "Combat Master",      desc = "", master = true },
+    { name = "Headbutt",           desc = "", weapon = { name = "Headbutt", profiles = {
+        { SR = "E", LR = "-", S = "S+1", AP = "-", L = "1", traits = "Additional Attack (1), Melee" } } } },
+    { name = "Heavy Blows",        desc = "", meleeS = { heavy = 1 } },
+    { name = "Two-Weapon Fighter", desc = "", secondary = 2 },
+    { name = "Fearsome",           desc = "", fearsome = true },
+    { name = "Iron Jaw",           desc = "", ironJaw = 2 },
+    { name = "Nerves Of Steel",    desc = "", steel = true },
+    { name = "Unstoppable",        desc = "", unstoppable = true },
+    -- cunning
+    { name = "Backstab",   desc = "", backstab = true },
+    { name = "Cut-Throat", desc = "", cutThroat = true },
+    { name = "Lie Low",    desc = "", lieLow = true },
+    -- shooting
+    { name = "Fast Shot",    desc = "", shoots = 2 },
+    { name = "Gunfighter",   desc = "", gunfighter = true },
+    { name = "Hip-Shooting", desc = "", hipShooting = true },
+    { name = "Marksman",     desc = "", marksman = 1 },
+    { name = "Sharpshooter", desc = "", aimed = 2 },
+    -- Wyrd powers: actions on the Special tab, whatever the status
+    -- ("/C": continuous -- it stays in effect, see the card's
+    -- ACTIVATION.cast). What one does once manifested (see the card's
+    -- ACTIVATION.manifest), as the fields above the list explain; one with
+    -- none of them does nothing the card knows of.
+    { name = "Force Blast",          desc = "", action = "F/C", type = "wyrd",
+      weapon = { name = "Force Blast", profiles = {
+        { SR = '8"', LR = '12"', S = "2", AP = "-1", L = "1", traits = "Knockback (3+)" } } } },
+    { name = "Flaming Weapon",       desc = "", action = "F/C", type = "wyrd", flaming = "Blaze (5+)" },
+    { name = "Freeze Time",          desc = "", action = "D",   type = "wyrd",
+      area = { range = 12, side = "all", oneAction = true } },
+    { name = "Weapon Jinx",          desc = "", action = "S",   type = "wyrd" },
+    { name = "Terrify",              desc = "", action = "D",   type = "wyrd",
+      target = { range = 18, suppress = true, test = "Cl", ifReady = true, fail = "unready" } },
+    { name = "Quickening",           desc = "", action = "S/C", type = "wyrd",
+      maintained = { M = 3, I = 2 }, overLimit = true },
+    { name = "Hypnosis",             desc = "", action = "S",   type = "wyrd" },
+    { name = "Unbreakable Will",     desc = "", action = "F/C", type = "wyrd",
+      aura = { range = 9, side = "friends", lend = { "Wil", "Cl" } } },
+    { name = "Zealot",               desc = "", action = "S/C", type = "wyrd" },
+    { name = "Mind Control",         desc = "", action = "S",   type = "wyrd" },
+    { name = "Assail",               desc = "", action = "S",   type = "wyrd",
+      target = { roll = "BS", suppress = true } },
+    { name = "Force Wave",           desc = "", action = "S",   type = "wyrd" },
+    { name = "Catalyst",             desc = "", action = "F/C", type = "wyrd" },
+    { name = "Hypnotic Gaze",        desc = "", action = "D",   type = "wyrd",
+      target = { range = 9, needReady = true, test = "agility", fail = "unready" } },
+    { name = "The Horror",           desc = "", action = "S",   type = "wyrd",
+      target = { range = 12, test = "nerve" } },
+    { name = "Leech Essence",        desc = "", action = "S",   type = "wyrd",
+      target = { range = 12, hit = { S = 3, AP = -1, L = 1 } } },
+    { name = "Paroxysm",             desc = "", action = "S/C", type = "wyrd",
+      target = { range = 9, base = { BS = 6, WS = 6 } } },
+    { name = "Aura Of Despair",      desc = "", action = "F/C", type = "wyrd",
+      aura = { side = "enemies", mods = { Cl = -1 } } },
+    { name = "Hallucinations",       desc = "", action = "S",   type = "wyrd",
+      target = { range = 12, test = "Wil", fail = "insanity" } },
+    { name = "Crush",                desc = "", action = "F",   type = "wyrd" },
+    { name = "Force Field",          desc = "", action = "S/C", type = "wyrd" },
+    { name = "Terrible Truths",      desc = "", action = "S",   type = "wyrd",
+      target = { range = 6, test = "Wil", fail = "insanity" } },
+    { name = "Psychotic Lure",       desc = "", action = "S",   type = "wyrd" },
+    { name = "Deceitful Thoughts",   desc = "", action = "D",   type = "wyrd",
+      target = { range = 6, test = "Wil" } },
+    { name = "Cacophony Of Silence", desc = "", action = "S/C", type = "wyrd", rerollHits = true },
+    { name = "A Perfect Void",       desc = "", action = "F/C", type = "wyrd", void = 10 },
+    { name = "Eternal Slumber",      desc = "", action = "S",   type = "wyrd",
+      target = { range = 3, needStatus = "seriously_injured", out = true } },
+    { name = "Scouring",             desc = "", action = "F/C", type = "wyrd",
+      weapon = { name = "Scouring", profiles = {
+        { SR = "T", LR = "-", S = "2", AP = "-", L = "1", traits = "Blaze (5+), Template" } } } },
+    { name = "Levitation",           desc = "", action = "F/C", type = "wyrd", maintained = { M = 3 } },
+    { name = "Warp Strength",        desc = "", action = "F/C", type = "wyrd", maintained = { S = 2 }, meleeL = 1 },
+    { name = "Warp Shield",          desc = "", action = "S",   type = "wyrd",
+      area = { range = 3, side = "friends", self = true, mods = { Sv = -1 } } },
+    { name = "Maddening Visions",    desc = "", action = "S",   type = "wyrd",
+      visions = { range = 3, condition = "insanity" } },
+}
+
+-- Wargear (fighter.wargear: the names as the roster lists them), just as
+-- the skills -- shown by name in its own row, under the skills' (in the
+-- headers colour); `short`, `desc`, `mods`, `action` / `type`, `costs`
+-- and the rest work the same -- but wargear never stops working: at 0
+-- wounds its fighter still has all of it, its actions on the Special tab
+-- too (only a Seriously Injured fighter takes none of those). The
+-- roster's statline already counts what armour and mounts do: `mods` are
+-- only for what it doesn't.
+RULES.wargear = {
+    { name = "Bio-Booster",            desc = "" },
+    { name = "Bomb Delivery Rats",     desc = "" },
+    { name = "Book Of The Redemption", desc = "" },
+    { name = "Chaos Familiar",         desc = "" },
+    { name = "Dirt Bike",              desc = "" },
+    { name = "Drop Rig",               desc = "", action = "S", type = "utility", label = "Descend" },
+    { name = "Grapnel Launcher",       desc = "", action = "D", type = "utility", label = "Grapnel" },
+    { name = "Grav Chute",             desc = "", noFall = true },
+    { name = "Hazard Suit",            desc = "", immune = { "blaze", "radphage" } },
+    { name = "Medicae Kit",            desc = "", assist = 1 },
+    { name = "Mesh Armour",            desc = "", aka = { "Mesh Armor" },
+      mods = { Sv = -1 }, when = "engaged" },       -- a save one better in close combat
+    { name = "Pyromantic Mantle",      desc = "" },
+    { name = "Reflec Shroud",          desc = "", noAp = { "Las", "Plasma", "Melta" } },
+    { name = "Refractor Shield",       desc = "", inv = 5, burns = true },
+    { name = "Respirator",             desc = "", gasInv = 5 },
+    { name = "Stimm-Slug Stash",       desc = "", aka = { "Stim-Slug Stash" },
+      action = "F", type = "utility", label = "Stimm-Slug", once = true,
+      boost = { M = 2, S = 2, T = 2 }, reaction = { roll = 1, wounds = 1 } },
+}
+
+-- Weapon accessories. The roster names a weapon with its accessories in
+-- brackets after it ("Lasgun (Mono-Sight)"): those listed here -- found in
+-- any case, hyphens and spaces aside (Infra-Sight, Infrasight) -- are
+-- taken out of the name the card shows and put after the traits of the
+-- weapon's profiles instead. What most of them do is in the roster's
+-- profile already; what one can say for the card to do:
+--   aimed   N: an Aimed Shot with the weapon is N better to hit, not 1
+--           (Mono-Sight: 2) -- not on top of a skill's (Sharpshooter): the
+--           better of the two counts;
+--   aka     other names the roster may list it under (a list).
+RULES.accessories = {
+    { name = "Focusing Crystal" },
+    { name = "Hotshot Las Pack" },
+    { name = "Infra-Sight" },
+    { name = "Las-Projector" },
+    { name = "Mono-Sight", aimed = 2 },
+    { name = "Suspensors" },
+    { name = "Telescopic Sight" },
+}
+
+-- How each stat is tested (see the card's rollStat): the number of D6. M
+-- and A are rolled but never tested. `under`: pass on a total at or below
+-- the stat, otherwise at or above it. Roll-under stats also drop any "+"
+-- on the card: a target rolled under reads "9", not "9+".
+RULES.statRolls = {
+    I   = { dice = 1, under = true  },
+    T   = { dice = 1, under = true  },
+    S   = { dice = 1, under = true  },
+    Ld  = { dice = 2, under = true  },
+    Wil = { dice = 2, under = true  },
+    Int = { dice = 2, under = true  },
+    Cl  = { dice = 2, under = true  },
+    BS  = { dice = 1, under = false },
+    WS  = { dice = 1, under = false },
+    Sv  = { dice = 1, under = false },
+}
+
+-- The lowest and highest number each stat can show, whatever changes it:
+-- a number set by hand, a condition, a skill, wargear or a weapon never
+-- takes it past them. M is in inches; WS, BS and Sv are rolled at or over,
+-- so 2+ (a save 3+) is the best they get and 6+ the worst. A right click on
+-- a stat steps it up to its highest, then round to its lowest -- for
+-- adjusting the statline by hand in play. `default`: any other (W).
+RULES.limits = {
+    M  = { 1, 12 },
+    WS = { 2, 6 },  BS = { 2, 6 },  Sv = { 3, 6 },
+    S  = { 1, 10 }, T  = { 1, 10 }, I  = { 1, 10 }, A = { 1, 10 },
+    Ld = { 4, 10 }, Cl = { 4, 10 }, Wil = { 4, 10 }, Int = { 4, 10 },
+    default = { 1, 10 },
+}
+
+-- The weapon traits the card reacts to, as Lua patterns (lower case,
+-- matched against a whole comma-separated trait). N is a single digit.
+RULES.traits = {
+    melee     = "melee",
+    smoke     = "smoke",              -- a hit with it doesn't Suppress (nor does Melee)
+    unstable  = "unstable",
+    unwieldy  = "unwieldy",
+    light     = "light",
+    rapidFire = "rapid fire%s*%(%s*%d%+?%s*%)",   -- Rapid Fire (N) / (N+)
+    paired    = "paired",               -- Paired (N)             (names only:
+    additional = "additional attacks?", -- Additional Attack(s) (N)  see the card's TRAIT_RULES.number)
+    backstab  = "backstab",           -- +1 S against an enemy a friend is fighting too
+    combi    = "combi",
+    limited   = "limited",
+    singleShot = "single shot",
+    shield    = "shield",
+    parry     = "parry",
+    reliable  = "reliable",
+    ammo      = "ammo",               -- Ammo (N+): a D6 after shooting, OUT below N (the card's TRAIT_RULES.ammoNeed)
+    scarce    = "scarce",             -- Scarce (N+): a reload needs a D6 of N or more (the card's TRAIT_RULES.scarce)
+    heavy     = "heavy",              -- a Braced Shot, and no Aimed Shot (in melee: Heavy Blows)
+    assault   = "assault",            -- after a Dash, one Shoot with it, for no action
+    toxin     = "toxin",              -- Toxin (N+)  (the card's TRAIT_RULES.toxin)
+    shock     = "shock",              -- Shock (N+): a hit roll of N+ wounds automatically, as a 6
+    cursed    = "cursed",             -- a target hit makes a Willpower check, failed: Insanity
+    flash     = "flash",              -- ranged: no Wound roll; the target hit is Blind and loses its Ready marker
+    graviton  = "graviton pulse",     -- ranged: no Wound roll
+    lance     = "lance",              -- melee: +1 S on the charge ("A + 1") for a Mounted fighter
+    template  = "template",           -- ranged: no hit roll, every enemy selected is hit
+    blaze     = "blaze",              -- Blaze (N+): a Wound roll of N+ makes one more hit, which hits by itself
+    -- what a wound does (the card's TRAIT_RULES.hurts; N without a number: 6)
+    damage    = "damage",             -- Damage (N): a wound through takes N wounds off (without it: 1)
+    rending   = "rending",            -- Rending (N+): a natural N+ to wound (Shock's 6 too) -- that wound's AP one worse
+    shred     = "shred",              -- Shred (N+): N+ to wound -- that wound's Lethality one higher
+    concussive = "concussive",        -- Concussive (N+): each N+ to wound -- a stack of Concussion
+    gas       = "gas",                -- no armour save (a Respirator: 5+ invulnerable against it)
+    web       = "web",                -- no armour save, no damage: Webbed instead
+    radphage  = "rad%-?phage",        -- Rad-Phage: a wound -- the Radphage condition
+}
+
+-- The dice with faces of their own (the Mundane Controller's custom dice
+-- show them): injuryDice, what each face of an Injury dice stands for --
+-- rolled for a Recovery test: 1-2 Injury, 3-5 Serious Injury, 6 Out of
+-- Action -- and firepower, the hits on each face of a Firepower dice, the
+-- 1 also an Ammo check.
+RULES.injuryDice = { "injured", "injured", "serious", "serious", "serious", "out" }
+RULES.injury = {   -- each result: its name, and how good it is (the best die is kept)
+    -- `short`: how chat writes it ("Recovery Test: Inj")
+    out     = { label = "Out of Action",  rank = 1, short = "OOA" },
+    serious = { label = "Serious Injury", rank = 2, short = "S. Inj" },
+    injured = { label = "Injury",         rank = 3, short = "Inj" },
+}
+RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hits = 2 }, { hits = 2 }, { hits = 3 } }
+
+-- The rule numbers among the card's settings (copied into its CFG):
+--   engageRange   Engaged, automatically: when a fighter is put down, it
+--                 and every enemy whose base is within this many inches of
+--                 its base become Engaged (see the card's checkEngagement).
+--   nerveRanges   Nerve Check: a friend of one of these ranks (fighter.rank)
+--                 within its range in inches, base to base, and in sight
+--                 lends its Cl when that is higher -- the best one counts.
+--   nerveOutRange A fighter going Out of Action: its friends within this
+--                 many inches (base to base, sight or not) must take a
+--                 Nerve Check. A Prospect only shakes other Prospects;
+--   nerveOutNone  one tagged with any of these (its role line:
+--                 "Cyber-mastiff • Pet") shakes nobody;
+--   nerveOutFoes  true: enemies within range test too.
+--   groupRange    Group Activation: of the Ready friends the player has
+--                 selected, those within this many inches, base to base,
+--                 are the ones a passed check takes along (see the card's
+--                 groupActivation).
+--   preMeasure    true: pre-measuring is allowed -- the cursor on Group
+--                 Activation in A's panel highlights every friend within
+--                 groupRange, on Distribute Ammo every friend within its
+--                 range.
+--   agility       Agility test: one D6, passed on this or more;
+--   agilityGang   the fighters of a gang of this `type` add `mod` to that
+--                 die (the type as the roster names it under the gang's
+--                 name, any case) -- unless the gang is any of `unless`,
+--                 which the roster names in brackets after the type
+--                 ("House Escher (Malstrain Corrupted)").
+--   coupGang      Coup de Grace: the fighters of a gang of this `type` add
+--                 `mod` to their own roll (read as agilityGang is).
+--   fallSave     Falling Down: a passed Agility test takes this many
+--                 inches off the height fallen;
+--   fallLevels    what is left then decides what the fall does -- less than
+--                 the first: Suppressed (if Active), and an activation ends; up to the
+--                 second: a wound lost as well (at 0 wounds an Injury dice);
+--                 more: Out of Action (see the card's fallingDown).
+--   disruptRange  Wyrd powers: an enemy Wyrd within this many inches (base to
+--                 base) with sight of the caster may try to disrupt the
+--                 cast (see the card's ACTIVATION.cast);
+--   disruptMod    a passed disrupt takes this off the caster's Willpower
+--                 check (it may go below the lowest Wil);
+--   concentrateMod  Concentrate adds this to Willpower checks to manifest
+--                 powers until the activation ends;
+--   maintainMod   Maintain Control (S) adds this to its Willpower check
+--                 (Maintain Control (F) adds nothing);
+--   powersLastNext  how long a Continuous power lasts. false: until the end
+--                 of its Wyrd's activation, unless a Maintain Control passed
+--                 during it holds it -- then until the end of the next
+--                 activation, and so on, each Maintain Control passed in an
+--                 activation holding it through that activation's end. true:
+--                 a power cast lasts through the end of that activation
+--                 without one, and then goes the same way.
+--   shockNatural  Shock (N+): false -- the hit roll with its modifiers must
+--                 reach N (Shock (6+) with +1 to hit: a 5 does); true --
+--                 the die's own roll.
+--   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
+--                 Firepower dice give shares the hit roll, so every one of
+--                 them wounds automatically; true -- only the first does.
+--   saveFails     a save roll of this or less always fails, whatever the
+--                 save (2: a natural 1 or 2);
+--   dicePause     seconds a roll that follows another waits after that one
+--                 showed (the Wound roll after the Hit roll, the saves
+--                 after the Wound roll ...); the last roll of all stays
+--                 the card's diceShow seconds whatever this says.
+--   coverShort, coverLong  what cover adds to a save roll against a ranged
+--                 attack from within the weapon's Short Range, and from
+--                 beyond it (within Long Range) -- a weapon with only one of
+--                 the two in inches ("T", "-") always gives that one's (see
+--                 the card's takeSaves).
+RULES.cfg = {
+    engageRange   = 1,
+    nerveRanges   = { leader = 12, champion = 6 },
+    nerveOutRange = 3,
+    nerveOutNone  = { "pet" },
+    nerveOutFoes  = false,
+    groupRange    = 3,
+    preMeasure    = false,
+    agility       = 4,
+    agilityGang   = { type = "House Escher", mod = 1,
+                      unless = { "Chaos Corrupted", "Genestealer Corrupted", "Genestealer Infected",
+                                 "Malstrain Corrupted" } },
+    coupGang      = { type = "Genestealer Cults", mod = 1 },
+    fallSave     = 3,
+    fallLevels    = { 3, 6 },
+    disruptRange  = 18,
+    disruptMod    = -2,
+    concentrateMod = 1,
+    maintainMod   = 3,
+    powersLastNext = false,
+    shockNatural  = false,
+    rapidOneHit   = false,
+    saveFails     = 2,
+    coverShort    = 1,
+    coverLong     = 2,
+    dicePause     = 4.5,
+}
+
+-- ── Overrides ────────────────────────────────────────────────
+-- A table's own rules are a table of overrides, part by part, laid over
+-- the defaults above (RULES.merge); a part left out stays as it is. Each
+-- part takes them as it is shaped (RULES.PARTS):
+--   "key" / "name"  (actions, conditions / skills, wargear, accessories) a
+--       list of entries, each found by its `key` (a skill, wargear or
+--       accessory by its `name`, any case):
+--         one not there yet is added, at the end;
+--         one that is there has the fields given changed, the rest kept
+--         (a field set to false is removed);
+--         `replace = true`: it is replaced by the one given, as a whole;
+--         `disabled = true`: it is taken out.
+--   "map"  (actionTypes, statusActions, statRolls, limits, traits, injury)
+--       by key: a value replaces the default's -- a table of fields (not a
+--       list) has its fields laid over the default's instead, as above --
+--       false takes the key out, a new key is added.
+--   "values"  (cfg) as a map, but only the keys already there, and false
+--       is a value.
+--   "list"  (injuryDice, firepower) the whole list, replaced.
+-- For example:
+--   {
+--     actions    = { { key = "hide", label = "Hide", cost = "S", type = "utility" },
+--                    { key = "dash", cost = "S" },
+--                    { key = "coup_de_grace", disabled = true } },
+--     statusActions = { active = { left = { "move", "dash", "engage", "charge", "interact", "hide" } } },
+--     limits     = { M = { 1, 14 } },
+--     firepower  = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 2 }, { hits = 2 }, { hits = 3 }, { hits = 3 } },
+--     cfg        = { nerveRanges = { leader = 18 } },
+--   }
+RULES.PARTS = {
+    actionTypes = "map",   actions  = "key",  statusActions = "map", conditions = "key",
+    skills      = "name",  wargear  = "name", statRolls     = "map", limits     = "map",
+    traits      = "map",   injury   = "map",  injuryDice    = "list", firepower = "list",
+    cfg         = "values", accessories = "name",
+}
+
+-- A copy of `v` all the way down (tables are never shared with it).
+function RULES.copy(v)
+    if type(v) ~= "table" then return v end
+    local t = {}
+    for k, x in pairs(v) do t[k] = RULES.copy(x) end
+    return t
+end
+
+-- Whether `a` and `b` hold the same, all the way down.
+function RULES.same(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+    for k, v in pairs(a) do if not RULES.same(v, b[k]) then return false end end
+    for k in pairs(b) do if a[k] == nil then return false end end
+    return true
+end
+
+-- Whether table `t` is a list (or empty): replaced whole, never merged.
+function RULES.isList(t) return t[1] ~= nil or next(t) == nil end
+
+-- The fields of `over` laid over table `into` (copies): false removes one.
+function RULES.lay(into, over)
+    for k, v in pairs(over) do
+        if v == false then into[k] = nil else into[k] = RULES.copy(v) end
+    end
+    return into
+end
+
+-- An entry's id in a part of kind "key" / "name" (see RULES.PARTS).
+function RULES.id(kind, e)
+    if type(e) ~= "table" then return nil end
+    if kind == "name" then return e.name ~= nil and tostring(e.name):lower() or nil end
+    return e.key
+end
+
+-- The rules the overrides `over` make: a fresh table of every part (see
+-- RULES.PARTS), the defaults with `over` laid over them. Anything it
+-- doesn't understand is passed over; nil or {} gives the defaults.
+function RULES.merge(over)
+    local out = RULES.copy(RULES.DEFAULT)
+    if type(over) ~= "table" then return out end
+    for part, kind in pairs(RULES.PARTS) do
+        local o, t = over[part], out[part]
+        if type(o) ~= "table" then
+            -- not overridden
+        elseif kind == "list" then
+            out[part] = RULES.copy(o)
+        elseif kind == "map" or kind == "values" then
+            for k, v in pairs(o) do
+                if kind == "values" and t[k] == nil then
+                    -- not a setting of the rules: left alone
+                elseif v == false and kind == "map" then
+                    t[k] = nil
+                elseif type(v) == "table" and type(t[k]) == "table" and not RULES.isList(v)
+                       and not RULES.isList(t[k]) then
+                    RULES.lay(t[k], v)
+                else
+                    t[k] = RULES.copy(v)
+                end
+            end
+        else
+            for _, e in ipairs(o) do
+                local id = RULES.id(kind, e)
+                local at
+                for i, x in ipairs(id ~= nil and t or {}) do
+                    if RULES.id(kind, x) == id then at = i break end
+                end
+                if id == nil then
+                    -- no key / name: nothing to go by
+                elseif e.disabled then
+                    if at then table.remove(t, at) end
+                else
+                    local entry = RULES.lay((at and not e.replace) and t[at] or {}, e)
+                    entry.replace, entry.disabled = nil, nil
+                    t[at or #t + 1] = entry
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- Functions that work out what follows from the rules (see RULES.follow).
+RULES.followers = {}
+
+-- Runs `fn` now, and again every time the rules in force change.
+function RULES.follow(fn)
+    RULES.followers[#RULES.followers + 1] = fn
+    fn()
+end
+
+-- Puts the rules the overrides `over` make in force (RULES.merge): each
+-- part that differs is changed in place -- the tables stay the same
+-- tables, so whatever holds one sees the change -- and then every
+-- RULES.follow function runs. Returns whether anything changed.
+function RULES.use(over)
+    local merged, changed = RULES.merge(over), false
+    for part in pairs(RULES.PARTS) do
+        local live = RULES[part]
+        if not RULES.same(live, merged[part]) then
+            for k in pairs(live) do live[k] = nil end
+            for k, v in pairs(merged[part]) do live[k] = v end
+            changed = true
+        end
+    end
+    if changed then
+        for _, fn in ipairs(RULES.followers) do fn() end
+    end
+    return changed
+end
+
+-- The defaults, as written above, for RULES.merge to start from.
+RULES.DEFAULT = {}
+for part in pairs(RULES.PARTS) do RULES.DEFAULT[part] = RULES.copy(RULES[part]) end
+--@@RULES_END
+
+-- The statuses, picked from the diamonds that open around S (which has room
+-- for three besides the current one). The first is the default. Each shows
+-- ASSETS status_<key> once set, `short` until then. `color` is the chat
+-- line and model highlight when a fighter changes to it (see setStatus).
+local STATUSES = {
+    { key = "active",            label = "Active",            short = "ACT",  color = "#5CD65C" },  -- green
+    { key = "suppressed",        label = "Suppressed",        short = "SUP",  color = "#7CC8FF" },  -- light blue
+    { key = "engaged",           label = "Engaged",           short = "ENG",  color = "#FFB366" },  -- light orange
+    { key = "seriously_injured", label = "Seriously Injured", short = "S.I.", color = "#FF4040" },  -- red
+}
+
+-- The rules' parts, by the names the card knows them by (each is the
+-- RULES table itself, changed in place when the rules change). The kinds
+-- of action's colours (RULES.actionTypes: a COL key, or a colour of its
+-- own) are worked out afresh each time.
+local ACTION_TYPES = {}
+RULES.follow(function()
+    for k in pairs(ACTION_TYPES) do ACTION_TYPES[k] = nil end
+    for k, v in pairs(RULES.actionTypes) do ACTION_TYPES[k] = COL[v] or v end
+end)
+local ACTIONS, STATUS_ACTIONS = RULES.actions, RULES.statusActions
+-- The rule numbers among the settings (RULES.cfg: the engagement range,
+-- the Nerve Checks' ranges), kept in CFG like the rest.
+RULES.follow(function() for k, v in pairs(RULES.cfg) do CFG[k] = v end end)
+
+-- The fighter's round: readied (S green) by the Mundane Controller's turn
+-- or a right click on S, activated by a left click on S (A and C green:
+-- its actions), finished by another once none are left. A fighter that
+-- started its activation Seriously Injured then either goes Out of Action
+-- (an enemy that isn't Seriously Injured within 1") or gets the Recovery
+-- Test panel over the stats. The machinery is filled in by sections 8, 9,
+-- 10b and 11; this table is here first so all of them can reach it (the
+-- main chunk is near Lua's 200-local limit).
+--   The dice with faces of their own (the rules': RULES.injuryDice,
+-- RULES.injury, RULES.firepower): INJURY_DICE, what each face of an Injury
+-- dice stands for, INJURY each result, FIREPOWER the hits on each face of
+-- a Firepower dice. MAX_DICE: the most dice a roll here throws (and shows).
+local ACTIVATION = {
+    INJURY_DICE = RULES.injuryDice,
+    INJURY = RULES.injury,
+    FIREPOWER = RULES.firepower,
+    MAX_DICE = 6,
+    -- the most dice the panel over the stats shows: a weapon's attack
+    -- (see rollAttack) can throw more than MAX_DICE -- a melee weapon's
+    -- attacks, or a hit die with Rapid Fire's and the Ammo trait's dice
+    MAX_SHOWN = 10,
+    -- the highest fall Falling Down's panel takes, in inches
+    FALL_MAX = 24,
+}
+
+-- C's panel's conditions, the skills and the wargear (see RULES.conditions,
+-- RULES.skills, RULES.wargear).
+local CONDITIONS, SKILLS, WARGEAR = RULES.conditions, RULES.skills, RULES.wargear
+
+-- The skills' and wargear's machinery -- reading them, their rows under
+-- the stats, the Special tab -- filled in by sections 8 to 11. Declared
+-- here so the stats can already ask what they change (the main chunk is
+-- near Lua's 200-local limit).
+local SKILL = {}
+
+-- Columns of the weapon profile popup, left to right. `key` is both the
+-- header and the field on a profile table; `fit` is the widest value the
+-- column is sized for. Sizing from these rather than from the weapon's own
+-- values gives every popup the same width -- a wider value shrinks instead.
+-- Two columns only show where they apply: a melee profile has no Am, and D
+-- shows only where the profile has a value for it (see showsCol). A column
+-- no profile of a weapon shows is left out of its popup, which narrows.
+-- Hit, the first, isn't the profile's: it is the weapon's own modifier to
+-- hit rolls (w.hit, +0 until set), a button in every profile's row -- left
+-- click one up, right click one down (see onHitClick) -- green above 0,
+-- orange below. While the weapon is fired as Combi (see PROFILE_MODES) it
+-- shows one lower, in yellow unless still above 0. An attack's hit dice
+-- need BS / WS bettered by it (see rollAttack). Every other value is a
+-- button too, the profile's own: left click one better, right click one
+-- worse (see TRAIT_RULES.ADJ, setProfileStat) -- green better, orange
+-- worse. An attack uses them as shown (S to wound, Am for Ammo checks).
+local PROFILE_COLS = {
+    { key = "Hit", fit = "+0" },   -- the weapon's modifier to hit (w.hit)
+    { key = "SR", fit = '24"' },   -- short range
+    { key = "LR", fit = '48"' },   -- long range
+    { key = "S",  fit = "S+2" },   -- strength
+    { key = "AP", fit = "-2"  },   -- armour penetration
+    { key = "L",  fit = "10"  },   -- lethality
+    { key = "D",  fit = "D3"  },   -- damage
+    { key = "Am", fit = "6+"  },   -- ammo
+}
+
+-- How each stat is tested (see rollStat, RULES.statRolls): the number of
+-- D6, and whether it is rolled under.
+local STAT_ROLLS = RULES.statRolls
+
+-- The lowest and highest number each stat can show, whatever changes it
+-- (RULES.limits). STAT's functions -- the limits, and what changes a stat
+-- right now (STAT.effects) -- are filled in by section 7.
+local STAT = {
+    LIMITS = RULES.limits,
+    -- each stat's full name, for a stat check's title ("Check: Toughness (3)")
+    NAMES = {
+        M = "Movement", WS = "Weapon Skill", BS = "Ballistic Skill", S = "Strength", T = "Toughness",
+        W = "Wounds", I = "Initiative", A = "Attacks", Ld = "Leadership", Cl = "Cool",
+        Wil = "Willpower", Int = "Intelligence", Sv = "Save", Inv = "Invulnerable Save",
+    },
+}
+
+-- The two buttons left of each weapon profile. A ranged profile gets
+--   attack   left click attacks in the mode it shows. Only a profile with
+--            a Rapid Fire (N) trait has modes: right click switches
+--            between ATK and RF, and it is set to RF each time the weapon's
+--            popup opens. Any other ranged profile stays at ATK.
+--   ammo     one of AM (fine), OUT (out of ammo: the box turns purple) or
+--            JAM (jammed: the box turns red). Left click switches OUT on
+--            or back to AM, right click the same for JAM. A middle click
+--            on OUT reloads (see reloadWeapon): the Reload action, back
+--            to AM -- a profile with Scarce (N+) only on a D6 of N or
+--            more; with Fast Reload every OUT profile at once.
+--            Limited / Single Shot: both clicks go to SPENT (red, the box
+--            too, like JAM) instead, and a click on SPENT back to AM.
+--            Combi: when the popup opens, each Combi profile that can
+--            fire shows "Combi" (yellow) -- while at least two of them can (none
+--            OUT, JAM or SPENT). Left click: Combi -> AM -> OUT -> Combi
+--            (AM when it can't); right click JAM as usual. Hovering a
+--            profile on Combi shows BS orange: firing both is -1 to hit.
+--            Additional Attacks (N) on a ranged profile: when the popup
+--            opens it shows "AA(N)" (yellow, like Combi) unless it can't
+--            fire, and cycles like Combi: AA(N) -> AM -> OUT -> AA(N),
+--            right click JAM (Combi wins on a profile with both).
+--            An Engaged fighter's popup opens its Rapid Fire profiles at
+--            ATK, not RF (Rapid Fire isn't for close quarters); right
+--            click still switches.
+-- A melee profile (its traits include "Melee") gets
+--   attack   left click attacks; no modes
+--   count    its number of attacks: "A + 1", then "x1", "x2", ... Left
+--            click steps up, right click down, "A + 1" being the lowest.
+--            Every time the weapon's popup opens it is reset to "A + 1"
+--            -- or, once the fighter has attacked with another melee
+--            weapon this activation, to "x1": a second weapon makes one
+--            attack ("x2" with the Two-Weapon Fighter skill; see
+--            TRAIT_RULES.opening).
+--            Paired (N): "A+1+N", "A+N", then "x1", "x2", ... (short forms)
+--            Additional Attacks (N): "A + 1", "xN", "x1", "x2", ... --
+--            with another melee weapon equipped "A+1+N" -- and never a
+--            second weapon (both traits: A + 1 + N, A + N, xN).
+-- While a melee weapon's popup is open, that player's I shows what the
+-- attack does to it: an Unwieldy weapon sets it to 1 before modifiers, and
+-- attacking at "A + 1" (or "A + 1 + N") adds 2 (see statNumber).
+-- Backstab: when the popup opens, a melee profile with it gets +1 S (max
+-- 10, green) if another friend is engaged with the enemy its player has
+-- selected -- with none selected, the one enemy the fighter is engaged
+-- with (see backstabNear in 10b). The Backstab skill gives every melee
+-- profile the trait, and makes it +2 S on one that has it already (see
+-- TRAIT_RULES.stab).
+-- Assist and Interference: when an Engaged fighter's popup opens, a melee
+-- weapon's Hit is one higher (green) with a friend fighting its one enemy
+-- too, one lower (orange) with a second enemy on it (see supportNear in
+-- 10b).
+-- Heavy Blows (a skill): a melee profile with Heavy has +1 S (green).
+-- Engaged: only Light and Melee profiles can be used (the others' boxes
+-- stay as they are); not Engaged, no Melee profile can. A weapon with
+-- none it can use gets a red fill on its diamond.
+-- ATK / RF rolls the attack (see rollAttack): the hit dice against BS / WS
+-- bettered by Hit, at RF Rapid Fire's Firepower dice, with Ammo (N+) an
+-- Ammo check die; Ammo checks put the profile OUT (one) or JAM (more).
+-- It is the fighter's Fight (melee; Fighting Back when not activated),
+-- Shoot, Braced Shot (Heavy) or Aimed Shot action: during an activation
+-- it spends 1 action (Braced / Aimed Shot 2) while any are left -- none
+-- for a profile whose Additional Attacks (N) is on (see TRAIT_RULES.aaOn:
+-- a melee one only beside another melee weapon); hovering ATK / RF darkens
+-- the actions it would spend on A / C. A right click switches
+-- ATK / RF; a middle click on a ranged ATK / RF that isn't Heavy toggles
+-- Aimed Shot: +1 Hit on every profile of the weapon (making up for
+-- Combi's -1), "⊕ATK" / "⊕RF" in green with a green edge; closing the
+-- popup ends it.
+-- Reliable, in bright green in the traits line, ignores the first Ammo
+-- check, then turns red; a left click on it switches it by hand. A Shield /
+-- Parry bettering the save shows bright green there too.
+-- Shooting in an activation (see TRAIT_RULES.shot): once an attack with a
+-- ranged weapon has been made -- a Shoot, a Braced Shot or an Aimed Shot,
+-- paid then, by the action taken from A's panel before it, or with no action
+-- left -- the fighter has made its Shoot action and every ranged weapon turns
+-- red, as after a Dash. A weapon fired on Combi stays yellow until its other
+-- Combi profiles have fired. Skills change that: Fast Shot (two Shoot
+-- actions, never the second with a Heavy weapon), Gunfighter (after a Light
+-- weapon, another Light weapon for no action), Hip-Shooting (every ranged
+-- weapon without Heavy has Assault -- after a Dash, one Shoot with an Assault
+-- weapon, for no action).
+-- Marksman (a skill): while the fighter isn't Engaged, SR, LR and a "↔"
+-- between them are light blue, and an attack on the selected enemy beyond
+-- SR but within LR is +1 to hit -- shown in Hit as the popup opens only
+-- where pre-measuring is allowed (CFG.preMeasure). Sharpshooter (a skill):
+-- Aimed Shot is +2 Hit -- as it is with a weapon that has a Mono-Sight (an
+-- accessory, in brackets after the weapon's name: see TRAIT_RULES.named),
+-- which shows after the traits, bright green while the weapon is aimed;
+-- the two together are still +2.
+-- Each mode shows its `short` name (no icon art).
+local PROFILE_MODES = {
+    { key = "attack",     short = "ATK" },
+    { key = "rapid_fire", short = "RF"  },
+}
+
+--============================================================================
+-- 5. LAYOUT -- design units. The card is 1240 x 340; the root panel is the
+--    same size and the flyouts are allowed to overflow it on either side.
+--    Origin is the centre of the card, +y is up.
+--============================================================================
+
+local LAY = {
+    cardW = 1240, cardH = 340,
+
+    -- Frame art, always 2:1: drawn frameW card units wide (the height follows),
+    -- centred on the card and nudged by frameX / frameY. The image's pixel size
+    -- doesn't matter, only its 2:1 shape. It may be bigger than the card (ornate
+    -- borders, pointed ends): it never affects the layout and nothing clips it.
+    frameW = 1240, frameX = 0, frameY = 0,
+
+    -- The status glow (ASSETS status_glow): how far it reaches out from the
+    -- card's outline -- S, A / C, the weapons and the band between them.
+    -- The art is drawn for this distance: changing it needs new art.
+    glowPad = 61,
+
+    -- The "activated" chevrons (see ui.activeXml): a bold < left of S and
+    -- > right of W1, each with a thinner echo further out, in the status's
+    -- colour while the fighter is activated. activeGap: from the card's tip
+    -- to the bold one's point; activeReach: how far up / down its arms go,
+    -- as a share of the card's half height; activeLine: its thickness;
+    -- activeEcho: from its point to the echo's (0 = no echo), which is
+    -- activeEchoLine of its thickness. The art (ASSETS active_mark) is
+    -- drawn for these: changing them needs new art.
+    activeGap = 44, activeReach = 0.82, activeLine = 22,
+    activeEcho = 34, activeEchoLine = 0.55,
+
+    -- The diamond_frame art is drawn frameArt times its diamond's side: a
+    -- clear margin all round the border, so the image's own edge (UI
+    -- geometry, which nothing anti-aliases: it crawls as the camera moves)
+    -- is see-through and the line is soft-edged texture, filtered smoothly
+    -- -- and the border runs a little past the diamond's edge, over the
+    -- fill's hard edge. The art is drawn for this: changing it needs new
+    -- art.
+    frameArt = 1.25,
+
+    statusD = 150,  -- side S grows to while its picker is open (the cursor on
+                    -- it), and of the status diamonds that open around it;
+                    -- at rest S is A's size (sideD)
+    sideD   = 120,  -- side of A / C / W1 / W2 / W3, all the same size
+    sideX   = 370,  -- |x| of the stacked pairs (A / C on the left, W2/W3 right)
+    iconPad = 0.62, -- icon size as a fraction of the diamond side
+    dieIcon = 0.78, -- ... the die (ASSETS stat_die) on the roll buttons: a
+                    -- little bigger, as the art has room round the die
+    labelFill = 0.72, -- how far a stand-in label (S's status, A, C, a weapon's
+                      -- type: shown until its icon art is set) reaches toward
+                      -- the diamond's edges: the text's box, corners and all,
+                      -- stays inside this fraction of the diamond (1: touching)
+
+    colW      = 650,  -- width of the centre stat column
+    statGap   = 1,    -- extra space between neighbouring stat columns (negative
+                      -- pulls them together); the row stays centred
+    statSignScale = 0.6, -- a value's trailing sign (the " of 4", the + of 3+)
+                         -- as a fraction of valueFont. It is its own text
+                         -- beside the number: TTS shows rich-text size tags
+                         -- as plain text, so one text can't mix sizes.
+    statY     = 10,    statRowH = 75,  -- stat block: header row over value row
+    -- While a value is changed but not yet kept, hovering it shows a Set
+    -- plate above it (it keeps the number as the new base value), as big as
+    -- the value's cell; its "Set" fills statIconPad of it, both ways.
+    statIconPad = 0.8,
+
+    -- The condition bar under the card: the conditions that are on, as a
+    -- centred row of icons condGap apart, hanging condPad below the stats'
+    -- panel (A's top tip to C's bottom tip) with nothing behind them. Each
+    -- icon is half a diamond's height, less condPad above and below, times
+    -- condScale (size and place derived below). condCountFont is the "x2"
+    -- on a stacked one (condScale leaves it be).
+    condPad = 4, condGap = 0, condFont = 18, condCountFont = 48, condScale = 1.5,
+    -- Skills and wargear: their names as plain text in the band under the
+    -- stats, from C's / W3's centres down to their bottom tips, less
+    -- skillPad above and below -- the skills, or while the cursor is on the
+    -- band (or the fighter is at 0 wounds) the wargear instead. Names are
+    -- skillScale times the stat headers' size (labelFont), smaller only
+    -- when they don't fit: up to skillRows rows share the band evenly, as
+    -- many as give the biggest text, a row being skillLeading times its
+    -- size tall at most. Each row is centred, as wide as it can be while
+    -- keeping skillPad clear of C's and W3's slanted edges (at most the
+    -- stat column), and grows on its own as far as that lets it --
+    -- skillEven = true keeps every row at the smallest row's size instead.
+    -- Names are skillSpace times their size apart, with a small diamond in
+    -- the edges colour between them, skillMark times it a side (0: none).
+    skillPad = 4, skillScale = 0.85, skillRows = 3, skillLeading = 1.1, skillEven = false,
+    skillSpace = 1.1, skillMark = 0.24,
+    -- Hovering a name shows it in the panel over the stats that Out of
+    -- Action and the Recovery Test use (see ACTIVATION): the full name
+    -- (midTitleFont) in the middle, or -- with a description -- over it
+    -- (skillInfoFont, smaller when it wouldn't fit), skillInfoPad in.
+    skillInfoFont = 26, skillInfoPad = 12,
+
+    -- The panels over the stats (from the middle of A / C to the middle of
+    -- W2 / W3, both ways): "Out of Action" over a Revive button
+    -- (midReviveW x midBtnH), and the Recovery Test over three diamond
+    -- buttons midDiamond a side, tip to tip midGap apart: the number of
+    -- dice, the die that rolls them, and X. midTitleFont is the title,
+    -- midBtnFont the buttons' text. The space above the title, between it
+    -- and the buttons and under them is shared out evenly.
+    midTitleFont = 52, midBtnFont = 44, midBtnH = 64, midGap = 16,
+    midDiamond = 66, midReviveW = 240,
+    -- the Nerve Check's "Cl", left of its first diamond (the values colour)
+    midStatFont = 44,
+    -- A roll's dice (see ACTIVATION.diceXml), in the same panel, black:
+    -- the faces -- diceD a side at most, diceSpace apart (both shrinking
+    -- together when many dice need the room), a D6's diamond pips dicePip
+    -- of a side across, their edge diceEdge thick at any size -- and the
+    -- result ("∑9": diceSumFont) always at the panel's right end, the dice
+    -- centred in the room left of it (diceSumGap clear), everything dicePad
+    -- clear of the diamonds' slanted edges; until they have settled,
+    -- "Rolling Dice..." (diceWaitFont). What is rolled shows in the bar
+    -- under the stats (see SKILL.state).
+    diceD = 136, diceSpace = 12, dicePip = 0.22, diceEdge = 6, diceWaitFont = 44,
+    diceSumFont = 62, diceSumGap = 20, dicePad = 10,
+    -- The Ammo trait's D6 in an attack: the cartridge (ASSETS dice_ammo)
+    -- faint behind its pips, diceAmmoMark times the face, turned
+    -- diceAmmoTurn degrees (0: upright; -45: along the diagonal, its tip
+    -- to the upper right).
+    diceAmmoMark = 1, diceAmmoTurn = 0,
+    -- A sign over a die (Shock, Blaze: see CFG.shockMark): diceSym of the
+    -- die's side tall, the die's top diceSymGap of a side below it. While
+    -- any die of a roll has one, the dice shrink and sink as far as their
+    -- signs need the room over them.
+    diceSym = 0.42, diceSymGap = 0.04,
+
+    -- Health bar. Its width is derived below: A's centre to W2's centre.
+    hpY   = 125,  -- centre of the bar: its top at A's / W2's top tips ...
+    hpH   = 81,   -- height of the bar: ... its bottom at their middles
+    hpGap = 0.1,  -- gap between segments, as a fraction of hpH. Scaling with
+                  -- the bar keeps the segments countable when zoomed out.
+    -- At 0 wounds: a hpOutW-thick frame just inside the bar's edge, and
+    -- hpOutText over it (hpOutFont, shrunk to fit between A and W2).
+    hpOutW = 7, hpOutFont = 50, hpOutText = "Skills disabled",
+    -- The compact card (a right click on the name): the bar on a black plate
+    -- (COL.hpBack) reaching compactEdge past it all round, the pair moved
+    -- down by compactDrop (derived below: the plate's bottom on the card's
+    -- lower edge, where the whole card would start above the model).
+    compactEdge = 6,
+
+    -- The fighter's name, centred above the card, nameGap clear of its top,
+    -- at nameFont -- shrunk to fit a long one into nameW (below: from the
+    -- middle of A to the middle of W2). (TTS's UI has no fancy font built in;
+    -- a custom one would need a font AssetBundle.) nameShadow: how far its
+    -- shadow sits down and right, as a fraction of nameFont; nameOutline: how
+    -- far four more dark copies sit off each corner, a thin rim that keeps
+    -- the name readable on any background (0: none; both in COL.nameShadow).
+    nameFont = 96, nameGap = 10, nameShadow = 0.1, nameOutline = 0.035,
+    -- The arrows beside the name (CFG.nameArrows): nameArrow times nameFont
+    -- in size, nameArrowGap from the name's ends.
+    nameArrow = 0.6, nameArrowGap = 16,
+
+    -- Font sizes, used exactly as set: labelFont for the stat headers,
+    -- valueFont for the stat values. Nothing shrinks them, so a size too big
+    -- for its column spills into the neighbours -- WS and Wil are the widest.
+    labelFont = 50, valueFont = 60, diamondFont = 26,
+
+    -- Flyouts (weapon popups, A's and C's panels), in their own units: every
+    -- number in here except `gap`, `iconPad`, `costPad`, `panelRows`,
+    -- `specialRows` and the name's `nameLeading` / `nameFit` and `traitFit`
+    -- is multiplied by `scale`, so they all resize in one go. Weapon popups
+    -- with the same columns are the same width (see PROFILE_COLS); colGap is
+    -- the space between the profile columns. A weapon popup's rows are as
+    -- tall as W1, tip to tip, whatever the scale (see weaponPopupXml).
+    pop = {
+        scale   = 2,
+        gap     = 0,    -- card units A's and C's panels sit further out
+                        -- from A / C; at 0 the arrows' diamonds touch A's and
+                        -- C's edges. (Weapon popups always wrap round W1.)
+        pad     = 6,    -- flyout padding
+        colGap  = 16,
+        headH   = 26,   -- a weapon popup's header rows: its name, then the
+                        -- column names
+        headTop = 3,    -- space above those rows (instead of `pad`) ...
+        headGap = 3,    -- ... and between them and the first profile
+        rowH    = 34,   -- a profile's numbers row and traits row; one toggle
+        boxGap  = 6,    -- space between profile boxes, and between toggles
+        border  = 2,    -- the gold edge round profile boxes and toggles
+        aimEdge = 3,    -- the green edge round an ATK / RF cell on Aimed Shot
+        boxPad  = 3,    -- a box's edge to its buttons, icons and text
+        traitFit = 0.96, -- how much of its line a long traits text may fill
+                         -- (the rest is its margin, split left and right)
+        traitPad = 1,   -- a profile box's edge to its traits line (a little
+                        -- less than boxPad, so the traits get more room)
+        btnW    = 62,   -- width of a profile's ATK / AM cells: from W1's tip
+                        -- to the divider before its stats
+        iconPad = 0.8,  -- icon size as a fraction of its button
+        condIconPad = 1.15, -- the same for a condition's icon (C's panel)
+        costPad = 0.7,  -- an action's S / D: its box as a fraction of the
+                        -- diamond, tip to tip
+        entryW  = 150,  -- a condition "arrow" in C's panel: the width of its
+                        -- strip (its diamond adds half its own)
+        actionW = 170,  -- ... and an action's in A's panel
+        entryGap = 3,   -- space between the arrows, above / below and across
+        tabH = 24, tabFont = 20,   -- the Generic / Special tabs over A's panel
+                        -- (each as wide as an action)
+        panelRows = 4,  -- conditions per column: together they span A's top
+                        -- tip to C's bottom tip; more start another column.
+                        -- It also sets every arrow's size, actions too (A's
+                        -- columns are as STATUS_ACTIONS has them, a long one
+                        -- reaching past A and C). Columns fill from the middle.
+        condRows = 5,   -- C's panel: conditions per column (the arrows as big as
+                        -- panelRows makes them, so a longer column reaches past
+                        -- A and C), the rest in the next column
+        specialRows = 6, -- the Special tab's actions (Wyrd, skills, wargear), next
+                        -- to its dice: one column of up to this many, then another
+        titleFont = 28, headFont = 18, valueFont = 22, traitFont = 17, btnFont = 20,
+        nameLeading = 0.95, -- a two-line weapon name: the distance between its
+                            -- lines as a fraction of its font size (TTS's own
+                            -- is about 1.15)
+        nameFit = 0.96,     -- how much of its space's width a weapon name may
+                            -- use (other text keeps a wider margin)
+    },
+}
+
+-- Derived placement. Half a diamond's diagonal is side * sqrt(2)/2, so the
+-- stacked pairs meet exactly on the centre line and each outer diamond's inner
+-- vertex lands on that junction: the three read as one interlocking chain.
+-- Kept exact (not rounded), so neighbouring tips meet on the same point.
+local function halfDiag(side) return side * math.sqrt(2) / 2 end
+
+LAY.sideY   = halfDiag(LAY.sideD)                 -- |y| of the stacked pairs
+LAY.statusX = LAY.sideX + halfDiag(LAY.statusD)   -- S grown, out on the left point
+LAY.statusRestX = LAY.sideX + halfDiag(LAY.sideD) -- ... and at rest (A's size), W1's mirror
+LAY.weaponX = LAY.sideX + halfDiag(LAY.sideD)     -- W1, out on the right point
+
+-- The status glow's box: the card's outline -- S's left tip (at rest) to
+-- W1's right tip, A's top tip to C's bottom one -- and glowPad round it
+-- (as the art is drawn).
+LAY.glowL = -(LAY.statusRestX + halfDiag(LAY.sideD)) - LAY.glowPad
+LAY.glowR = LAY.weaponX + halfDiag(LAY.sideD) + LAY.glowPad
+LAY.glowH = 2 * (LAY.sideY + halfDiag(LAY.sideD) + LAY.glowPad)
+
+-- The right-hand "activated" chevron (the left one is its mirror): its
+-- point activeGap out from W1's tip, its arms running back at 45 degrees,
+-- parallel to the card's slanted edges; activeArt is the box its art
+-- fills (the echo, the line's thickness and activePad of soft glow round
+-- it, as the art is drawn).
+LAY.activeTip   = LAY.weaponX + halfDiag(LAY.sideD) + LAY.activeGap
+LAY.activeArm   = LAY.activeReach * (LAY.sideY + halfDiag(LAY.sideD))
+LAY.activePad   = 16
+LAY.activeArtL  = LAY.activeTip - LAY.activeArm - LAY.activeLine - LAY.activePad
+LAY.activeArtR  = LAY.activeTip + LAY.activeEcho + LAY.activeLine + LAY.activePad
+LAY.activeArtH  = 2 * (LAY.activeArm + LAY.activeLine + LAY.activePad)
+
+-- The skills' band: from C's centre down to its bottom tip, less skillPad.
+LAY.skillY    = -(LAY.sideY + halfDiag(LAY.sideD) / 2)
+LAY.skillBand = halfDiag(LAY.sideD) - 2 * LAY.skillPad
+
+-- The condition bar: icons condScale times as tall as that band, hanging
+-- condPad under the stats' panel (C's bottom tip).
+LAY.condD = (halfDiag(LAY.sideD) - 2 * LAY.condPad) * LAY.condScale
+LAY.condY = -(LAY.sideY + halfDiag(LAY.sideD) + LAY.condPad + LAY.condD / 2)
+
+-- The weapon diamonds: W1 on the right point, W2 above and W3 below it. One
+-- weapon slot, and one popup, per spot.
+LAY.weaponSpots = {
+    { x = LAY.weaponX, y = 0 },
+    { x = LAY.sideX,   y = LAY.sideY },
+    { x = LAY.sideX,   y = -LAY.sideY },
+}
+
+-- Where weapon `i` sits: W1-W3 on their spots; a fourth and more (rare --
+-- see moreWeapons) in a column straight down from W1, tip to tip, W4 just
+-- below and right of W3. Those only show while a weapon popup is open.
+function LAY.weaponSpot(i)
+    local n = #LAY.weaponSpots
+    if i <= n then return LAY.weaponSpots[i] end
+    return { x = LAY.weaponX, y = -2 * halfDiag(LAY.sideD) * (i - n) }
+end
+
+-- The health bar is sized on its own, independent of the stat column: by
+-- default it runs from the centre of A to the centre of W2, tucking its ends
+-- under both diamonds.
+LAY.hpW = 2 * LAY.sideX
+
+-- The fighter's name may be as wide as from the middle of A to the middle
+-- of W2; a longer one shrinks to fit.
+LAY.nameW = 2 * LAY.sideX
+
+-- Click blocker: a transparent rectangle behind everything, from A's top
+-- tip to W3's bottom tip -- so it takes in the health bar and the condition
+-- bar. A click that misses a button but lands in here hits the card instead
+-- of selecting whatever is behind it; everywhere else (the frame art)
+-- lets clicks through.
+LAY.blockW = 2 * LAY.sideX
+LAY.blockH = 2 * (LAY.sideY + halfDiag(LAY.sideD))
+
+-- The compact card's drop: the bar's black plate down onto the card's lower
+-- edge (C's bottom tip), the name with it (negative is down).
+LAY.compactDrop = -LAY.blockH / 2 - (LAY.hpY - LAY.hpH / 2 - LAY.compactEdge)
+
+LAY.frameH   = LAY.frameW / 2     -- frames are always 2:1
+
+-- The flyout builders work in these: LAY.pop with every size multiplied out.
+LAY.popS = {}
+for k, v in pairs(LAY.pop) do
+    local fixed = (k == "scale" or k == "gap" or k == "iconPad" or k == "condIconPad" or k == "costPad" or k == "panelRows"
+                   or k == "specialRows" or k == "condRows"
+                   or k == "nameLeading" or k == "nameFit" or k == "traitFit")
+    LAY.popS[k] = fixed and v or v * LAY.pop.scale
+end
+
+-- Flyouts are anchored from the card's centre so there is no pivot
+-- ambiguity: rectAlignment sets an element's pivot as well as its anchor, and
+-- only MiddleCenter puts both in the middle, where offsetXY means "centre
+-- offset". A's and C's panels hang off A / C's outer tips (see panelLayout),
+-- weapon popups wrap round W1 (see weaponPopupXml).
+
+--============================================================================
+-- 6. DATA MODEL
+--============================================================================
+
+local function defaultFighter()
+    return {
+        name   = "Unnamed Ganger",
+        gang   = "",
+        -- gangType: the gang's type as its roster names it ("House Escher",
+        -- "House Escher (Malstrain Corrupted)"), for the rules that go by
+        -- it (see ACTIVATION.agilityMod) -- or nil
+        rank   = "Ganger",       -- its symbol goes before the name (CFG.rankSymbols)
+        ftype  = "None",         -- the type's name ("Cult Witch"); not shown
+        -- category: its type on A (ASSETS type_<category>), one of wyrd,
+        -- loner, medic, tech, melee, ranged, beast -- or nil for none
+        status = "active",       -- key from STATUSES, drives the S diamond
+
+        -- Full Necromunda statline, before any condition. The stat block
+        -- shows the keys listed in CFG.statOrder / statOrderHover, lowered by
+        -- conditions where they apply; W also sizes the health bar.
+        stats = {
+            M = '4"', WS = "5+", BS = "3+", S = "6",  T = "4", W = "3",
+            I = "5",  A  = "2",  Ld = "7",  Cl = "6",  Wil = "8",  Int = "7",
+            Sv = "6+",
+        },
+
+        usedActions = {}, -- [key] = true for each action taken since the
+                          -- fighter was last readied (shown dimmed)
+        actionsLeft = 0,  -- actions still to take in this activation: 2 once
+                          -- activated (1 if it was Suppressed), 0 once spent;
+                          -- A shows the first green, C the second
+        -- activation: where the fighter is in its round -- "ready" (readied
+        -- by the turn or a right click on S: S green), "active" (activated
+        -- by a left click on S, until another once no action is left), or
+        -- nil (neither: done, or not readied yet). startedSI: it was
+        -- Seriously Injured when activated -- only then does finishing
+        -- make a Recovery test (see completeActivation). lostAction: it was
+        -- Suppressed when activated, so it lost its first action (A shows
+        -- it dimmed until the activation ends, see ACTIVATION.readyLook).
+        activation = nil,
+        startedSI  = false,
+        lostAction = nil,
+        outOfAction = false,   -- taken Out of Action: the panel over the stats
+        recovery = nil,   -- the Recovery Test panel while open: { dice = n,
+                          -- helper = the friend assisting's name, tend = Tend Wounds used,
+                          -- treated = the dice Treat Ally added,
+                          -- foes = the enemies within 1" when it opened ("A and B"):
+                          -- then it has just the one button, Out of Action }
+        treated = nil,    -- the Injury dice friends' Treat Ally has added to
+                          -- its next Recovery test (see setTreated)
+        grouped = nil,    -- group activated: a friend's Group Activation took
+                          -- it along (the sign after its name) -- until it
+                          -- activates (see setGroupActivated)
+
+        statEdits = {},   -- [key] = the number a player set by hand and kept
+                          -- (Set plate), in place of the statline's; see keepStat
+
+        wounds = { current = 3, max = 3 },   -- the health bar
+
+        -- The base: { diameter = inches, mm =, source = "measured" /
+        -- "manual" / ... } (see baseRecord). None here: the card measures
+        -- its model once loaded, unless an importer passed one.
+        base = nil,
+        lift = nil,       -- inches the card was raised (lowered: negative) by
+                          -- hand, with the arrows beside the name (see setLift)
+
+        conditions = {},   -- [key] = number of stacks, for each condition on (C)
+
+        -- Skills, by name (see SKILLS): shown in a row under the stats, or
+        -- -- for one that is an action -- an entry under A's Special tab.
+        -- setFighter also takes them as one string, "Inspiring, Medicate".
+        skills = { "Counter-attack", "Inspiring" },
+        -- Wargear, by name (see WARGEAR), just like the skills: in the row
+        -- under theirs. One string works too. None by default, so an older
+        -- save without any doesn't gain the demo's.
+        wargear = {},
+
+        -- Up to three weapons (W1-W3). Each profile: SR / LR / S / AP / L / D /
+        -- Am (see PROFILE_COLS) and its traits; optionally `name`, which labels
+        -- the profile when a weapon has more than one. In play the card keeps
+        -- its state on the profile too (see setProfileState): `mode`,
+        -- `ammo` ("out" / "jam" / "spent" / "combi" / "extra"), a melee
+        -- profile's `attacks` and `reliableUsed`.
+        weapons = {
+            {
+                name = "Autogun",
+                profiles = {
+                    { SR = '8"', LR = '24"', S = "3", AP = "-", L = "-", D = "1", Am = "4+",
+                      traits = "Rapid Fire (1)" },
+                },
+            },
+            {
+                name = "Stub Gun",
+                profiles = {
+                    { SR = '6"', LR = '12"', S = "3", AP = "-", L = "1", D = "-", Am = "4+",
+                      traits = "Light" },
+                    { SR = '6"', LR = '12"', S = "3", AP = "-", L = "1",
+                      D = "-", Am = "-", traits = "Light, Cursed, Limited" },
+                },
+            },
+            {
+                name = "Stilleto",
+                profiles = {
+                    { SR = "E", LR = "-", S = "-", AP = "-1", L = "1",
+                      traits = "Melee, Toxin" },
+                    { SR = "E", LR = "-", S = "-", AP = "-1", L = "1",
+                      traits = "Melee, Toxin" },
+                    { SR = "E", LR = "-", S = "-", AP = "-1", L = "1",
+                      traits = "Melee, Toxin" },
+                    { SR = "E", LR = "-", S = "-", AP = "-1", L = "1",
+                      traits = "Melee, Toxin" },
+                    { SR = "E", LR = "-", S = "-", AP = "-1", L = "1",
+                      traits = "Melee, Toxin" },
+                },
+            },
+        },
+    }
+end
+
+local fighter = defaultFighter()
+
+-- A fighter put here by the Mundane Importer, which gives every model its
+-- own copy of this script with this one line filled in:
+--   { id = "<import id>", fighter = { ...the setFighter table... } }
+-- On load a new import id wins over the saved state; after that the saved
+-- state (wounds, conditions, ammo in play) carries on as usual.
+local IMPORTED = nil --@@MUNDA_IMPORT@@
+
+local ui = {
+    visible = CFG.startVisible,
+    built   = false,
+    viewers = { "all" },  -- whose copies of the card exist (see wantedViewers)
+    view    = {},         -- per viewer key: what that player is doing (see view)
+    rawTexts = {},        -- texts TTS must be sent as plain text (see textXml)
+}
+
+-- One viewer's own state -- the card's copy for one player, so what one
+-- player hovers never opens anything on another's:
+--   open        the flyout that copy shows
+--   hoverToken  guards the delayed flyout hide
+--   statsHover  the cursor is over the stat block (hover view on show)
+--   statCol     the stat column whose value the cursor is on (its Set plate
+--               and the sources of what changes it show)
+--   hpHover     id of the health segment under the cursor
+--   hitHover    the weapon whose melee Hit the cursor is on (the models
+--               behind its Assist / Interference are highlighted)
+--   actTab      "special" while that player has A's Special tab chosen
+--               (until the panel closes)
+--   skillHover  the skill or wargear name under the cursor (its panel shows)
+--   infoHover   the panel over the stats a hovered condition icon or flyout
+--               entry shows (see onInfoEnter), infoFrom that icon's /
+--               entry's id -- dropped when it hides under the cursor
+--   mindFrom    the Wyrd / Utility entry under the cursor (its id): the
+--               stats show the hover view meanwhile (see SKILL.mindStats)
+--   headHeld    a Set plate was just clicked: entering the header row
+--               doesn't swap the stats until the cursor has left it
+--   yaw, pushed the copy's facing, and the facing last sent to TTS
+local function view(key)
+    local v = ui.view[key]
+    if not v then
+        v = { hoverToken = 0, statsHover = false, yaw = CFG.yaw }
+        ui.view[key] = v
+    end
+    return v
+end
+
+-- Weapon `i` of the fighter: 1-3 are the slots W1-W3, 4 and up the extras
+-- kept in moreWeapons (see sortWeapons); and how many there are in all.
+local function weaponAt(i)
+    local n = #LAY.weaponSpots
+    if i <= n then return fighter.weapons[i] end
+    return (fighter.moreWeapons or {})[i - n]
+end
+local function weaponCount() return #LAY.weaponSpots + #(fighter.moreWeapons or {}) end
+
+--============================================================================
+-- 7. SMALL HELPERS
+--============================================================================
+
+local function esc(s)
+    s = tostring(s == nil and "" or s)
+    s = s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+    s = s:gsub('"', "&quot;"):gsub("'", "&apos;")
+    return s
+end
+
+local function clamp(n, lo, hi)
+    n = tonumber(n) or 0
+    if n < lo then return lo end
+    if n > hi then return hi end
+    return n
+end
+
+-- obj.call hands a function one argument, so the setters that take two
+-- (key, value) also accept them as one table: { key = ..., value = ... }.
+local function keyValue(a, b)
+    if type(a) == "table" and b == nil then return a.key, a.value end
+    return a, b
+end
+
+-- Assets registered at runtime (weapon icons supplied as raw URLs).
+local dynamicAssets = {}
+
+local function hasAsset(name)
+    if not name or name == "" then return false end
+    if dynamicAssets[name] and dynamicAssets[name] ~= "" then return true end
+    return ASSETS[name] ~= nil and ASSETS[name] ~= ""
+end
+
+-- Returns ' image="foo"' when the asset exists, otherwise an empty string so
+-- the element falls back to a plain colour.
+local function imgAttr(name)
+    if hasAsset(name) then return string.format(' image="%s"', name) end
+    return ""
+end
+
+-- A weapon's `icon` may be an ASSETS key or a bare URL. URLs get registered
+-- under a generated name so the XML can reference them like any other asset.
+local function resolveIcon(value, autoName)
+    if type(value) ~= "string" or value == "" then return nil end
+    if value:match("^https?://") then
+        dynamicAssets[autoName] = value
+        return autoName
+    end
+    return value
+end
+
+local function buildAssetList()
+    local list = {}
+    for _, source in ipairs({ ASSETS, dynamicAssets }) do
+        for name, url in pairs(source) do
+            if type(url) == "string" and url ~= "" then list[#list + 1] = { name = name, url = url } end
+        end
+    end
+    return list
+end
+
+-- Position of `key` in a list of { key = ... } entries (STATUSES, ACTIONS...).
+local function indexOf(list, key)
+    for i, e in ipairs(list) do
+        if e.key == key then return i end
+    end
+end
+
+-- A status's entry; an unknown key reads as the default, the first one.
+local function statusDef(key) return STATUSES[indexOf(STATUSES, key) or 1] end
+
+-- The status glow round the card: shown when its art is set and
+-- CFG.statusGlow isn't 0, in the status's colour at that strength.
+function ui.glowing() return hasAsset("status_glow") and (tonumber(CFG.statusGlow) or 0) > 0 end
+function ui.glowColor()
+    local a = math.floor(clamp(CFG.statusGlow, 0, 1) * 255 + 0.5)
+    return statusDef(fighter.status).color:sub(1, 7) .. string.format("%02X", a)
+end
+
+-- The "activated" chevrons: in the status's colour at CFG.activeMark, shown
+-- only while the fighter is activated (and activeMark isn't 0).
+function ui.activeColor()
+    local a = math.floor(clamp(tonumber(CFG.activeMark) or 0, 0, 1) * 255 + 0.5)
+    return statusDef(fighter.status).color:sub(1, 7) .. string.format("%02X", a)
+end
+function ui.activeShown()
+    return fighter.activation == "active" and (tonumber(CFG.activeMark) or 0) > 0
+end
+
+-- The chevrons' XML: a clear card-sized container, activeMark, holding a
+-- > right of W1 and a < left of S, pointing away from the card like arrows
+-- round the hexagon its outline makes. With the art (ASSETS active_mark)
+-- each side is one Image, soft-edged and with its echo; without it each
+-- chevron is two turned bars (flat colour, the echo thinner). Every part
+-- is named activeMark_<n> so drawReady can tint them all.
+function ui.activeXml()
+    local x, n = {}, 0
+    local function add(fmt, ...)
+        n = n + 1
+        x[#x + 1] = string.format(fmt, n, ...)
+    end
+    local col = ui.activeColor()
+    x[#x + 1] = string.format('<Panel id="activeMark" active="%s" rectAlignment="MiddleCenter" width="%d"' ..
+        ' height="%d" color="%s" raycastTarget="false">', tostring(ui.activeShown()), LAY.cardW, LAY.cardH, COL.clear)
+    for _, side in ipairs({ 1, -1 }) do
+        if hasAsset("active_mark") then
+            add('<Image id="activeMark_%d" rectAlignment="MiddleCenter" offsetXY="%g 0" width="%g" height="%g"' ..
+                ' rotation="0 0 %d" color="%s" image="active_mark" raycastTarget="false" />',
+                side * (LAY.activeArtL + LAY.activeArtR) / 2, LAY.activeArtR - LAY.activeArtL, LAY.activeArtH,
+                side == 1 and 0 or 180, col)
+        else
+            -- each arm a bar from its end to just past the point, so the two
+            -- outer corners meet in a sharp point (a mitred joint)
+            local function chevron(tip, t, ink)
+                local len = LAY.activeArm * math.sqrt(2) + t / 2
+                for _, up in ipairs({ 1, -1 }) do
+                    local d = (len / 2 - LAY.activeArm * math.sqrt(2)) / math.sqrt(2)
+                    add('<Panel id="activeMark_%d" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g"' ..
+                        ' height="%g" rotation="0 0 %g" color="%s" raycastTarget="false" />',
+                        side * (tip + d), -up * d, len, t, side * up * -45, ink)
+                end
+            end
+            chevron(LAY.activeTip, LAY.activeLine, col)
+            if LAY.activeEcho > 0 then
+                chevron(LAY.activeTip + LAY.activeEcho, LAY.activeLine * LAY.activeEchoLine, col)
+            end
+        end
+    end
+    x[#x + 1] = "</Panel>"
+    ui.activeParts = n
+    return table.concat(x)
+end
+
+-- { r, g, b } (0-1) for "#RRGGBB" -- what printToAll and highlightOn take.
+local function rgbOf(hex)
+    local h = tostring(hex or ""):match("#?(%x%x%x%x%x%x)") or "E6E6E6"
+    return { tonumber(h:sub(1, 2), 16) / 255, tonumber(h:sub(3, 4), 16) / 255, tonumber(h:sub(5, 6), 16) / 255 }
+end
+
+-- A model's gang: the name after CFG.gangTag in its tags (or after one of
+-- CFG.oldGangTags, from an earlier import), if it has one. (A field of
+-- `ui`, not a local: the main chunk is at Lua's 200-local limit.)
+function ui.gangOf(obj)
+    local ok, tags = pcall(function() return obj.getTags() end)
+    local prefixes = { CFG.gangTag }
+    for _, old in ipairs(CFG.oldGangTags or {}) do prefixes[#prefixes + 1] = old end
+    for _, t in ipairs(ok and type(tags) == "table" and tags or {}) do
+        if type(t) == "string" then
+            for _, pre in ipairs(prefixes) do
+                if t:sub(1, #pre) == pre and #t > #pre then return t:sub(#pre + 1) end
+            end
+        end
+    end
+end
+
+-- What this card's chat lines start with: "[<its gang>] " -- from its gang
+-- tag, else the fighter's own `gang` -- or CFG.infoPrefix without one. A
+-- line about several fighters (an engagement) is said by the card that
+-- started it, so it carries that one's gang.
+function ui.prefix()
+    local gang = ui.gangOf(self)
+    if not gang or gang == "" then gang = trimText(fighter and fighter.gang or "") end
+    return gang ~= "" and ("[" .. gang .. "] ") or CFG.infoPrefix
+end
+
+-- Everything the card says in chat goes through here: ui.prefix() in
+-- front, in `rgb` ({ r, g, b }).
+local function chat(msg, rgb)
+    msg = ui.prefix() .. msg
+    if printToAll then pcall(printToAll, msg, rgb or { 0.9, 0.9, 0.9 }) else print(msg) end
+end
+
+-- Highlights a model briefly (CFG.statusFlash seconds) in `rgb`.
+local function flash(obj, rgb)
+    pcall(function() obj.highlightOn(rgb, CFG.statusFlash) end)
+end
+
+-- The colour an action (`key`, from ACTIONS) highlights models in: its
+-- type's colour (see ACTION_TYPES; a light grey for one with none) at full
+-- brightness -- the fills in A's panel are dark, so the white names stay
+-- readable, and a highlight that dark would hardly show. { r, g, b }.
+-- `kind`: the type itself, for an action that isn't in ACTIONS (a skill's).
+function ACTIVATION.actionGlow(key, kind)
+    local a = ACTIONS[indexOf(ACTIONS, key) or 0]
+    local c = rgbOf(ACTION_TYPES[kind or (a and a.type) or ""] or "#E6E6E6ff")
+    local top = math.max(c[1], c[2], c[3])
+    if top > 0 then for i = 1, 3 do c[i] = c[i] / top end end
+    return c
+end
+
+-- How many stacks of a condition the fighter has: 0 when it is off. (An
+-- older save may hold `true`, which counts as one.)
+local function conditionCount(key)
+    local v = fighter.conditions[key]
+    if v == true then return 1 end
+    return math.max(0, math.floor(tonumber(v) or 0))
+end
+
+-- A condition's name as its toggle shows it: a stacking one adds its count
+-- once there is more than one ("Concussion x2").
+local function conditionLabel(c)
+    local n = conditionCount(c.key)
+    if c.stacks and n >= 2 then return string.format("%s x%d", c.label, n) end
+    return c.label
+end
+
+-- The stats' limits (STAT.LIMITS): the lowest and highest number stat `key`
+-- can show, and a number kept between them.
+function STAT.range(key)
+    local r = STAT.LIMITS[key] or STAT.LIMITS.default
+    return r[1], r[2]
+end
+function STAT.clamp(key, n)
+    local lo, hi = STAT.range(key)
+    return math.max(lo, math.min(hi, n))
+end
+
+-- Whether a change of `d` to stat `key`'s number makes it better: a higher
+-- number, except for the stats rolled at or over (BS, WS, Sv -- see
+-- STAT_ROLLS), where lower is better.
+function STAT.better(key, d)
+    local roll = STAT_ROLLS[key]
+    if roll and not roll.under then return d < 0 end
+    return d > 0
+end
+
+-- The total change conditions, skills and wargear make to a stat right
+-- now: every condition's mods[key] times its stacks (Radphage -1 T,
+-- Concussion -1 I per stack), and what every skill and piece of wargear
+-- the fighter has gives it (STAT.gives) while it works (see SKILL.owned, STAT.works:
+-- at 0 wounds, Seriously Injured or Out of Action its skills are
+-- disabled, see SKILL.off). A Wyrd power (a skill of type "wyrd") is the
+-- exception: 0 wounds doesn't disable it -- only Seriously Injured and
+-- Out of Action do. `off`: SKILL.off(), when the caller has it at hand.
+function STAT.works(it, off)
+    if off == nil then off = SKILL.off() end
+    if it.kind ~= "skill" or not off then return true end
+    return it.type == "wyrd" and fighter.status ~= "seriously_injured" and fighter.outOfAction ~= true
+end
+-- The fighter's invulnerable save as things stand: the best `inv` of its
+-- skills and wargear that work and aren't burnt out (fighter.burnt, see
+-- setBurnt) -- 5 for 5+ -- and the item giving it; nil for none. Nothing
+-- betters it, and AP doesn't worsen it (see takeSaves).
+function STAT.inv()
+    local best, from
+    for _, it in ipairs(SKILL.with("inv")) do
+        local n = tonumber(it.inv)
+        if n and not (fighter.burnt or {})[it.key] and not (best and best <= n) then best, from = n, it end
+    end
+    return best, from
+end
+-- The stats the hover view shows (CFG.statOrderHover): with "Inv" in Sv's
+-- place while the fighter has an invulnerable save (STAT.inv) -- the
+-- other view shows Sv.
+function STAT.hoverOrder()
+    if not STAT.inv() then return CFG.statOrderHover end
+    local out = {}
+    for i, k in ipairs(CFG.statOrderHover) do out[i] = k == "Sv" and "Inv" or k end
+    return out
+end
+-- What skill / wargear `it` changes stat `key` by as things stand -- its
+-- `mods`, those of one that says `when` only while the fighter is in that
+-- status (Mesh Armour: Engaged), and its `boost` while that lasts
+-- (fighter.boosted: the Stimm-Slug, until the next activation) -- whether
+-- it works right now or not (STAT.works); 0 for nothing.
+-- A Wyrd power in effect adds what it says it does to its Wyrd's stats
+-- (`maintained`: Quickening, see SKILL.live).
+function STAT.gives(it, key)
+    local n = 0
+    if it.mods and (it.when == nil or it.when == fighter.status) then n = n + (tonumber(it.mods[key]) or 0) end
+    if it.boost and (fighter.boosted or {})[it.key] then n = n + (tonumber(it.boost[key]) or 0) end
+    if it.maintained and SKILL.live(it) then n = n + (tonumber(it.maintained[key]) or 0) end
+    return n
+end
+-- What of that may take the stat past its highest (a power that says
+-- `overLimit`: Quickening), see statNumber.
+function STAT.over(key)
+    local n = 0
+    if not (type(fighter.wyrd) == "table" and fighter.wyrd.power) then return n end   -- no power in effect
+    for _, it in ipairs(SKILL.items()) do
+        if it.overLimit and STAT.works(it) then n = n + STAT.gives(it, key) end
+    end
+    return n
+end
+-- The enemy's (or a friend's) Wyrd powers on this fighter -- fighter.hexes,
+-- see wyrdHex: what their `mods` add up to for stat `key`, the number
+-- their `base` sets it to before any modifier (Paroxysm: BS 6+), and the
+-- best number they `lend` it (Unbreakable Will: the Wyrd's Wil) -- nil for
+-- none of the last two.
+function STAT.hexed(key)
+    local m, base, lend = 0, nil, nil
+    for _, h in pairs(fighter.hexes or {}) do
+        m = m + (tonumber(h.mods and h.mods[key]) or 0)
+        local b = tonumber(h.base and h.base[key])
+        if b then base = b end
+        local l = tonumber(h.lend and h.lend[key])
+        if l and not (lend and not STAT.better(key, l - lend)) then lend = l end
+    end
+    return m, base, lend
+end
+local function statMod(key)
+    local m, off = 0, SKILL.off()
+    for _, c in ipairs(CONDITIONS) do
+        if c.mods and c.mods[key] then m = m + c.mods[key] * conditionCount(c.key) end
+    end
+    for _, it in ipairs(SKILL.items()) do
+        if STAT.works(it, off) then m = m + STAT.gives(it, key) end
+    end
+    return m + (STAT.hexed(key))
+end
+
+-- A stat's own number: changed by clicks and not kept yet (pendingStats),
+-- else set by hand and kept as its base (fighter.statEdits), else the
+-- statline's; nil when it has none ("-"). statOriginal is always the
+-- statline's. A pending number belongs to the viewer who clicked it (`by`)
+-- and is dropped when their cursor leaves the stat block; it is never saved.
+local pendingStats = {}   -- [stat] = { n = number, by = viewer key }
+local function statOriginal(key) return tonumber(tostring(fighter.stats[key] or ""):match("%d+")) end
+local function statEdited(key) return fighter.statEdits[key] ~= nil end
+local function statPending(key) return pendingStats[key] ~= nil end
+local function statKept(key)
+    if statOriginal(key) == nil then return nil end
+    return tonumber(fighter.statEdits[key]) or statOriginal(key)
+end
+local function statBase(key)
+    if statOriginal(key) == nil then return nil end
+    return pendingStats[key] and pendingStats[key].n or statKept(key)
+end
+
+-- A stat's number with everything that changes it applied -- conditions,
+-- skills and wargear (statMod), and `ctx` -- and kept within STAT.LIMITS:
+-- "5" with Concussion x2 gives 3. nil for a stat with no number ("-").
+-- A condition that sets the stat (`set`: Feared makes WS 6+) has the last
+-- word -- `unset` leaves it out, for what the stat would be without it.
+--
+-- `ctx` is what the weapons do (see weaponContext): the melee weapon open
+-- on a player's card changes I while it is open -- Unwieldy sets it to 1
+-- before any modifier, and attacking at "A + 1" adds 2, so together I
+-- is 3. ctx.save (a Shield, or a Parry weapon while Engaged, see
+-- TRAIT_RULES.saveTrait) makes Sv one better -- never past its best, 3+
+-- -- and gives a fighter with no save 6+.
+--   Wyrd powers: an enemy's that sets the stat before any modifier
+-- (Paroxysm) replaces its own number, a friend's that lends it a better
+-- one (Unbreakable Will) has the very last word, and what one of the
+-- fighter's own powers adds past the stat's highest (Quickening, see
+-- STAT.over) is added after the limits. `nohex` leaves the other
+-- fighters' powers out, for what the stat would be without them.
+local function statNumber(key, ctx, unset, nohex)
+    local base, m = statBase(key), statMod(key)
+    local hm, hbase, lend = STAT.hexed(key)
+    if nohex then m, hbase, lend = m - hm, nil, nil end
+    if base and hbase then base = hbase end
+    local over = STAT.over(key)
+    local function limit(n)
+        n = STAT.clamp(key, n - over) + over
+        if lend and STAT.better(key, lend - n) then n = lend end
+        return n
+    end
+    if key == "Sv" and ctx and ctx.save then     -- Shield / Parry: one better
+        if not base then return limit(6 + over) end   -- no save at all: 6+
+        return limit(base + m - 1)
+    end
+    if not base then return nil end
+    if key == "I" and ctx then
+        if ctx.unwieldy then base = 1 end
+        if ctx.charge then m = m + 2 end
+    end
+    local n = base + m
+    if not unset then                            -- a condition that sets the stat (Feared: WS 6+)
+        for _, c in ipairs(CONDITIONS) do
+            if c.set and c.set[key] and conditionCount(c.key) > 0 then n = c.set[key] + over end
+        end
+    end
+    return limit(n)
+end
+
+-- A stat as shown on the card: its number (statNumber), and -- for a stat
+-- rolled under (STAT_ROLLS) -- without a "+", whatever form the importer
+-- delivered it in ("9+" shows as "9").
+local function statText(key, ctx)
+    local v = tostring(fighter.stats[key] or "-")
+    local roll = STAT_ROLLS[key]
+    if roll and roll.under then v = (v:gsub("%+$", "")) end
+    local n = statNumber(key, ctx)
+    if n and not v:find("%d") then return n .. (roll and roll.under and "" or "+") end   -- "-" given a save
+    if n and n ~= statOriginal(key) then v = (v:gsub("%d+", tostring(n), 1)) end
+    return v
+end
+
+-- Everything changing stat `key` right now (ctx: see weaponContext), one
+-- entry per source: { kind = "condition", i = its place in CONDITIONS },
+-- { kind = "item", i = its place under the stats -- a skill or wargear; nil
+-- for one not shown there } or { kind = "weapon", i = its slot }, each with
+-- `up` (it makes the stat better) and / or `down` (worse) -- an Unwieldy
+-- weapon attacking at "A + 1" does both -- or `capped`: a Shield / Parry, or
+-- skills / wargear, that can't better a stat already at its best (a 3+ save).
+-- BS while a profile on Combi is hovered counts as worse (-1 to hit), though
+-- its number stays. None for a stat with no number. The stat's colour
+-- (statColor) and the sources lit up while it is hovered (see
+-- SKILL.drawSources) both come from here.
+function STAT.effects(key, ctx)
+    local out = {}
+    if statNumber(key, ctx) == nil then return out end
+    local function add(kind, i, d)
+        if d == 0 then return end
+        local up = STAT.better(key, d)
+        out[#out + 1] = { kind = kind, i = i, up = up, down = not up }
+    end
+    for i, c in ipairs(CONDITIONS) do
+        if c.mods and c.mods[key] then add("condition", i, c.mods[key] * conditionCount(c.key)) end
+    end
+    -- skills and wargear: what each gives it -- `capped` where they would
+    -- better it and its limit lets none of that through (Mesh Armour on a
+    -- 3+ save)
+    -- (a Wyrd power's own -- purple, `wyrd` -- never: it may go past it)
+    local items, sum, off = {}, 0, SKILL.off()
+    for _, it in ipairs(SKILL.items()) do
+        local d = STAT.works(it, off) and STAT.gives(it, key) or 0
+        if d ~= 0 and it.type == "wyrd" then
+            add("item", it.bar, d)
+            out[#out].wyrd = true
+        elseif d ~= 0 then
+            items[#items + 1], sum = { bar = it.bar, d = d }, sum + d
+        end
+    end
+    local raw = statBase(key) and statBase(key) + statMod(key)
+    local capped = raw ~= nil and sum ~= 0 and STAT.better(key, sum)
+                   and STAT.clamp(key, raw) == STAT.clamp(key, raw - sum)
+    for _, e in ipairs(items) do
+        if capped and STAT.better(key, e.d) then out[#out + 1] = { kind = "item", i = e.bar, capped = true }
+        else add("item", e.bar, e.d) end
+    end
+    -- other fighters' Wyrd powers on this one (fighter.hexes): purple, as
+    -- one source with nothing of its own to light up
+    local hexed = statNumber(key, ctx) - (statNumber(key, ctx, nil, true) or statNumber(key, ctx))
+    if hexed ~= 0 then
+        add("hex", nil, hexed)
+        out[#out].wyrd = true
+    end
+    for i, c in ipairs(CONDITIONS) do              -- a condition that sets it: better or worse than without
+        if c.set and c.set[key] and conditionCount(c.key) > 0 then
+            add("condition", i, statNumber(key, ctx) - statNumber(key, ctx, true))
+        end
+    end
+    if not ctx then return out end
+    if key == "I" and (ctx.unwieldy or ctx.charge) then
+        out[#out + 1] = { kind = "weapon", i = ctx.melee, up = ctx.charge == true, down = ctx.unwieldy == true }
+    elseif key == "BS" and ctx.combi then
+        out[#out + 1] = { kind = "weapon", i = tonumber(ctx.combi), down = true }
+    elseif key == "Sv" and ctx.save then
+        local plain = statNumber(key)
+        local up = not plain or statNumber(key, ctx) < plain
+        for _, i in ipairs(ctx.saveFrom or { false }) do
+            out[#out + 1] = { kind = "weapon", i = i or nil, up = up, capped = not up }
+        end
+    end
+    return out
+end
+
+-- The colour of a stat -- or of a source of a change to it -- for what
+-- changes it: green when that is better, orange when worse, yellow for
+-- both (or a Shield / Parry that couldn't help); nil when nothing does.
+-- A Wyrd power's change (`wyrd`) is purple, whatever else there is.
+function STAT.color(up, down, capped, wyrd)
+    if wyrd then return COL.wyrdInk end
+    if capped or (up and down) then return COL.valueBoth end
+    if up then return COL.valueUp end
+    if down then return COL.valueMod end
+end
+
+-- A stat value's colour, first that applies: violet while it is changed
+-- and not kept; the colour of what changes it (STAT.effects, STAT.color)
+-- -- green where all of it is better (I attacking at "A + 1", Sv with a
+-- Shield / Parry, a skill that raises it), orange where all of it is
+-- worse (a condition, an Unwieldy weapon, BS while a profile on Combi is
+-- hovered), yellow for both or a save already at 3+ given a Shield; light
+-- blue where a player kept a hand-set number (last, so everything that
+-- changes it in play still shows); else plain. Purple, over all of that
+-- but a pending number, where a Wyrd power changes it (Quickening, an
+-- enemy's Paroxysm, a friend's Unbreakable Will).
+local function statColor(key, ctx)
+    if statPending(key) then return COL.valuePending end
+    local up, down, capped, wyrd = false, false, false, false
+    for _, e in ipairs(STAT.effects(key, ctx)) do
+        up, down, capped = up or e.up == true, down or e.down == true, capped or e.capped == true
+        wyrd = wyrd or e.wyrd == true
+    end
+    return STAT.color(up, down, capped, wyrd) or (statEdited(key) and COL.valueUser or COL.value)
+end
+
+-- The looks block in GM Notes (see LOOKS): read from a model's notes (nil
+-- when there is none), written out, and put into notes -- replacing the
+-- old block, or with nil removing it -- leaving everything else as it was.
+-- (The block's markers are private to a block: the 200-local limit.)
+local LOOKS_KEYS = { "background", "headers", "text", "accent", "edges", "frame", "trim", "tint" }
+local parseLooks, formatLooks, notesWithLooks
+do
+local LOOKS_OPEN, LOOKS_CLOSE = "[Mundane Appearance]", "[/Mundane Appearance]"
+function parseLooks(notes)
+    notes = tostring(notes or "")
+    local a = notes:find(LOOKS_OPEN, 1, true)
+    if not a then return nil end
+    local b = notes:find(LOOKS_CLOSE, a, true) or #notes + 1
+    local t = {}
+    for line in notes:sub(a + #LOOKS_OPEN, b - 1):gmatch("[^\r\n]+") do
+        -- split at "=" by hand: no pattern runs over the (long) value
+        local eq = line:find("=", 1, true)
+        local k = eq and trimText(line:sub(1, eq - 1)):lower()
+        if k and k ~= "" and not k:find("%A") then t[k] = trimText(line:sub(eq + 1)) end
+    end
+    return t
+end
+function formatLooks(t)
+    local lines = { LOOKS_OPEN }
+    for _, k in ipairs(LOOKS_KEYS) do lines[#lines + 1] = string.format("%-10s = %s", k, tostring(t[k] or "")) end
+    lines[#lines + 1] = LOOKS_CLOSE
+    return table.concat(lines, "\n")
+end
+function notesWithLooks(notes, block)
+    notes = tostring(notes or "")
+    local a = notes:find(LOOKS_OPEN, 1, true)
+    if a then
+        local _, b = notes:find(LOOKS_CLOSE, a, true)
+        notes = (notes:sub(1, a - 1) .. notes:sub((b or #notes) + 1)):gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    if not block then return notes end
+    return notes == "" and block or (notes .. "\n\n" .. block)
+end
+end
+
+-- Pulls the trailing integer out of ids like "hpSeg_3".
+local function idNum(id, prefix)
+    local n = tostring(id or ""):match("^" .. prefix .. "_(%d+)$")
+    return tonumber(n)
+end
+
+local function xyAttr(x, y) return string.format("%.1f %.1f", x, y) end
+
+--============================================================================
+-- 8. XML BUILDERS
+--    Each piece of the card that changes in play is described once, by a
+--    function that works out how it should look right now (statCells,
+--    hpSegment, statusSpots, conditionSlots, the panel state functions).
+--    The builders here turn that into XML; the drawing functions in section
+--    9 turn the same description into in-place updates.
+--============================================================================
+
+-- Rough advance widths (em) of a typical Arial-like UI sans. They decide how
+-- wide columns are and how far text shrinks to fit its box.
+local GLYPH_EM = { default = 0.56 }
+do
+local function glyphs(chars, em) for c in chars:gmatch(".") do GLYPH_EM[c] = em end end
+glyphs(" fijlrtI.,:;!|'/", 0.28)
+glyphs("-()",             0.35)
+glyphs('"',               0.42)
+glyphs("ckszvxyJ",         0.50)
+glyphs("ABEFKPSTVXYZ",     0.65)
+glyphs("CDGHNOQRU",        0.75)
+glyphs("mwM",              0.83)
+glyphs("W",                0.94)
+end
+
+-- A string's width in em. Every text on the card is measured, most of
+-- them again and again, so each string's width is kept once worked out
+-- (and the whole store dropped when it grows past a few thousand).
+local textEm
+do
+local known, count = {}, 0
+function textEm(s)
+    s = tostring(s)
+    local hit = known[s]
+    if hit then return hit end
+    local w = 0
+    local key = s
+    s = s:gsub("⚠️", "W"):gsub("⚠", "W")              -- a warning sign is about as wide as a W ...
+    s = s:gsub("∑", "N")                                -- ... a sum sign as an N
+    s = s:gsub("↔", "W")                                -- ... Marksman's range sign as a W
+    for _, sym in pairs(CFG.rankSymbols) do s = s:gsub(sym, "W") end   -- ... so is a chess piece
+    if (CFG.groupMark or "") ~= "" then s = s:gsub(CFG.groupMark, "W") end   -- ... and the group activation's sign
+    if (CFG.wyrdMark or "") ~= "" then s = s:gsub(CFG.wyrdMark, "W") end     -- ... and a power in effect's
+    if (CFG.coverYes or "") ~= "" then s = s:gsub(CFG.coverYes, "W") end     -- ... and the cover question's yes
+    for _, sym in ipairs({ CFG.shockMark or "", CFG.blazeMark or "" }) do    -- ... and the signs over dice
+        if sym ~= "" then s = s:gsub(sym, "W") end
+    end
+    for c in s:gmatch(".") do w = w + (GLYPH_EM[c] or GLYPH_EM.default) end
+    if count > 4000 then known, count = {}, 0 end
+    known[key], count = w, count + 1
+    return w
+end
+end
+
+-- Width of `s` at font `size`; bold runs a little wider.
+local function textWidth(s, size, bold)
+    return textEm(s) * size * (bold and 1.06 or 1)
+end
+
+-- Text is sized to use at most FIT of its box's width, leaving room for a
+-- font that measures a little wider than GLYPH_EM says.
+local FIT = 0.92
+
+-- The font size at which `s` fits a `w` x `h` box on one line: `size`, or
+-- smaller when it would not fit.
+local function fitSize(s, w, h, size, bold)
+    local wide = textWidth(s, size, bold)
+    if wide > w * FIT then size = size * w * FIT / wide end
+    return math.min(size, h / 1.2)
+end
+
+-- Font sizes go to TTS as whole numbers. Unity's Text.fontSize is an
+-- integer, and a decimal such as "57.5" is not applied -- the text falls back
+-- to TTS's small default size. CFG.textDetail builds text at a fraction of
+-- its size and scales it back up (see CFG): font size and box shrink by it,
+-- the element's scale grows by it.
+--   Rounding the font size down alone would lose up to a whole font step --
+-- at textDetail 0.425 a fitted 23 becomes 9, drawn as 21.2, ~10% small. So
+-- the scale takes up the rest: the whole-number font size times the scale
+-- is exactly the size wanted, and the box shrinks by the same scale so it
+-- still spans `w` x `h` on the card. textSize returns the four attributes.
+-- The same few sizes and boxes come up over and over (every redraw of the
+-- stats asks for each of theirs), so each answer is kept -- read only, by
+-- whoever gets it.
+local TEXT_K = CFG.textDetail or 1
+local textSize
+do
+local known, count = {}, 0
+function textSize(size, w, h)
+    local key = size .. "|" .. w .. "|" .. h
+    local hit = known[key]
+    if hit then return hit end
+    local fs = math.max(1, math.floor(size * TEXT_K))
+    local sc = size / fs
+    local function g(v) return (string.format("%.4f", v):gsub("0+$", ""):gsub("%.$", "")) end
+    local t = { fontSize = string.format("%d", fs), scale = g(sc) .. " " .. g(sc) .. " 1",
+                width = string.format("%.2f", w / sc), height = string.format("%.2f", h / sc),
+                scaled = math.abs(sc - 1) > 1e-6 }
+    if count > 4000 then known, count = {}, 0 end
+    known[key], count = t, count + 1
+    return t
+end
+end
+
+-- One line of text, centred in its box, bold unless `style` says otherwise. TTS defaults Text to
+-- horizontalOverflow="Overflow", where resizeTextForBestFit never shrinks for
+-- width -- so the size comes from fitSize() instead. verticalOverflow is
+-- opened too, so a line a touch too tall for its box is never hidden.
+--   TTS shows a Text's content as the XML has it -- "Hit &amp; Run" -- so a
+-- text with & < or > in it is written escaped (the XML must stay valid),
+-- given an id if it has none (rawTxt_<n>) and filed in ui.rawTexts, which
+-- refresh sets again as plain text once the card has loaded.
+local function textXml(o)
+    -- o = { id, x, y, w, h, text, size, color, style, extra }
+    local t = textSize(o.size, o.w, o.h)
+    if tostring(o.text or ""):find("[&<>]") and ui.rawTexts then
+        local raw = ui.rawTexts
+        if not o.id then raw.n = (raw.n or 0) + 1; o.id = "rawTxt_" .. raw.n end
+        raw[#raw + 1] = { id = o.id, text = tostring(o.text) }
+    end
+    return string.format(
+        '<Text%s rectAlignment="MiddleCenter" offsetXY="%s" width="%s" height="%s"%s' ..
+        ' color="%s" fontSize="%s" fontStyle="%s" alignment="MiddleCenter"' ..
+        ' horizontalOverflow="Overflow" verticalOverflow="Overflow"%s>%s</Text>',
+        o.id and string.format(' id="%s"', o.id) or "", xyAttr(o.x or 0, o.y or 0),
+        t.width, t.height, t.scaled and string.format(' scale="%s"', t.scale) or "",
+        o.color, t.fontSize, o.style or "Bold", o.extra or "", esc(o.text))
+end
+
+-- An upright icon `d` across: the art when it exists, otherwise a plate
+-- (`plate`, if given) with the short name on it. Purely visual.
+local function iconXml(o)
+    -- o = { id, x, y, d, icon, label, labelSize, labelD, labelColor, plate, active }
+    -- (labelD: the text's box when it isn't the icon's -- see LAY.diamondLabel)
+    local act = o.active ~= nil and string.format(' active="%s"', tostring(o.active)) or ""
+    if hasAsset(o.icon) then
+        return string.format(
+            '<Image%s%s rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"' ..
+            ' image="%s" raycastTarget="false" />',
+            o.id and string.format(' id="%s"', o.id) or "", act, xyAttr(o.x, o.y), o.d, o.d, o.icon)
+    end
+    local plate = o.plate and string.format(
+        '<Image rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"' ..
+        ' color="%s" raycastTarget="false" />', xyAttr(o.x, o.y), o.d, o.d, o.plate) or ""
+    local s = o.labelD or (o.plate and o.d * 0.8 or o.d)
+    return plate .. textXml{ id = o.id, x = o.x, y = o.y, w = s, h = s, text = o.label,
+        size = fitSize(o.label, s, s, o.labelSize, true), color = o.labelColor or COL.iconText,
+        style = "Bold", extra = act }
+end
+
+-- A layered button: an optional background, an upright icon (or a text
+-- stand-in), anything in `inner`, and finally a transparent <Button> on top
+-- that catches the click and shows the hover tint. Everything visual sits
+-- *below* that button, so nothing can swallow a click. rotation = 45 turns
+-- the background and the hit area into a diamond while the icon stays
+-- upright. `disabled` leaves it inert: no hover tint, nothing to click.
+-- hitImage gives the hit area an image's shape, so the hover tint
+-- takes that shape too. `frame` names art drawn over the background, turned
+-- with it -- a frame as an image, which stays clean at range.
+local function layeredButton(o)
+    -- o = { id, size, x, y, rotation, bgAsset, bgColor, under, frame, icon,
+    --       iconPad, label, labelSize, labelD, labelColor, plate, inner, hitImage, onClick, onEnter,
+    --       onExit, iconId }   (`under` goes straight over the background;
+    --       iconId names the icon, or its text stand-in, to change it in place)
+    local out = {}
+    local s   = o.size
+    local w, h = o.w or s, o.h or s   -- a plain (unturned) button may be oblong
+    local pos = string.format(' rectAlignment="MiddleCenter" offsetXY="%g %g"', o.x, o.y)
+    local rot = o.rotation and string.format(' rotation="0 0 %g"', o.rotation) or ""
+
+    if o.bgColor or hasAsset(o.bgAsset) then
+        out[#out + 1] = string.format(
+            '<Image%s width="%g" height="%g"%s color="%s"%s raycastTarget="false" />',
+            pos, w, h, rot, hasAsset(o.bgAsset) and (o.bgColor or "#FFFFFFff") or o.bgColor, imgAttr(o.bgAsset))
+    end
+    out[#out + 1] = o.under
+    if hasAsset(o.frame) then            -- white art, tinted with the accent colour, its
+        out[#out + 1] = string.format(   -- clear margin past the button (LAY.frameArt)
+            '<Image%s width="%g" height="%g"%s image="%s" color="%s" raycastTarget="false" />',
+            pos, w * LAY.frameArt, h * LAY.frameArt, rot, o.frame, COL.accent)
+    end
+    if o.icon or o.label then
+        out[#out + 1] = iconXml{ id = o.iconId, x = o.x, y = o.y, d = math.min(w, h) * (o.iconPad or LAY.iconPad),
+            icon = o.icon, label = o.label or "", labelSize = o.labelSize, labelD = o.labelD, plate = o.plate,
+            labelColor = o.labelColor }
+    end
+    out[#out + 1] = o.inner
+
+    local extra = ""
+    if o.onClick then extra = extra .. string.format(' onClick="%s"', o.onClick) end
+    if o.onEnter then extra = extra .. string.format(' onMouseEnter="%s"', o.onEnter) end
+    if o.onExit  then extra = extra .. string.format(' onMouseExit="%s"', o.onExit)  end
+    local tint = o.disabled and COL.clear or COL.hover     -- a disabled button doesn't light up
+    out[#out + 1] = string.format(
+        '<Button id="%s"%s width="%g" height="%g"%s%s colors="%s|%s|%s|%s"%s%s />',
+        o.id, pos, w, h, rot, imgAttr(o.hitImage), COL.clear, tint,
+        o.disabled and COL.clear or COL.press, COL.clear, extra,
+        o.disabled and ' interactable="false"' or "")
+
+    return table.concat(out)
+end
+
+-- A diamond: a layered button turned 45 degrees, on the diamond art (or the
+-- built-in fill), framed by the diamond_frame art when `frame` names it.
+-- Its plain fill is COL.diamond over the gradient, a little brightened
+-- (see ui.gradTint).
+local function diamond(o)
+    o.rotation, o.bgAsset = 45, "diamond"
+    o.bgColor   = o.bgColor or ui.gradTint(COL.diamond)
+    o.labelSize = o.labelSize or LAY.diamondFont
+    return layeredButton(o)
+end
+
+-- The font size of a stand-in label as big as it comfortably fits in a
+-- diamond `side` across (S, A, C, W1-W3 and the status options, until
+-- their icon art is set). A diamond is widest through its middle, so a
+-- short label may be far bigger than the upright square an icon gets: the
+-- text's box -- its width by a capital's height (0.72 of the size) --
+-- keeps its corners inside LAY.labelFill of the diamond, i.e. half its
+-- width plus half its height stay within that much of the half-diagonal.
+-- The text is then laid in a box `side` wide (labelD) so nothing shrinks it.
+function LAY.diamondLabel(label, side)
+    local reach = side / math.sqrt(2) * LAY.labelFill
+    return math.floor(2 * reach / (textWidth(label, 1, true) + 0.72))
+end
+
+-- The boxes with a gold edge -- weapon profiles -- by kind: the fill each
+-- is painted with. Plain colours, never art: they read well and follow
+-- the looks.
+local BOX_FILL = {
+    profile    = "profileFill", profile_out = "profileOut",   -- COL keys, so a
+    profile_jam = "profileJam",                                -- new look shows
+    tab_on = "toggleOn", tab_off = "toggleOff",   -- the tabs over A's panel
+    button = "actionBg",                          -- the buttons over the stats (see ACTIVATION)
+}
+local function boxColor(kind) return COL[BOX_FILL[kind]] end
+
+-- One straight edge -- a gold rule of the flyouts -- `len` long and `thick`
+-- across, centred at (x, y) and turned `rot` degrees (0 runs along x). A
+-- plain rectangle that thin breaks up and shimmers at range, so with the
+-- edge_line art set it is that image instead: a white
+-- line with soft, clear margins -- EDGE_ART times as tall as the line, the
+-- line itself in the middle -- tinted `color`, which the GPU filters
+-- smoothly at any distance.
+local EDGE_ART = 2
+local function edgeLineXml(x, y, len, thick, rot, color)
+    local art = hasAsset("edge_line")
+    return string.format(
+        '<Image rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.2f"%s%s' ..
+        ' color="%s" raycastTarget="false" />', xyAttr(x, y), len, art and thick * EDGE_ART or thick,
+        (rot or 0) ~= 0 and string.format(' rotation="0 0 %g"', rot) or "",
+        art and ' image="edge_line"' or "", color)
+end
+
+-- The four edges round a `w` x `h` rectangle centred at (x, y), `b` thick,
+-- just inside it -- or, with `rot` 45, round the square `w` a side turned
+-- into a diamond. Each is an edgeLineXml; `skip` leaves one side out
+-- ("left" / "right", unturned only).
+local function edgeFrameXml(x, y, w, h, b, color, rot, skip)
+    local out = {}
+    if rot == 45 then
+        local d = (w / 2 - b / 2) / math.sqrt(2)
+        out[#out + 1] = edgeLineXml(x - d, y + d, w, b, 45, color)    -- upper left
+        out[#out + 1] = edgeLineXml(x + d, y + d, w, b, 135, color)   -- upper right
+        out[#out + 1] = edgeLineXml(x + d, y - d, w, b, 45, color)    -- lower right
+        out[#out + 1] = edgeLineXml(x - d, y - d, w, b, 135, color)   -- lower left
+    else
+        out[#out + 1] = edgeLineXml(x, y + h / 2 - b / 2, w, b, 0, color)
+        out[#out + 1] = edgeLineXml(x, y - h / 2 + b / 2, w, b, 0, color)
+        if skip ~= "left" then out[#out + 1] = edgeLineXml(x - w / 2 + b / 2, y, h, b, 90, color) end
+        if skip ~= "right" then out[#out + 1] = edgeLineXml(x + w / 2 - b / 2, y, h, b, 90, color) end
+    end
+    return table.concat(out)
+end
+
+-- A box of `kind` with `inner` on top (placed from the box's centre). The
+-- border is geometry: a panel in the edge colour with the fill inset
+-- pop.border inside it -- or, with the edge_line art, the fill with four
+-- edge lines round it (see edgeLineXml). `id` names the image that paints
+-- the box, so drawBox can switch its kind in place. With `hover` the box
+-- reports the cursor entering and leaving it (onProfileEnter / Exit). A
+-- weapon profile's box (kind profile*) is painted over the health bar's
+-- gradient (hp_segment) once that is set, like the actions' strips.
+local function edgedBox(id, x, y, w, h, kind, inner, hover)
+    local b     = LAY.popS.border
+    local lines = hasAsset("edge_line")
+    local grad  = kind:match("^profile") and imgAttr("hp_segment") or ""
+    return string.format(
+        '<Panel id="%sEdge" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+        ' height="%.1f" color="%s"' .. (hover and ' onMouseEnter="onProfileEnter" onMouseExit="onProfileExit"'
+        or ' raycastTarget="false"') .. '><Image id="%s"' ..
+        ' rectAlignment="MiddleCenter" width="%.1f" height="%.1f" color="%s"%s' ..
+        ' raycastTarget="false" />%s%s</Panel>',
+        id, xyAttr(x, y), w, h, lines and COL.clear or COL.profileEdge, id,
+        w - 2 * b, h - 2 * b, boxColor(kind), grad,
+        lines and edgeFrameXml(0, 0, w, h, b, COL.profileEdge) or "", inner or "")
+end
+
+-- The health bar: the number of segments (max wounds)...
+local function hpMax() return math.max(1, math.floor(tonumber(fighter.wounds.max) or 1)) end
+
+-- ... and how segment i looks: full or spent, and lit when the hover
+-- preview reaches it (segments 1..upTo). With the hp_segment art set, every
+-- segment is that gradient tinted with the same colours (a Button's colors
+-- tint its image), so the art only adds depth.
+local function hpSegment(i, upTo)
+    local full  = i <= clamp(fighter.wounds.current, 0, hpMax())
+    local tint  = full and COL.hpFull or COL.hpEmpty
+    local hover = full and COL.hpHover or COL.hpFull
+    local lit   = i <= (upTo or 0)
+    return {
+        colors = table.concat(lit and { hover, hover, hover, hover } or { tint, hover, hover, tint }, "|"),
+        image  = hasAsset("hp_segment") and "hp_segment" or "",
+    }
+end
+
+-- Whether the fighter is down to 0 wounds: the bar is framed and "Skills
+-- disabled" shows over it.
+local function hpOut() return (tonumber(fighter.wounds.current) or 0) <= 0 end
+
+-- That frame and text, in one container shown only at 0 wounds. The frame
+-- is a line along the bar's top and one along its bottom (its ends sit
+-- behind the diamonds anyway), inside it, so the bar keeps its size: edge
+-- lines (edgeLineXml), so with the edge_line art they stay smooth at
+-- range. Neither the lines nor the text (which spans the part of the bar
+-- between A and W2) catch clicks, so the segments under them still do.
+local function hpOutXml()
+    local t, w, h = LAY.hpOutW, LAY.hpW, LAY.hpH
+    local parts = {
+        edgeLineXml(0,  (h - t) / 2, w, t, 0, COL.hpOut),
+        edgeLineXml(0, -(h - t) / 2, w, t, 0, COL.hpOut),
+    }
+    -- A's and W2's edges where they cross the bar's centre line
+    local reach = halfDiag(LAY.sideD) - math.abs(LAY.hpY - LAY.sideY)
+    local textW = math.min(w, 2 * (LAY.sideX - math.max(0, reach)))
+    local textH = h - 2 * t
+    parts[#parts + 1] = textXml{ x = 0, y = 0, w = textW, h = textH, text = LAY.hpOutText,
+        color = COL.hpOut, size = fitSize(LAY.hpOutText, textW, textH, LAY.hpOutFont, true),
+        extra = ' raycastTarget="false"' }
+    return string.format(
+        '<Panel id="hpOut" active="%s" rectAlignment="MiddleCenter" offsetXY="0 %g"' ..
+        ' width="%g" height="%g" color="%s" raycastTarget="false">%s</Panel>',
+        tostring(hpOut()), LAY.hpY, w, h, COL.clear, table.concat(parts))
+end
+
+local function hpBarXml()
+    local segs = {}
+    for i = 1, hpMax() do
+        local s = hpSegment(i, 0)
+        segs[i] = string.format(
+            '<Button id="hpSeg_%d" flexibleWidth="1" minWidth="8"%s colors="%s"' ..
+            ' onClick="onClickHpSegment" onMouseEnter="onHpEnter" onMouseExit="onHpExit" />',
+            i, s.image ~= "" and string.format(' image="%s"', s.image) or "", s.colors)
+    end
+    return string.format(
+        '<HorizontalLayout id="hpBar" rectAlignment="MiddleCenter" offsetXY="0 %g"' ..
+        ' width="%g" height="%g" spacing="%g" childForceExpandWidth="true"' ..
+        ' childForceExpandHeight="true">%s</HorizontalLayout>',
+        LAY.hpY, LAY.hpW, LAY.hpH, LAY.hpH * LAY.hpGap, table.concat(segs)) .. hpOutXml()
+end
+
+-- Column layout of the stat block: every column the same width, a header and
+-- its value sharing one centre, so a value always sits under its header.
+local function statColumns()
+    local n     = math.max(1, #CFG.statOrder)
+    local pitch = LAY.colW / n + LAY.statGap
+    local cols  = {}
+    for i = 1, n do cols[i] = { x = (i - (n + 1) / 2) * pitch, w = pitch } end
+    return cols
+end
+
+-- A stat value split for drawing: the number and its trailing sign (the "
+-- of 4", the + of 3+; "" when there is none), and where each goes so the
+-- two together sit centred on the column at `x`. The sign is smaller: a +
+-- stays centred on the number's height, a " is raised to its top.
+local function splitValue(text, x, size)
+    local num, sign = tostring(text):match("^(.-%d)(%D+)$")
+    if not num then num, sign = tostring(text), "" end
+    local signSize = size * LAY.statSignScale
+    local wn = textWidth(num, size, true)
+    local ws = sign ~= "" and textWidth(sign, signSize, true) or 0
+    local left = x - (wn + ws) / 2
+    local raise = sign:match("^[\"']") and 0.37 * (size - signSize) or 0
+    return { num = num, numX = left + wn / 2, numW = wn / FIT,
+             sign = sign, signX = left + wn + ws / 2, signW = math.max(ws, 1) / FIT,
+             signSize = signSize, signDy = raise }
+end
+
+-- Every text of the stat block as it should look -- the hover view when
+-- `hover`, and with `ctx` from an open weapon (see statNumber). Every
+-- header is LAY.labelFont and every value LAY.valueFont, in both views, so
+-- the row reads evenly and nothing jumps on hover. Each value is in the
+-- colour of what changes it (see statColor).
+local function statCells(hover, ctx)
+    local keys  = hover and STAT.hoverOrder() or CFG.statOrder
+    local h     = LAY.statRowH
+    local headSize, valSize = LAY.labelFont, LAY.valueFont
+    local cells = {}
+    for i, c in ipairs(statColumns()) do
+        local key = keys[i] or ""
+        cells[#cells + 1] = { id = "statHead_" .. i, text = key, x = c.x, y = h / 2,
+            w = c.w, h = h, color = COL.label, size = headSize }
+        local color = key == "Inv" and COL.value or statColor(key, ctx)
+        local v = splitValue(key == "Inv" and STAT.inv() .. "+" or statText(keys[i], ctx), c.x, valSize)
+        cells[#cells + 1] = { id = "statVal_" .. i, text = v.num, x = v.numX, y = -h / 2,
+            w = v.numW, h = h, color = color, size = valSize }
+        cells[#cells + 1] = { id = "statSign_" .. i, text = v.sign, x = v.signX,
+            y = -h / 2 + v.signDy, w = v.signW, h = h, color = color, size = v.signSize }
+    end
+    return cells
+end
+
+-- The Set plate over each value on viewer `v`'s copy, per column: shown
+-- over the value the cursor is on while that stat is changed and not kept
+-- yet.
+local function statTools(v)
+    local keys  = v.statsHover and STAT.hoverOrder() or CFG.statOrder
+    local tools = {}
+    for i = 1, #statColumns() do
+        local stat = keys[i]
+        local open = v.statCol == i and stat ~= nil and statOriginal(stat) ~= nil
+        tools[i] = { set = open and statPending(stat) }
+    end
+    return tools
+end
+
+-- A plate as big as a value's cell, centred at (x, y): the plate, `label`
+-- on it (filling statIconPad of it both ways) and a clear button over the
+-- lot with the usual hover tint. The plate notices the cursor
+-- (onStatPlateEnter / Exit).
+local function statPlateXml(id, btnId, x, y, w, label, onClick, active)
+    local h, k = LAY.statRowH, LAY.statIconPad
+    return string.format(
+        '<Panel id="%s" active="%s" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+        ' height="%.1f" color="%s" raycastTarget="false" onMouseEnter="onStatPlateEnter"' ..
+        ' onMouseExit="onStatPlateExit">', id, tostring(active), xyAttr(x, y), w, h, COL.clear) ..
+        string.format('<Image rectAlignment="MiddleCenter" width="%.1f" height="%.1f" color="%s"' ..
+            ' raycastTarget="false" />', w, h, COL.statPlate) ..
+        textXml{ w = w * k, h = h * k, text = label, size = fitSize(label, w * k, h * k, LAY.labelFont, true),
+                 color = COL.value, extra = ' raycastTarget="false"' } ..
+        string.format('<Button id="%s" rectAlignment="MiddleCenter" width="%.1f" height="%.1f"' ..
+            ' colors="%s|%s|%s|%s" onClick="%s" />', btnId, w, h, COL.clear, COL.hover, COL.press,
+            COL.clear, onClick) ..
+        '</Panel>'
+end
+
+-- The Set plate above each value (statSet_<i>: keep the changed number as
+-- the stat's base), see statTools. Built apart from the stat block, late,
+-- so it draws over the diamonds beside the outer columns. Being outside
+-- the block, moving onto one leaves the block and the value's column: those
+-- leavings wait a moment (see onStatsExit) and entering a plate calls them
+-- off.
+local function statPlatesXml()
+    local parts, h = {}, LAY.statRowH
+    local tools = statTools({ statsHover = false })
+    for i, c in ipairs(statColumns()) do
+        parts[#parts + 1] = statPlateXml("statSet_" .. i, "statSetBtn_" .. i, c.x, LAY.statY + h / 2, c.w,
+            "Set", "onStatSet", tools[i].set)
+    end
+    return table.concat(parts)
+end
+
+-- The stat block: a header row over a value row, every text placed directly
+-- at its column's centre -- no layout group decides anything. Each value
+-- has a clear column panel (statCol_<i>) that notices the cursor (its Set
+-- plate shows, see statPlatesXml; so do the sources of what changes it,
+-- see SKILL.drawSources), holding a clear button over the value
+-- (statValBtn_<i>: left click a test, right click one up -- see
+-- onStatClick). The headers are plain text under one clear strip
+-- (statHeadRow) that only notices the cursor: entering it swaps in
+-- CFG.statOrderHover, and leaving the block swaps it back and drops the
+-- numbers not kept -- the strip and columns are inside the block, so moving
+-- between them isn't leaving.
+local function statBlockXml(ctx)
+    local parts = {}
+    for _, c in ipairs(statCells(false, ctx)) do parts[#parts + 1] = textXml(c) end
+    local h = LAY.statRowH
+    parts[#parts + 1] = string.format(
+        '<Image id="statHeadRow" rectAlignment="MiddleCenter" offsetXY="0 %.1f" width="%g"' ..
+        ' height="%.1f" color="%s" onMouseEnter="onStatsEnter" onMouseExit="onStatsHeadExit" />', h / 2, LAY.colW, h, COL.clear)
+    for i, c in ipairs(statColumns()) do
+        parts[#parts + 1] = string.format(
+            '<Panel id="statCol_%d" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+            ' height="%.1f" color="%s" onMouseEnter="onStatColEnter" onMouseExit="onStatColExit">',
+            i, xyAttr(c.x, -h / 2), c.w, h, COL.clear) ..
+            string.format('<Button id="statValBtn_%d" rectAlignment="MiddleCenter" width="%.1f"' ..
+                ' height="%.1f" colors="%s|%s|%s|%s" onClick="onStatClick" />',
+                i, c.w, h, COL.clear, COL.hover, COL.press, COL.clear) ..
+            '</Panel>'
+    end
+    return string.format(
+        '<Panel id="statBlock" rectAlignment="MiddleCenter" offsetXY="0 %g" width="%g"' ..
+        ' height="%g" color="%s" onMouseExit="onStatsExit">%s</Panel>',
+        LAY.statY, LAY.colW, LAY.statRowH * 2, COL.clear, table.concat(parts))
+end
+
+-- The panels over the stats (see ACTIVATION), both built and each shown
+-- only while it applies (ACTIVATION.draw): from the middle of A / C to the
+-- middle of W2 / W3, both ways -- built right after the stat block, before
+-- the diamonds, which draw over its corners. Opaque, in the plate colour
+-- and without a border; it catches the cursor (raycastTarget -- TTS's
+-- panels don't by default), so nothing behind it hovers or clicks.
+--   outPanel: "Out of Action" in Seriously Injured's red over a Revive
+-- button (onRevive). recoveryPanel: "Recovery Test" over three diamond
+-- buttons (recoveryRow): the number of dice (recoveryVal: left click one
+-- more, right click one fewer; its number recoveryValTxt), the die that
+-- rolls them (recoveryRoll: the stat_die art, "D" until set) and X
+-- (recoveryClose) -- or, with an enemy within 1" when it opened
+-- (fighter.recovery.foes), just one (recoveryDoom): a red dagger
+-- (recoveryOut: left click Out of Action, right click closes the panel).
+-- Where things go in a panel whose buttons are rowH tall: the title (its
+-- letters counted midTitleFont * 0.8 tall -- what the eye sees, not the
+-- text box) and the buttons, with the same space above the title, between
+-- the two and under the buttons. Returns the panel's size, the title's
+-- centre and box height, and the buttons' centre.
+function ACTIVATION.geometry(rowH)
+    local W, H = 2 * LAY.sideX, 2 * LAY.sideY
+    local titleH, seen = LAY.midTitleFont * 1.25, LAY.midTitleFont * 0.8
+    local pad = math.max(0, (H - seen - rowH) / 3)
+    return W, H, H / 2 - pad - seen / 2, titleH, -H / 2 + pad + rowH / 2
+end
+
+-- The Revive button: a gold-edged box (see edgedBox) with its label, and a
+-- clear button over it with the usual hover tint.
+function ACTIVATION.button(id, x, y, w, label, onClick)
+    local h, pad = LAY.midBtnH, LAY.popS.boxPad
+    local inner = textXml{ id = id .. "Txt", w = w - 2 * pad, h = h, text = label, color = COL.value,
+        size = fitSize(label, w - 2 * pad, h, LAY.midBtnFont, true), extra = ' raycastTarget="false"' } ..
+        string.format('<Button id="%s" rectAlignment="MiddleCenter" width="%.1f" height="%.1f"' ..
+        ' colors="%s|%s|%s|%s" onClick="%s" />', id, w, h, COL.clear, COL.hover, COL.press, COL.clear, onClick)
+    return edgedBox(id .. "Box", x, y, w, h, "button", inner)
+end
+
+function ACTIVATION.panelXml()
+    local d = LAY.midDiamond
+    local function panel(id, on, title, color, inner, rowH, titleId)
+        local W, H, titleY, titleH = ACTIVATION.geometry(rowH)
+        return string.format(
+            '<Panel id="%s" active="%s" rectAlignment="MiddleCenter" width="%g" height="%g" color="%s"' ..
+            ' raycastTarget="true">', id, tostring(on), W, H, COL.statPlate:sub(1, 7) .. "ff") ..
+            textXml{ id = titleId, x = 0, y = titleY, w = W * 0.9, h = titleH, text = title, color = color,
+                size = fitSize(title, W * 0.9, titleH, LAY.midTitleFont, true), extra = ' raycastTarget="false"' } ..
+            inner .. '</Panel>'
+    end
+    local rowY = select(5, ACTIVATION.geometry(LAY.midBtnH))
+    local out = panel("outPanel", fighter.outOfAction == true, "Out of Action", statusDef("seriously_injured").color,
+        ACTIVATION.button("reviveBtn", 0, rowY, LAY.midReviveW, "Revive", "onRevive"), LAY.midBtnH)
+    -- the diamonds, tip to tip midGap apart, like the card's own
+    rowY = select(5, ACTIVATION.geometry(d * math.sqrt(2)))
+    local step = d * math.sqrt(2) + LAY.midGap
+    local rec = fighter.recovery
+    local function btn(id, i, label, onClick, icon, x)
+        return diamond{ id = id, size = d, x = x or (i - 2) * step, y = rowY, icon = icon, label = label,
+            labelSize = LAY.midBtnFont, iconId = id .. "Txt", frame = "diamond_frame", onClick = onClick,
+            iconPad = icon == "stat_die" and LAY.dieIcon or nil }
+    end
+    -- the two rows, each in a clear container of the panel's size (shown in
+    -- turn, see ACTIVATION.draw); the dagger over its diamond, in Seriously
+    -- Injured's red: the dice_out art (recoveryOutIcon) once set, until
+    -- then a Text of its own, "†" (recoveryOutTxt)
+    local W, H = ACTIVATION.geometry(d * math.sqrt(2))
+    local function group(id, on, inner)
+        return string.format('<Panel id="%s" active="%s" rectAlignment="MiddleCenter" width="%g" height="%g"' ..
+            ' color="%s" raycastTarget="false">', id, tostring(on), W, H, COL.clear) .. inner .. '</Panel>'
+    end
+    local dagger = "†"
+    local row = group("recoveryRow", not ACTIVATION.doomed(),
+                btn("recoveryVal", 1, tostring(rec and rec.dice or 1), "onRecoveryValue")
+             .. btn("recoveryRoll", 2, "D", "onRecoveryRoll", "stat_die")
+             .. btn("recoveryClose", 3, "X", "onRecoveryClose"))
+             .. group("recoveryDoom", ACTIVATION.doomed(), btn("recoveryOut", 2, nil, "onRecoveryOut")
+             .. (hasAsset("dice_out") and string.format('<Image id="recoveryOutIcon" rectAlignment="MiddleCenter"' ..
+                    ' offsetXY="%s" width="%.1f" height="%.1f" image="dice_out" color="%s" raycastTarget="false" />',
+                    xyAttr(0, rowY), d * 0.8, d * 0.8, statusDef("seriously_injured").color)
+                 or textXml{ id = "recoveryOutTxt", x = 0, y = rowY, w = d, h = d * 1.3, text = dagger,
+                         color = statusDef("seriously_injured").color,
+                         size = fitSize(dagger, d, d * 1.3, LAY.midBtnFont * 1.6, true), extra = ' raycastTarget="false"' }))
+    out = out .. panel("recoveryPanel", ACTIVATION.isOpen(), "Recovery Test", COL.accent, row, d * math.sqrt(2))
+    -- the Nerve Check: the same, its first diamond the Cl it tests against
+    -- -- its own Text (nerveValTxt, over the diamond: a layered button's
+    -- label has no colour of its own; sized as those labels are, see
+    -- iconXml), and "Cl" left of it (midStatFont, in the values' colour).
+    -- Group Activation's Leadership check wears the same panel: its title
+    -- (nerveTitle) and stat (nerveStat) as ACTIVATION.nerveTexts has them.
+    -- So does Falling Down's height -- nothing to roll yet, so an OK diamond
+    -- (nerveOk, in nerveConfirm) lies over the die meanwhile. All of that
+    -- is one row (nerveRow); a question (see ACTIVATION.questioning) has
+    -- another in its place (nerveQuestion): a Continue box (nerveGo, as
+    -- wide as Revive's) and X (nerveNo), side by side in the middle
+    -- (nerveQGo) -- or, for a yes / no question (see ACTIVATION.asksPair:
+    -- In Cover?), two diamonds there instead (nerveQPair): CFG.coverYes
+    -- (nerveYes) and X (nerveX)
+    local v, s = ACTIVATION.nerveValue(), d * LAY.iconPad
+    local head, stat = ACTIVATION.nerveTexts()
+    local asking = ACTIVATION.questioning()
+    local goW, noW = LAY.midReviveW, d * math.sqrt(2)
+    local left = -(goW + LAY.midGap + noW) / 2
+    row = group("nerveRow", not asking, btn("nerveVal", 1, nil, "onNerveValue")
+        .. btn("nerveRoll", 2, "D", "onNerveRoll", "stat_die")
+        .. group("nerveConfirm", ACTIVATION.nerveAsks(), btn("nerveOk", 2, "OK", "onNerveOk"))
+        .. btn("nerveClose", 3, "X", "onNerveClose")
+        .. textXml{ id = "nerveValTxt", x = -step, y = rowY, w = s, h = s, text = v, color = ACTIVATION.nerveInk(),
+            size = fitSize(v, s, s, LAY.midBtnFont, true), extra = ' raycastTarget="false"' }
+        .. textXml{ id = "nerveStat", x = stat.x, y = stat.y, w = stat.w, h = stat.h,
+            text = stat.text, color = COL.value, size = stat.size, extra = ' raycastTarget="false"' })
+        .. group("nerveQuestion", asking,
+               group("nerveQGo", not ACTIVATION.asksPair(),
+                   ACTIVATION.button("nerveGo", left + goW / 2, rowY, goW, "Continue", "onNerveGo")
+                .. btn("nerveNo", 3, "X", "onNerveClose", nil, left + goW + LAY.midGap + noW / 2))
+            .. group("nerveQPair", ACTIVATION.asksPair(),
+                   btn("nerveYes", 1, CFG.coverYes, "onNerveGo", nil, -step / 2)
+                .. btn("nerveX", 3, "X", "onNerveClose", nil, step / 2)))
+    return out .. panel("nervePanel", ACTIVATION.nerveOpen(), head.text, COL.accent, row, d * math.sqrt(2), "nerveTitle")
+end
+
+function ACTIVATION.isOpen() return fighter.recovery ~= nil and not fighter.outOfAction end
+
+-- Whether the open Recovery Test found an enemy within 1": then its only
+-- button takes the fighter Out of Action (see recoveryTest).
+function ACTIVATION.doomed() return fighter.recovery ~= nil and fighter.recovery.foes ~= nil end
+
+-- The Nerve Check panel (see nerveCheck): open while ACTIVATION.nerve is
+-- set -- not saved, as the model it borrows Cl from may have moved by then
+-- -- and never Out of Action. Its value as shown, and the value's colour:
+-- green (COL.valueUp) when a Leader's / Champion's better Cl is used, the
+-- hand-set colour once changed by hand, else the diamonds' own ink.
+--   Group Activation's Leadership check (see groupActivation) is the same
+-- panel under its own title, against Ld: ACTIVATION.nerve then has `group`
+-- (the friends it would take along), `stat` and `title`, and its value is
+-- orange (COL.valueMod) while the friends after the first lower it.
+--   So is Falling Down's height (see fallingDown: `test` = "height"): its
+-- value the inches fallen, its stat "Height", and OK where the die is
+-- (ACTIVATION.nerveAsks).
+--   A question (see ACTIVATION.lyingLow: `test` = "question") has nothing
+-- to roll or set: just its title over Continue and X
+-- (ACTIVATION.questioning).
+function ACTIVATION.nerveOpen() return ACTIVATION.nerve ~= nil and not fighter.outOfAction end
+function ACTIVATION.nerveAsks() return ACTIVATION.nerve ~= nil and ACTIVATION.nerve.test == "height" end
+function ACTIVATION.questioning() return ACTIVATION.nerve ~= nil and ACTIVATION.nerve.test == "question" end
+-- Whether the question open is a yes / no one (`pair`: In Cover?), its
+-- answers two diamonds -- CFG.coverYes and X -- not Continue and X.
+function ACTIVATION.asksPair() return ACTIVATION.questioning() and ACTIVATION.nerve.pair == true end
+function ACTIVATION.nerveValue()
+    local n = ACTIVATION.nerve
+    if not (n and n.value) then return "-" end
+    if n.test == "height" then return n.value .. '"' end
+    return tostring(n.value)
+end
+function ACTIVATION.nerveInk()
+    local n = ACTIVATION.nerve
+    if n and n.test then return COL.iconText end
+    if n and n.hand then return COL.valueUser end
+    if n and n.group then return (n.minus or 0) > 0 and COL.valueMod or COL.iconText end
+    if n and n.from and n.value and (not n.own or n.value > n.own) then return COL.valueUp end
+    return COL.iconText
+end
+
+-- The panel's title, fitted, and the stat named left of its first diamond
+-- (tip to tip midGap from it), as the check that is open has them -- a
+-- Nerve Check's while none is. A long one ("Height") is only as big as
+-- fits between that diamond and C's upper right edge, which cuts the
+-- panel's corner there.
+function ACTIVATION.nerveTexts()
+    local n = ACTIVATION.nerve
+    local title, stat = n and n.title or "Nerve Check", n and n.stat or "Cl"
+    local d = LAY.midDiamond * math.sqrt(2)
+    local W, _, _, titleH, rowY = ACTIVATION.geometry(d)
+    local size = LAY.midStatFont or LAY.midBtnFont
+    local tip = -(d + LAY.midGap) - d / 2
+    -- C's edge at the height of the letters' feet (0.4 of the size down)
+    local edge = -LAY.sideX - math.min(0, rowY - 0.4 * size)
+    size = fitSize(stat, tip - LAY.midGap - edge, LAY.midDiamond, size, true)
+    local labelW = textWidth(stat, size, true)
+    return { text = title, w = W * 0.9, h = titleH, size = fitSize(title, W * 0.9, titleH, LAY.midTitleFont, true) },
+           { text = stat, x = tip - LAY.midGap - labelW / 2, y = rowY, w = labelW * 1.2, h = LAY.midDiamond, size = size }
+end
+
+-- The seven places a pip can take on a D6's face (across and up, in pip
+-- steps: 0.27 of the face), and which of them each number uses.
+ACTIVATION.PIP_SPOTS = { { -1, 1 }, { 1, 1 }, { -1, 0 }, { 0, 0 }, { 1, 0 }, { -1, -1 }, { 1, -1 } }
+ACTIVATION.PIPS = { { 4 }, { 2, 6 }, { 2, 4, 6 }, { 1, 2, 6, 7 }, { 1, 2, 4, 6, 7 }, { 1, 2, 3, 5, 6, 7 } }
+
+-- How face `v` of a `kind` die ("d6", "firepower", "injury") looks, `D`
+-- a side: its fill, its edge's and pips' ink (`hl`, a stat check's
+-- green / orange, else gold), the pips it shows (a set), its text (nil:
+-- none) -- the hits, or an Injury result's stand-in while its icon isn't
+-- set -- with its ink, size and box (x, y, w, h: from the face's middle),
+-- its icon (only once the art is set) and the Ammo check's "!" stand-in
+-- likewise. STAND_IN: what an Injury result shows until its icon (ASSETS
+-- dice_<result>) is set. `spared`: a Firepower dice whose Ammo check
+-- Reliable ignored -- its cartridge (or "!") light blue, not orange.
+ACTIVATION.STAND_IN = { injured = "INJ", serious = "S.I.", out = "†" }
+function ACTIVATION.face(kind, v, D, hl, spared)
+    local f = { fill = COL.diceFace, ink = hl or COL.diceInk, pips = {} }
+    local ammoInk = spared and COL.ammoSpared or COL.diceAmmo
+    v = clamp(math.floor(tonumber(v) or 1), 1, 6)
+    local function text(t, ink, x, w, k)
+        f.num, f.numInk, f.numX, f.numY, f.numW, f.numH = t, ink, x, 0, w, D * 0.84
+        f.numSize = fitSize(t, w, D * 0.84, D * k, true)
+    end
+    if kind == "firepower" then
+        local fp = ACTIVATION.FIREPOWER[v]
+        f.fill = COL.diceFire
+        if fp.ammo then                           -- the hit on the left, the Ammo check right of it
+            text(tostring(fp.hits), COL.diceFireInk, -0.19 * D, 0.42 * D, 0.62)
+            if hasAsset("dice_ammo") then        -- a narrow cartridge in a square: drawn big
+                f.icon, f.iconInk, f.iconX, f.iconD = "dice_ammo", ammoInk, 0.2 * D, 0.84 * D
+            else
+                f.mark, f.markInk, f.markX, f.markW = "!", ammoInk, 0.17 * D, 0.42 * D
+                f.markSize = fitSize("!", 0.42 * D, D * 0.84, D * 0.62, true)
+            end
+        else
+            text(tostring(fp.hits), COL.diceFireInk, 0, 0.84 * D, 0.72)
+        end
+    elseif kind == "injury" then
+        local r = ACTIVATION.INJURY_DICE[v] or "serious"
+        f.fill = COL.diceHurt
+        local art = ACTIVATION.injuryArt(r)
+        if art then
+            f.icon, f.iconInk, f.iconX, f.iconD = art, ACTIVATION.injuryInk(r), 0, 0.8 * D
+        else
+            text(ACTIVATION.STAND_IN[r], ACTIVATION.injuryInk(r), 0, 0.84 * D, 0.62)
+        end
+    else
+        for _, k in ipairs(ACTIVATION.PIPS[v]) do f.pips[k] = true end
+    end
+    return f
+end
+
+-- An Injury result's colour: Injury yellow, Serious Injury orange, Out of
+-- Action red.
+function ACTIVATION.injuryInk(r)
+    return r == "out" and COL.diceOut or r == "injured" and COL.diceInjured or COL.diceSerious
+end
+
+-- An Injury result's art: its own (ASSETS dice_<result>), nil while it
+-- isn't set (its stand-in text shows).
+function ACTIVATION.injuryArt(r)
+    if hasAsset("dice_" .. r) then return "dice_" .. r end
+    return nil
+end
+
+-- An Injury result shown beside the dice (see ACTIVATION.sumView): its
+-- icon (or stand-in text, diceSumFont) in its colour -- its width and half
+-- its height (`hh`).
+function ACTIVATION.resultView(k)
+    local S1, b = LAY.diceSumFont, {}
+    b.ink, b.d = ACTIVATION.injuryInk(k), math.min(LAY.diceD * 0.8, S1 * 1.6)
+    local art = ACTIVATION.injuryArt(k)
+    if art then
+        b.icon, b.w, b.hh = art, b.d, b.d / 2
+    else
+        b.text, b.size = ACTIVATION.STAND_IN[k], S1
+        b.w, b.hh = textWidth(b.text, S1, true), S1 * 0.45
+    end
+    return b
+end
+
+-- What stands at the panel's right end (roll `r`'s result), nil for none
+-- -- a stat check shows only its dice' colour: "∑N" (Roll Dice, the
+-- Firepower dice's hits, a melee attack's hits) or an Injury result's
+-- icon (its stand-in until set, see ACTIVATION.resultView). Its width,
+-- half its height (`hh`, what its corners need clear of the slanted
+-- edges) and its parts' places, from its own middle.
+function ACTIVATION.sumView(r)
+    if not r or r.rolling or not (r.sum or r.result) then return nil end
+    local S1, b = LAY.diceSumFont, {}
+    if r.result then return ACTIVATION.resultView(r.result) end
+    b.text, b.ink, b.size = r.sum, r.sumInk or COL.value, S1
+    b.w, b.hh = textWidth(b.text, b.size, true), b.size * 0.45
+    return b
+end
+
+-- What the Ammo checks rolled come to (roll `r`'s ammoState: "out" for
+-- one, "jam" for more, "spent" for a Limited / Single Shot weapon's --
+-- counted after Reliable, see rollAttack), at the panel's left end: "OUT",
+-- "JAM" or "SPENT" in the ammo button's colour for it; nil for none (then
+-- the dice may use that end too, see ACTIVATION.diceView). Its text, ink,
+-- size, width and half its height.
+function ACTIVATION.ammoView(r)
+    local st = r and not r.rolling and r.ammoState
+    if not st then return nil end
+    local S1 = LAY.diceSumFont
+    local b = { text = st:upper(), ink = COL["ammo" .. st:sub(1, 1):upper() .. st:sub(2)] or COL.diceAmmo, size = S1 }
+    b.w, b.hh = textWidth(b.text, S1, true), S1 * 0.45
+    return b
+end
+-- The Ammo checks' verdict for `n` of them (none: nil): OUT for one, JAM
+-- for more -- SPENT for a Limited / Single Shot weapon (`limited`).
+function ACTIVATION.ammoState(n, limited)
+    if (n or 0) < 1 then return nil end
+    return limited and "spent" or n >= 2 and "jam" or "out"
+end
+
+-- What the dice panel shows (ACTIVATION.roll: the roll on show, see
+-- ACTIVATION.showDice), for the builder and ACTIVATION.drawDice alike: on
+-- or not, still rolling or not ("Rolling Dice..."), each slot -- shown,
+-- its size and place, its face -- and the result (see
+-- ACTIVATION.sumView) at the panel's right end and at its left end the
+-- best result (the Injury dice action only, `best`) or the Ammo checks
+-- (see ACTIVATION.ammoView), each with its corners dicePad clear of the
+-- diamonds' slanted edges (which run x = +-(sideX - |y|)). The dice take
+-- the room between them -- an end with nothing at it up to the slanted
+-- edge, less dicePad -- as big as diceD, shrinking (gaps and all) only as
+-- far as that room needs, and keeping diceSumGap clear of the results; in
+-- the middle of the panel where they fit there, else as near it as they
+-- can (so with nothing at the left end, many dice spread into it and stay
+-- bigger). A roll's dice may be of several kinds (`kinds`, else all
+-- `kind`) and each have its own check colour (`hls`, else `hl`); `spare`
+-- is the die whose Ammo check Reliable ignored. A die may have signs over
+-- it (`syms[i]`, see ACTIVATION.signs: Shock, Blaze): while any has, every
+-- die is as small as die and signs need to fit the panel's height, and the
+-- row sinks by half the signs' room -- its lower corners then reaching that
+-- much nearer the slanted edges, which the room at an open end allows for.
+function ACTIVATION.diceView()
+    local r = ACTIVATION.roll
+    local W, H = 2 * LAY.sideX, 2 * LAY.sideY
+    local rolling = r ~= nil and r.rolling == true
+    local v = { on = r ~= nil, rolling = rolling, W = W, H = H, slots = {}, rowY = 0 }
+    local faces = (r and not rolling) and r.faces or {}
+    local n = math.min(#faces, ACTIVATION.MAX_SHOWN)
+    local D0, pad, gap = LAY.diceD, LAY.dicePad, LAY.diceSumGap
+    local syms = (r and not rolling and type(r.syms) == "table") and r.syms or {}
+    local signed = false
+    for i = 1, n do signed = signed or (type(syms[i]) == "table" and #syms[i] > 0) end
+    local room = LAY.diceSymGap + LAY.diceSym           -- the signs' room over a die, in its sides
+    local q = signed and room / 2 or 0                  -- the row's sink, in its dice's sides
+    if signed then D0 = math.min(D0, (H - 2 * pad) / (1 + room)) end
+    local b = ACTIVATION.sumView(r)
+    local l = r and not rolling and r.best and ACTIVATION.resultView(r.best) or ACTIVATION.ammoView(r)
+    if b then b.x = LAY.sideX - pad - b.hh - b.w / 2 end
+    if l then l.x = -(LAY.sideX - pad - l.hh - l.w / 2) end
+    -- The room: from the left block's right edge (diceSumGap clear) or,
+    -- with none, the slant -- a die's corner reaches it at x = -(sideX -
+    -- pad) + D / 2 -- to the right block likewise. With `k` open ends the
+    -- room is C - k * D / 2, and n dice of side D (gaps diceSpace * D / D0)
+    -- need D * (n + sp): the biggest D that fits, at most D0. A sunk row
+    -- (signs over it) needs q * D more at each open end.
+    local open = LAY.sideX - pad
+    local lo = l and (l.x + l.w / 2 + gap) or -open
+    local hi = b and (b.x - b.w / 2 - gap) or open
+    local k = (l and 0 or 1) + (b and 0 or 1)
+    local sp = math.max(0, n - 1) * LAY.diceSpace / D0
+    local D = D0
+    if n > 0 then D = math.max(D0 * 0.3, math.min(D0, (hi - lo) / (n + sp + k * (0.5 + q)))) end
+    if not l then lo = lo + D / 2 + q * D end
+    if not b then hi = hi - D / 2 - q * D end
+    v.rowY = signed and -q * D or 0
+    local step = D + LAY.diceSpace * D / D0
+    local w    = n * D + math.max(0, n - 1) * (step - D)
+    -- the row's middle: the panel's, moved only as far as the room needs
+    local mid  = lo + w / 2 > hi - w / 2 and (lo + hi) / 2 or clamp(0, lo + w / 2, hi - w / 2)
+    local x0   = mid - w / 2
+    for i = 1, ACTIVATION.MAX_SHOWN do
+        local kind = r and (r.kinds and r.kinds[i] or r.kind) or "d6"
+        local hl = r and (r.hls and r.hls[i] or r.hl)
+        v.slots[i] = { on = i <= n, D = D, x = x0 + (i - 1) * step + D / 2, y = v.rowY,
+                       face = ACTIVATION.face(kind, faces[i] or 1, ACTIVATION.markSide(D), hl, r ~= nil and r.spare == i),
+                       syms = ACTIVATION.signView(i <= n and syms[i] or nil, D) }
+    end
+    -- the Ammo trait's die (ACTIVATION.roll.ammoDie): a faint cartridge
+    -- behind its pips, so it reads apart from the hit dice
+    local ai = r and not rolling and r.ammoDie
+    if ai and v.slots[ai] and hasAsset("dice_ammo") then v.slots[ai].face.wm = "dice_ammo" end
+    v.sum = b
+    if r and r.best then v.best = l else v.ammo = l end   -- the left end: the best result, or the ammo
+    return v
+end
+
+-- The signs over a die of side D (`list` = { { text =, ink = }, ... } as
+-- a roll has them, see ACTIVATION.diceView; nil: none): two places, each
+-- shown or not -- side by side while both are -- LAY.diceSym of the side
+-- tall, diceSymGap over the die's top: from the die's middle (x, y), the
+-- box and the size its sign fits.
+function ACTIVATION.signView(list, D)
+    local out, h = {}, LAY.diceSym * D
+    local m = math.min(2, type(list) == "table" and #list or 0)
+    for k = 1, 2 do
+        local s = k <= m and list[k] or nil
+        local text = s and tostring(s.text or "") or ""
+        out[k] = { on = text ~= "", text = text, ink = s and s.ink or COL.diceShock,
+                   x = m == 2 and (k == 1 and -0.55 or 0.55) * h or 0,
+                   y = D / 2 + LAY.diceSymGap * D + h / 2, w = h * 1.1, h = h * 1.25,
+                   size = fitSize(text ~= "" and text or "W", h * 1.1, h * 1.25, h, true) }
+    end
+    return out
+end
+
+-- The signs a weapon trait puts over a die (see CFG.shockMark): `shock`
+-- and / or `blaze`, as a die's entry of a roll's `syms`; nil for none.
+function ACTIVATION.signs(shock, blaze)
+    local out = {}
+    if blaze and (CFG.blazeMark or "") ~= "" then out[#out + 1] = { text = CFG.blazeMark, ink = COL.diceBlaze } end
+    if shock and (CFG.shockMark or "") ~= "" then out[#out + 1] = { text = CFG.shockMark, ink = COL.diceShock } end
+    return #out > 0 and out or nil
+end
+
+-- A die's edge (see ACTIVATION.diceXml): the diamond buttons' frame art
+-- (ASSETS diamond_frame, unturned: a square frame, filtered clean at
+-- range) -- or, until it is set, a square in the edge colour under the
+-- fill inset diceEdge. A slot's D is the die's whole footprint, frame and
+-- all: the frame art fills it and the face inside is D / LAY.frameArt, the
+-- frame drawn frameArt times the face exactly as on the diamond buttons
+-- -- so neighbouring dice's frames never overlap, nor reach past the
+-- panel's slants. faceSide: what the face's fill measures in a slot D;
+-- markSide: the face the pips, numbers and icons are laid out on.
+function ACTIVATION.edgeArt() return hasAsset("diamond_frame") end
+function ACTIVATION.faceSide(D) return ACTIVATION.edgeArt() and D / LAY.frameArt or D - 2 * LAY.diceEdge end
+function ACTIVATION.markSide(D) return ACTIVATION.edgeArt() and D / LAY.frameArt or D end
+-- A face's fill is the diamond buttons' gradient (unturned; tinted with the
+-- face's colour, see ui.gradTint) once that art is set.
+function ACTIVATION.faceArt() return hasAsset("diamond") and "diamond" or nil end
+-- The Ammo die's cartridge behind its pips: the dice_ammo art (a narrow
+-- cartridge in a square) this big in a slot D -- LAY.diceAmmoMark times
+-- the face -- turned LAY.diceAmmoTurn degrees (upright), in
+-- COL.diceAmmoMark (a faint ivory).
+function ACTIVATION.watermark(D) return ACTIVATION.markSide(D) * LAY.diceAmmoMark end
+
+-- Where each part of a slot goes for its size `D` (see ACTIVATION.diceXml):
+-- the face's fill inside the edge, and pip k's place and size.
+function ACTIVATION.pipAt(k, D)
+    local spot = ACTIVATION.PIP_SPOTS[k]
+    return spot[1] * 0.27 * D, spot[2] * 0.27 * D, D * LAY.dicePip / math.sqrt(2)
+end
+
+-- A roll's dice over the stats (see ACTIVATION.showDice): the panel the
+-- Recovery Test uses, in black (COL.dicePanel) -- "Rolling Dice..."
+-- (diceWait) while they fall, then up to MAX_SHOWN faces in a row
+-- (dieSlot_<i>) with the result at the right end (see ACTIVATION.sumView:
+-- diceSum, diceSumIcon) and at the left end what the Ammo checks came to (see
+-- ACTIVATION.ammoView: ammoSum) or, for the Injury dice action, the best
+-- result (diceBest, diceBestIcon). The panel notices the cursor (onDiceEnter
+-- / Exit: it stays while the cursor is on it, and goes once it leaves). Each
+-- face is a square in its die's colour with an edge (the edge colour with the
+-- fill inset, dieEdge_ / dieFace_) holding every mark a face can need, each
+-- shown or not (see ACTIVATION.face): seven diamond pips (diePip_<i>_<k>: a
+-- D6), a text (dieNum_<i>: a Firepower dice's hits, or the stand-in for an
+-- icon not set yet), an icon (dieIcon_<i>: an Injury dice's result, a
+-- Firepower dice's Ammo check) and a small text (dieMark_<i>: "!", the Ammo
+-- check's stand-in) -- and over it two places for a weapon trait's signs
+-- (dieSym_<i>_1 / _2: Shock, Blaze, see ACTIVATION.signView). A stat check's
+-- dice have their edge and pips in its colour: green passed, orange failed.
+-- Built from ACTIVATION.diceView, as it is drawn in place
+-- (ACTIVATION.drawDice), so a rebuild while dice show keeps them.
+function ACTIVATION.diceXml()
+    local v, e = ACTIVATION.diceView(), LAY.diceEdge
+    local function img(id, on, x, y, w, color, rot, image)
+        return string.format('<Image id="%s"%s rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"%s' ..
+            ' color="%s"%s raycastTarget="false" />', id, on == nil and "" or string.format(' active="%s"', tostring(on)),
+            xyAttr(x, y), w, w, rot and ' rotation="0 0 45"' or "", color, image and string.format(' image="%s"', image) or "")
+    end
+    local out = {
+        string.format('<Panel id="dicePanel" active="%s" rectAlignment="MiddleCenter" width="%g" height="%g" color="%s"' ..
+            ' raycastTarget="true" onMouseEnter="onDiceEnter" onMouseExit="onDiceExit">', tostring(v.on), v.W, v.H,
+            COL.dicePanel),
+        textXml{ id = "diceWait", x = 0, y = 0, w = v.W * 0.75, h = LAY.diceWaitFont * 1.25, text = "Rolling Dice...",
+                 color = COL.accent, size = fitSize("Rolling Dice...", v.W * 0.75, LAY.diceWaitFont * 1.25,
+                 LAY.diceWaitFont, true), extra = string.format(' active="%s" raycastTarget="false"', tostring(v.rolling)) },
+    }
+    for i, s in ipairs(v.slots) do
+        local f, D = s.face, s.D
+        out[#out + 1] = string.format('<Panel id="dieSlot_%d" active="%s" rectAlignment="MiddleCenter" offsetXY="%s"' ..
+            ' width="%.1f" height="%.1f" color="%s" raycastTarget="false">', i, tostring(s.on), xyAttr(s.x, s.y), D, D, COL.clear)
+        -- the Ammo die's cartridge (dieWm_<i>, see ACTIVATION.watermark), over the fill
+        local wm = string.format('<Image id="dieWm_%d" active="%s" rectAlignment="MiddleCenter" width="%.1f"' ..
+            ' height="%.1f" rotation="0 0 %g" color="%s" image="%s" raycastTarget="false" />', i,
+            tostring(f.wm ~= nil), ACTIVATION.watermark(D), ACTIVATION.watermark(D), LAY.diceAmmoTurn,
+            COL.diceAmmoMark, f.wm or "dice_ammo")
+        if not hasAsset("dice_ammo") then wm = "" end
+        if ACTIVATION.edgeArt() then           -- the fill, the frame art over it filling the slot
+            out[#out + 1] = img("dieFace_" .. i, nil, 0, 0, ACTIVATION.faceSide(D), ui.gradTint(f.fill), nil, ACTIVATION.faceArt())
+                         .. wm .. img("dieEdge_" .. i, nil, 0, 0, D, f.ink, nil, "diamond_frame")
+        else                                   -- a square in the edge colour, the fill inset
+            out[#out + 1] = img("dieEdge_" .. i, nil, 0, 0, D, f.ink)
+                         .. img("dieFace_" .. i, nil, 0, 0, D - 2 * e, ui.gradTint(f.fill), nil, ACTIVATION.faceArt()) .. wm
+        end
+        for k = 1, #ACTIVATION.PIP_SPOTS do
+            local px, py, pw = ACTIVATION.pipAt(k, ACTIVATION.markSide(D))
+            out[#out + 1] = img("diePip_" .. i .. "_" .. k, f.pips[k] == true, px, py, pw, f.ink, true)
+        end
+        out[#out + 1] = textXml{ id = "dieNum_" .. i, x = f.numX or 0, y = f.numY or 0, w = f.numW or D, h = f.numH or D,
+            text = f.num or "", color = f.numInk or COL.diceInk, size = f.numSize or LAY.diceSumFont,
+            extra = string.format(' active="%s" raycastTarget="false"', tostring(f.num ~= nil)) }
+        out[#out + 1] = img("dieIcon_" .. i, f.icon ~= nil, f.iconX or 0, 0, f.iconD or D * 0.66,
+            f.iconInk or COL.diceInk, nil, f.icon)
+        out[#out + 1] = textXml{ id = "dieMark_" .. i, x = f.markX or 0, y = 0, w = f.markW or D, h = ACTIVATION.markSide(D) * 0.84,
+            text = "!", color = f.markInk or COL.diceAmmo, size = f.markSize or LAY.diceSumFont,
+            extra = string.format(' active="%s" raycastTarget="false"', tostring(f.mark ~= nil)) }
+        -- the signs over it (dieSym_<i>_<k>, see ACTIVATION.signView)
+        for k, g in ipairs(s.syms) do
+            out[#out + 1] = textXml{ id = string.format("dieSym_%d_%d", i, k), x = g.x, y = g.y, w = g.w, h = g.h,
+                text = g.text, color = g.ink, size = g.size,
+                extra = string.format(' active="%s" raycastTarget="false"', tostring(g.on)) }
+        end
+        out[#out + 1] = '</Panel>'
+    end
+    -- the result at the right end (as built; hidden when there is none)
+    local b = v.sum or {}
+    local sz = b.size or LAY.diceSumFont
+    out[#out + 1] = textXml{ id = "diceSum", x = b.x or 0, y = 0, w = (b.w or 1) / FIT + 2, h = sz * 1.25,
+        text = b.text or "", color = b.ink or COL.value, size = sz,
+        extra = string.format(' active="%s" raycastTarget="false"', tostring(b.text ~= nil)) }
+    out[#out + 1] = img("diceSumIcon", b.icon ~= nil, b.x or 0, 0, b.d or LAY.diceD * 0.8, b.ink or COL.value, nil, b.icon)
+    -- what the Ammo checks came to, at the left end: ammoSum ("OUT", "JAM", "SPENT")
+    local a = v.ammo
+    local asz = a and a.size or LAY.diceSumFont
+    out[#out + 1] = textXml{ id = "ammoSum", x = a and a.x or 0, y = 0,
+        w = (a and a.w or textWidth("OUT", asz, true)) / FIT + 2, h = asz * 1.25,
+        text = a and a.text or "OUT", color = a and a.ink or COL.ammoOut,
+        size = asz, extra = string.format(' active="%s" raycastTarget="false"', tostring(a ~= nil)) }
+    -- the best result at the left end (the Injury dice action only):
+    -- diceBest (its stand-in text) or diceBestIcon
+    local l = v.best or {}
+    local lsz = l.size or LAY.diceSumFont
+    out[#out + 1] = textXml{ id = "diceBest", x = l.x or 0, y = 0, w = (l.w or 1) / FIT + 2, h = lsz * 1.25,
+        text = l.text or "", color = l.ink or COL.value, size = lsz,
+        extra = string.format(' active="%s" raycastTarget="false"', tostring(l.text ~= nil)) }
+    out[#out + 1] = img("diceBestIcon", l.icon ~= nil, l.x or 0, 0, l.d or LAY.diceD * 0.8, l.ink or COL.value, nil, l.icon)
+    return table.concat(out) .. '</Panel>'
+end
+
+-- Whether `obj`'s script has the global function `fn`. obj.call on an
+-- object without it -- no script, or a card / Controller older than the
+-- function -- makes TTS log "Lua Error <fn>: Object reference not set to
+-- an instance of an object" on its own side, which no pcall here can
+-- hide. So every call to another object goes through ACTIVATION.ask,
+-- which looks first. An object that can't hand over its script is
+-- called anyway.
+--   Looking means copying the other object's whole script out of TTS --
+-- a card's is most of a megabyte -- and some actions ask every fighter on
+-- the table. So a script that carries MUNDA_STAMP (a mark it sets anew
+-- each time it loads: these cards, the Mundane Importer and Controller)
+-- is read once: every function it has is noted (ACTIVATION.scripts, by
+-- GUID) and that holds for as long as its mark stays the same -- a
+-- reload, a card brought up to date, gives it a new one.
+MUNDA_STAMP = table.concat({ os.time(), os.clock(), math.random(1, 999999999) }, "-")
+ACTIVATION.scripts = {}
+function ACTIVATION.has(obj, fn)
+    local okG, guid = pcall(function() return obj.getGUID() end)
+    guid = okG and type(guid) == "string" and guid or nil
+    local known = guid and ACTIVATION.scripts[guid]
+    if known then
+        local ok, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+        if ok and stamp ~= nil and stamp == known.stamp then return known.fns[fn] == true end
+        ACTIVATION.scripts[guid] = nil
+    end
+    local ok, script = pcall(function() return obj.getLuaScript() end)
+    if not ok or type(script) ~= "string" then return true end
+    if guid and script:find("MUNDA_STAMP", 1, true) then
+        local okV, stamp = pcall(function() return obj.getVar("MUNDA_STAMP") end)
+        if okV and stamp ~= nil then
+            local fns = {}
+            for name in script:gmatch("function ([%w_]+)%(") do fns[name] = true end
+            ACTIVATION.scripts[guid] = { stamp = stamp, fns = fns }
+        end
+    end
+    return script:find("function " .. fn .. "(", 1, true) ~= nil
+end
+
+-- obj.call(fn, arg), protected, only if `obj` has `fn` (see
+-- ACTIVATION.has): whether it ran, and what it returned.
+function ACTIVATION.ask(obj, fn, arg)
+    if not (obj and ACTIVATION.has(obj, fn)) then return false end
+    return pcall(function() return obj.call(fn, arg) end)
+end
+
+-- What fighter `f` (default: this one) is, as a set of lower-case words:
+-- its role line's type and tags ("Archeotek • Champion, Loner" -> archeotek,
+-- champion, loner), its category and its rank -- for the rules that ask
+-- whether a fighter is a Loner, a Pet, ...
+function ACTIVATION.tags(f)
+    f = f or fighter
+    local set, parts = {}, {}
+    for part in (tostring(f.role or "") .. "•"):gmatch("(.-)•") do parts[#parts + 1] = trimText(part):lower() end
+    if parts[1] and parts[1] ~= "" then set[parts[1]] = true end
+    for tag in ((parts[2] or "") .. ","):gmatch("([^,]*),") do
+        local t = trimText(tag)
+        if t ~= "" then set[t] = true end
+    end
+    for _, v in ipairs({ f.category, f.rank, f.ftype }) do
+        if type(v) == "string" and v ~= "" then set[v:lower()] = true end
+    end
+    return set
+end
+
+-- Where each condition that is on sits in the bar under the stats: a centred
+-- row in CONDITIONS order, closing up when there are many.
+local function conditionSlots()
+    local on = {}
+    for i, c in ipairs(CONDITIONS) do
+        if conditionCount(c.key) > 0 then on[#on + 1] = i end
+    end
+    local step = LAY.condD + LAY.condGap
+    if #on > 1 then step = math.min(step, (LAY.colW - LAY.condD) / (#on - 1)) end
+    local slots = {}
+    for k, i in ipairs(on) do
+        slots[i] = { x = (k - (#on + 1) / 2) * step, y = LAY.condY }
+    end
+    return slots
+end
+
+-- The "x2" on a stacked condition in the bar: its text, fitted size, and
+-- the dark plate it sits on in the icon's lower-right corner, sized to
+-- condCountFont (wide enough for "x9"; a longer count shrinks).
+local function badgePlate()
+    local f = LAY.condCountFont
+    return textWidth("x9", f, true) / FIT + 0.2 * f, f * 1.25
+end
+local function stackBadge(n)
+    local text = "x" .. n
+    local w, h = badgePlate()
+    return text, fitSize(text, w, h, LAY.condCountFont, true)
+end
+
+-- The condition bar: one slot per condition, shown only while it is on. A
+-- slot is a click-through container around the condition's icon, its stack
+-- count and a transparent hit area in the icon's own shape (so the hover
+-- tint follows the icon's outline). Switching a condition on or off only
+-- moves and shows slots (see drawConditionBar). Over the icon, reaching
+-- half condGap past it, a see-through square lit in a colour while a
+-- hovered stat is changed by the condition (condFx_<i>, see
+-- SKILL.drawSources) -- over the icon, not behind it: the icons fill their
+-- slots, so nothing behind one would show.
+local function conditionBarXml()
+    local slots, parts, d = conditionSlots(), {}, LAY.condD
+    local bw, bh = badgePlate()
+    for i, c in ipairs(CONDITIONS) do
+        local s, n = slots[i], conditionCount(c.key)
+        local badge, badgeSize = stackBadge(n)
+        local icon = "cond_" .. c.key
+        parts[#parts + 1] = string.format(
+            '<Panel id="condSlot_%d" active="%s" rectAlignment="MiddleCenter" offsetXY="%s"' ..
+            ' width="%g" height="%g" color="%s" raycastTarget="false">',
+            i, tostring(s ~= nil), xyAttr(s and s.x or 0, s and s.y or LAY.condY), d, d, COL.clear)
+        parts[#parts + 1] = layeredButton{
+            id = "condBar_" .. i, size = d, x = 0, y = 0, icon = icon, iconPad = 1,
+            label = c.short, labelSize = LAY.condFont, plate = COL.iconPlate,
+            hitImage = icon, onClick = "onClearCondition", onEnter = "onInfoEnter", onExit = "onInfoExit",
+            inner = string.format(
+                '<Panel id="condBadge_%d" active="%s" rectAlignment="MiddleCenter"' ..
+                ' offsetXY="%s" width="%g" height="%g" color="%s" raycastTarget="false">',
+                i, tostring(n >= 2), xyAttr(d / 2 - bw / 2, -d / 2 + bh / 2), bw, bh, COL.badge)
+                .. textXml{ id = "condCount_" .. i, w = bw, h = bh, text = badge,
+                    size = badgeSize, color = COL.value } .. "</Panel>",
+        }
+        parts[#parts + 1] = string.format(
+            '<Image id="condFx_%d" active="false" rectAlignment="MiddleCenter" width="%g" height="%g"' ..
+            ' color="%s" raycastTarget="false" />', i, d + LAY.condGap, d + LAY.condGap,
+            SKILL.fxTint(COL.valueMod))
+        parts[#parts + 1] = "</Panel>"
+    end
+    return table.concat(parts)
+end
+
+-- The skills and wargear (see SKILLS, WARGEAR): reading them, their names
+-- under the stats and the panel hovering one shows, and -- further down,
+-- once A's panels exist -- the Special tab for the ones that are actions.
+-- All in one table (SKILL, declared in section 4): the main chunk is at
+-- Lua's 200-local limit.
+do
+    local S = SKILL
+
+    -- A name as a key: lower case, anything but letters and digits one "_"
+    -- ("Counter-attack" -> "counter_attack").
+    function S.key(name)
+        return (trimText(name):lower():gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", ""))
+    end
+
+    -- A name capitalised word by word, after a space, hyphen, slash or
+    -- bracket too ("counter-attack" -> "Counter-Attack"); the rest of each
+    -- word is left as it is.
+    function S.title(name)
+        return ((" " .. trimText(name)):gsub("([%s%-/%(])(%a)", function(a, b) return a .. b:upper() end):sub(2))
+    end
+
+    -- The two lists, in the order they go under the stats: the fighter's
+    -- field, its reference table and the COL key its names show in (the
+    -- text colour for the skills, the headers colour for the wargear, so a
+    -- shared row still tells them apart).
+    S.KINDS = {
+        { kind = "skill",   field = "skills",  defs = SKILLS,  ink = "value" },
+        { kind = "wargear", field = "wargear", defs = WARGEAR, ink = "label" },
+    }
+
+    -- A name's entry in its kind's reference table (SKILLS for "skill",
+    -- WARGEAR for "wargear"), or nil for one not listed. An entry is found
+    -- by the other names it gives too (`aka`: Mesh Armor).
+    RULES.follow(function() S.index = nil end)   -- the tables may have changed
+    function S.def(name, kind)
+        kind = kind or "skill"
+        S.index = S.index or {}
+        if not S.index[kind] then
+            local idx = {}
+            for _, k in ipairs(S.KINDS) do
+                if k.kind == kind then
+                    for _, d in ipairs(k.defs) do
+                        for _, a in ipairs(type(d.aka) == "table" and d.aka or {}) do idx[S.key(a)] = d end
+                    end
+                    for _, d in ipairs(k.defs) do idx[S.key(d.name)] = d end
+                end
+            end
+            S.index[kind] = idx
+        end
+        return S.index[kind][S.key(name)]
+    end
+
+    -- Names as a list, from a list (of names, or of { name = }) or from one
+    -- string as the roster has them, "Inspiring, Medicate" -- split at
+    -- commas outside brackets. Blanks and repeats are dropped.
+    function S.parse(v)
+        local out, seen = {}, {}
+        local function add(name)
+            name = trimText(name)
+            local k = S.key(name)
+            if k ~= "" and not seen[k] then seen[k], out[#out + 1] = true, name end
+        end
+        if type(v) == "string" then
+            local depth, cur = 0, {}
+            for c in v:gmatch(".") do
+                if c == "(" or c == "[" then depth = depth + 1
+                elseif (c == ")" or c == "]") and depth > 0 then depth = depth - 1 end
+                if c == "," and depth == 0 then add(table.concat(cur)); cur = {} else cur[#cur + 1] = c end
+            end
+            add(table.concat(cur))
+        elseif type(v) == "table" then
+            for _, s in ipairs(v) do add(type(s) == "table" and tostring(s.name or "") or tostring(s)) end
+        end
+        return out
+    end
+
+    -- Every skill and piece of wargear the fighter has, skills first, each
+    -- { kind, ink, key, name (capitalised) } with what its entry says --
+    -- short, desc, mods, action, type, costs, weapon, meleeS, secondary,
+    -- master, springUp, catfall, distance, fearsome, ironJaw, steel,
+    -- unstoppable, backstab, cutThroat, lieLow, shoots, gunfighter,
+    -- hipShooting, marksman, aimed, fastReload, ironWill, label, distribute,
+    -- when, once, boost, reaction, noFall, assist, inv, burns, noAp, immune,
+    -- gasInv, and a Wyrd power's maintained, overLimit, flaming, meleeL,
+    -- target, area, aura, rerollHits, void, visions (see
+    -- ACTIVATION.manifest) -- and `bar`: its place among the names under the
+    -- stats (every one is shown there, those that are actions too) -- and
+    -- `state`, the bar's state it shows in (1 skills, 2 wargear; see
+    -- S.state).
+    --   Nearly everything asks for this (every stat, every action's cost,
+    -- what other cards are told), so the entries are worked out once for
+    -- the names the fighter has and the rules in force, and kept (S.items:
+    -- that list itself, for those that only read it); each call of
+    -- S.owned hands out a fresh list of them.
+    RULES.follow(function() S.ownedNames = nil end)   -- the entries may have changed
+    function S.items()
+        local was, n, same = S.ownedNames, 0, S.ownedNames ~= nil
+        for _, k in ipairs(S.KINDS) do
+            for _, name in ipairs(same and fighter[k.field] or {}) do
+                n = n + 1
+                same = same and was[n] == tostring(name)
+            end
+            n = n + 1
+            same = same and was[n] == false      -- where one kind's names end
+        end
+        if not (same and was[n + 1] == nil) then
+            local names = {}
+            for _, k in ipairs(S.KINDS) do
+                for _, name in ipairs(fighter[k.field] or {}) do names[#names + 1] = tostring(name) end
+                names[#names + 1] = false
+            end
+            S.ownedList, S.ownedNames = S.entries(), names
+        end
+        return S.ownedList
+    end
+    function S.owned()
+        local out = {}
+        for i, it in ipairs(S.items()) do out[i] = it end
+        return out
+    end
+    function S.entries()
+        local out = {}
+        for state, k in ipairs(S.KINDS) do
+            for _, name in ipairs(fighter[k.field] or {}) do
+                local d = S.def(name, k.kind) or {}
+                out[#out + 1] = { kind = k.kind, ink = k.ink, key = S.key(name), name = S.title(name), short = d.short,
+                                  desc = d.desc or "", mods = d.mods, action = d.action, type = d.type,
+                                  costs = d.costs, weapon = d.weapon, meleeS = d.meleeS, secondary = d.secondary,
+                                  master = d.master, springUp = d.springUp, catfall = d.catfall,
+                                  distance = d.distance, fearsome = d.fearsome, ironJaw = d.ironJaw,
+                                  steel = d.steel, unstoppable = d.unstoppable, backstab = d.backstab,
+                                  cutThroat = d.cutThroat, lieLow = d.lieLow, shoots = d.shoots,
+                                  gunfighter = d.gunfighter, hipShooting = d.hipShooting, marksman = d.marksman,
+                                  aimed = d.aimed, fastReload = d.fastReload, ironWill = d.ironWill,
+                                  label = d.label, distribute = d.distribute, when = d.when, once = d.once,
+                                  boost = d.boost, reaction = d.reaction, noFall = d.noFall, assist = d.assist,
+                                  maintained = d.maintained, overLimit = d.overLimit, flaming = d.flaming,
+                                  meleeL = d.meleeL, target = d.target, area = d.area, aura = d.aura,
+                                  rerollHits = d.rerollHits, void = d.void, visions = d.visions,
+                                  inv = d.inv, burns = d.burns, noAp = d.noAp, immune = d.immune, gasInv = d.gasInv,
+                                  bar = #out + 1, state = state }
+            end
+        end
+        return out
+    end
+
+    -- Those of them that say `field` (S.owned) and work right now (see
+    -- STAT.works: a skill doesn't while the skills are disabled, S.off).
+    function S.with(field)
+        local out, off = {}, S.off()
+        for _, it in ipairs(S.items()) do
+            if it[field] ~= nil and STAT.works(it, off) then out[#out + 1] = it end
+        end
+        return out
+    end
+
+    -- The fighter's skills and wargear, split: the names under the stats,
+    -- in their order there, and the actions, shaped like ACTIONS entries
+    -- for A's Special tab -- each called by its skill's name, or by the
+    -- name its entry gives the action (`label`: Munitioneer's Distribute
+    -- Ammo) -- with its `kind` ("skill" / "wargear") and what the action
+    -- does (distance, distribute, once, boost, reaction) -- `item`: the
+    -- name it has under the stats.
+    function S.split()
+        local bar, actions = S.owned(), {}
+        for _, it in ipairs(bar) do
+            if it.action then
+                actions[#actions + 1] = { key = it.key, label = it.label or it.name, cost = it.action, type = it.type,
+                                          distance = it.distance, distribute = it.distribute, kind = it.kind,
+                                          once = it.once, boost = it.boost, reaction = it.reaction, item = it.name }
+            end
+        end
+        return bar, actions
+    end
+
+    -- Whether item `it` (S.owned) is a Continuous Wyrd power that is in
+    -- effect right now (fighter.wyrd.power, see ACTIVATION.cast).
+    function S.live(it)
+        local w = fighter.wyrd
+        return it.kind == "skill" and it.type == "wyrd" and type(w) == "table" and w.power == it.key
+    end
+
+    -- The colour a name under the stats shows in while nothing lights it up:
+    -- purple for a power in effect, grey for wargear burnt out (setBurnt).
+    function S.ink(it)
+        if S.live(it) then return COL.wyrdInk end
+        if it.burns and (fighter.burnt or {})[it.key] then return COL.itemSpent end
+        return COL[it.ink] or COL.value
+    end
+
+    -- The name `it` shows under the stats: its short name or its name --
+    -- with CFG.wyrdMark before it while it is a power in effect
+    -- ("⏳Flaming Weapon"). S.room: what the bar keeps room for, the mark
+    -- always for a Continuous Wyrd power, so it can come and go in place.
+    function S.label(it)
+        return (S.live(it) and (CFG.wyrdMark or "") or "") .. (it.short or it.name)
+    end
+    function S.room(it)
+        local keep = it.kind == "skill" and it.type == "wyrd" and ACTIVATION.continuous({ cost = it.action })
+        return (keep and (CFG.wyrdMark or "") or "") .. (it.short or it.name)
+    end
+    -- Whether item `it` is a Continuous Wyrd power that works right now: a
+    -- left click on its name puts it in effect or ends it (see
+    -- setMaintained).
+    function S.maintainable(it)
+        return it.kind == "skill" and it.type == "wyrd" and ACTIVATION.continuous({ cost = it.action }) and STAT.works(it)
+    end
+
+    -- Whether the fighter's skills are disabled: at 0 wounds, Seriously
+    -- Injured (which should be at 0 wounds, but that is easily forgotten)
+    -- or Out of Action. None shows under the stats then, and nothing a
+    -- skill gives counts (STAT.works, S.with): no change to a stat or to
+    -- an action's cost, no action of its own on the Special tab, its
+    -- weapon can't be used, no bonus in close combat. The Wyrd powers
+    -- are the exception at 0 wounds (see STAT.works).
+    function S.off()
+        return hpOut() or fighter.status == "seriously_injured" or fighter.outOfAction == true
+    end
+
+    -- Which skills the bar's first state lists: those that work right now
+    -- (all of them, but while the skills are disabled -- then only Wyrd
+    -- powers at 0 wounds). Laid out when the card is built; a fighter with a
+    -- Wyrd power has it built again when this changes (see SKILL.switched).
+    function S.listed()
+        local out = {}
+        for _, it in ipairs(S.items()) do
+            if it.state == 1 and STAT.works(it) then out[#out + 1] = it end
+        end
+        return out
+    end
+    -- ... as a string that changes when that list does, and whether the
+    -- fighter has a Wyrd power at all (only then does the list changing
+    -- mean building the card again).
+    function S.shape()
+        local t = {}
+        for _, it in ipairs(S.listed()) do t[#t + 1] = it.bar end
+        return table.concat(t, ",")
+    end
+    function S.hasWyrd()
+        for _, it in ipairs(S.items()) do
+            if it.kind == "skill" and it.type == "wyrd" then return true end
+        end
+        return false
+    end
+
+    -- Which of the bar's states viewer `v` sees (nil: as built): 1 the
+    -- skills, 2 the wargear, or -- while a stat that skills / wargear change
+    -- is hovered -- that stat's sources together (v.barFx, the key of its
+    -- panel, see S.fxKey). Otherwise the wargear while the cursor is on the
+    -- bar (v.barHover) -- the skills after a right click there (v.barFlip,
+    -- see onBarClick) -- and always while none of its skills works (S.off;
+    -- a Wyrd power still does at 0 wounds). A state with no names gives way
+    -- to the other -- but with the skills disabled a fighter without
+    -- wargear shows nothing.
+    function S.state(v)
+        if ACTIVATION.roll then return "roll" end   -- a roll's title, over everything
+        if v and v.barFx then return v.barFx end   -- "none": nothing shown
+        local n = { 0, 0 }
+        for _, it in ipairs(S.items()) do
+            if it.state == 2 or STAT.works(it) then n[it.state] = n[it.state] + 1 end
+        end
+        if n[1] == 0 then return 2 end
+        if n[2] == 0 then return 1 end
+        if not (v and v.barHover) then return 1 end
+        return v.barFlip and 1 or 2
+    end
+
+    -- The key of the panel listing what changes stat `stat` (see S.barXml):
+    -- "<stat>" with every skill and piece of wargear that has mods for it
+    -- (or a boost: the Stimm-Slug Stash; or a Wyrd power's `maintained`),
+    -- "<stat>_w" with the wargear alone (at 0 wounds the skills don't
+    -- count); nil when there is none. `owned`: S.owned(), if at hand.
+    function S.fxItems(stat, wargearOnly, owned)
+        local out = {}
+        for _, it in ipairs(owned or S.items()) do
+            local can = (it.mods and (it.mods[stat] or 0) ~= 0) or (it.boost and (it.boost[stat] or 0) ~= 0)
+                        or (it.maintained and (it.maintained[stat] or 0) ~= 0)
+            if can and not (wargearOnly and it.kind == "skill" and it.type ~= "wyrd") then
+                out[#out + 1] = it
+            end
+        end
+        return out
+    end
+    function S.fxKey(stat, wargearOnly)
+        if #S.fxItems(stat, wargearOnly) == 0 then return nil end
+        return stat .. (wargearOnly and "_w" or "")
+    end
+    -- The colour of name `it` in such a panel: that of what it does to the
+    -- stat as things stand (STAT.gives) -- its own (S.ink) while it does
+    -- nothing: Mesh Armour on a fighter that isn't Engaged. A Wyrd power
+    -- in effect: purple.
+    function S.fxInk(it, stat)
+        local d = STAT.gives(it, stat)
+        if d == 0 then return COL[it.ink] or COL.value end
+        return STAT.color(STAT.better(stat, d), not STAT.better(stat, d), nil, it.type == "wyrd")
+    end
+
+    -- How wide a row of names can be at height y with text up to `size`:
+    -- the stat column, less where the glyphs' tops (0.4 of the size above
+    -- the row's middle) would come nearer C's or W3's lower edges than
+    -- skillPad. C's lower right edge runs x = -sideX + hd + sideY + y.
+    local function rowWidth(y, size)
+        local half = LAY.sideX - halfDiag(LAY.sideD) - LAY.sideY - (y + 0.4 * size) - LAY.skillPad
+        return math.max(0, math.min(LAY.colW, 2 * half))
+    end
+
+    -- The roll on show's title in the bar (see ACTIVATION.rolling): the
+    -- text, and the biggest size up to the names' standard (and the band's
+    -- height) at which it fits the band's middle, with that width.
+    function S.rollTitle()
+        local text = ACTIVATION.roll and ACTIVATION.roll.title or ""
+        local lo, hi = 1, math.min(LAY.labelFont * LAY.skillScale, LAY.skillBand / 1.2)
+        local function fits(sz) return textWidth(text, sz, true) <= rowWidth(LAY.skillY, sz) * FIT end
+        if fits(hi) then lo = hi else
+            for _ = 1, 20 do
+                local mid = (lo + hi) / 2
+                if fits(mid) then lo = mid else hi = mid end
+            end
+        end
+        return { text = text, size = lo, w = math.max(1, rowWidth(LAY.skillY, lo)) }
+    end
+
+    -- Where one state's names go (see LAY.skillScale): the rows -- { y, h,
+    -- size, items } top down, each item with its centre x and width w.
+    -- Up to skillRows rows share the band evenly, filled in order, each
+    -- as full as it goes; the number of rows is the one that gives the
+    -- biggest text (fewer when it's a tie). Every name is at most the
+    -- standard size (skillScale of the stat headers') and what its row's
+    -- height allows; that is settled at one size for all, then each row
+    -- grows on its own as far as its width lets it (or, with skillEven,
+    -- all to the smallest of those).
+    function S.layout(items)
+        if #items == 0 then return { rows = {} } end
+        local band, top, space = LAY.skillBand, LAY.skillY + LAY.skillBand / 2, LAY.skillSpace
+        local std = LAY.labelFont * LAY.skillScale
+        local function wide(it, size) return textWidth(S.room(it), size, true) end
+        -- the rows at `size` in (at most) n rows, or nil when the names
+        -- don't fit
+        local function pack(n, size)
+            local h, rows, r = band / n, {}, 1
+            for k = 1, n do
+                local y = top - (k - 0.5) * h
+                rows[k] = { y = y, h = h, items = {}, room = rowWidth(y, size) * FIT, used = 0 }
+            end
+            for _, it in ipairs(items) do
+                local w = wide(it, size)
+                while rows[r] and #rows[r].items > 0 and rows[r].used + space * size + w > rows[r].room do r = r + 1 end
+                local row = rows[r]
+                if not row or w > row.room then return nil end
+                row.used = row.used + w + (#row.items > 0 and space * size or 0)
+                row.items[#row.items + 1] = it
+            end
+            local out = {}
+            for _, row in ipairs(rows) do if #row.items > 0 then out[#out + 1] = row end end
+            return out
+        end
+        -- the biggest size (up to the standard and what the rows' height
+        -- allows) at which n rows take every name, and those rows
+        local function best(n)
+            local hi = math.min(std, band / n / LAY.skillLeading)
+            local rows = pack(n, hi)
+            if rows then return hi, rows end
+            local lo = 0
+            for _ = 1, 24 do
+                local mid = (lo + hi) / 2
+                if pack(n, mid) then lo = mid else hi = mid end
+            end
+            return lo, pack(n, lo)
+        end
+        local size, rows = 0, nil
+        for n = 1, math.min(LAY.skillRows, #items) do
+            local s, r = best(n)
+            -- (n rows only count when all are used: fewer is a smaller n)
+            if r and #r == n and s > size + 0.01 then size, rows = s, r end
+        end
+        rows = rows or {}
+        -- each row grown: the biggest size up to the standard and its
+        -- height at which its names still fit its width (which narrows as
+        -- the text grows taller)
+        local function used(row, sz)
+            local u = 0
+            for k, it in ipairs(row.items) do u = u + wide(it, sz) + (k > 1 and space * sz or 0) end
+            return u
+        end
+        local function fits(row, sz) return used(row, sz) <= rowWidth(row.y, sz) * FIT end
+        local smallest = math.huge
+        for _, row in ipairs(rows) do
+            local lo, hi = size, math.min(std, row.h / LAY.skillLeading)
+            if fits(row, hi) then lo = hi end
+            for _ = 1, 20 do
+                if hi - lo < 0.05 then break end
+                local mid = (lo + hi) / 2
+                if fits(row, mid) then lo = mid else hi = mid end
+            end
+            row.size, smallest = lo, math.min(smallest, lo)
+        end
+        -- each row centred: the names left to right, space * size apart
+        for _, row in ipairs(rows) do
+            if LAY.skillEven then row.size = smallest end
+            local sz = row.size
+            local x = -used(row, sz) / 2
+            for k, it in ipairs(row.items) do
+                if k > 1 then x = x + space * sz end
+                local w = wide(it, sz)
+                it.x, it.w, x = x + w / 2, w, x + w
+            end
+        end
+        return { rows = rows }
+    end
+
+    -- One state of the bar: a panel over the band (skillState_<key>) with
+    -- `items` laid out on their own (see S.layout), each a text (its id
+    -- `prefix` .. its place among all names) in `ink(it)`, a small diamond
+    -- in the edges colour between neighbours and -- with `buttons` -- a
+    -- clear button over each that tells when the cursor comes and goes and
+    -- takes clicks (skillBtn_<i>: onSkillEnter / Exit, onBarClick). Placed
+    -- from the band's middle.
+    local function stateXml(key, items, prefix, ink, buttons, on)
+        local parts, by = {}, LAY.skillY
+        for _, row in ipairs(S.layout(items).rows) do
+            local size = row.size
+            local space, mark = LAY.skillSpace * size, LAY.skillMark * size
+            local y = row.y - by
+            for k, it in ipairs(row.items) do
+                parts[#parts + 1] = textXml{ id = prefix .. it.bar, x = it.x, y = y, w = it.w / FIT, h = row.h,
+                    text = S.label(it), size = size, color = ink(it), extra = ' raycastTarget="false"' }
+                if k > 1 and mark > 0 then
+                    parts[#parts + 1] = string.format(
+                        '<Image rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"' ..
+                        ' rotation="0 0 45" color="%s" raycastTarget="false" />',
+                        xyAttr(it.x - it.w / 2 - space / 2, y), mark, mark, COL.profileEdge)
+                end
+                if buttons then
+                    parts[#parts + 1] = string.format(
+                        '<Button id="skillBtn_%d" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+                        ' height="%.1f" colors="%s|%s|%s|%s" onMouseEnter="onSkillEnter" onMouseExit="onSkillExit"' ..
+                        ' onClick="onBarClick" />',
+                        it.bar, xyAttr(it.x, y), it.w + space, row.h, COL.clear, COL.clear, COL.clear, COL.clear)
+                end
+            end
+        end
+        return string.format(
+            '<Panel id="skillState_%s" active="%s" rectAlignment="MiddleCenter" width="%g" height="%.1f"' ..
+            ' color="%s" raycastTarget="false">%s</Panel>',
+            key, tostring(on), LAY.colW, LAY.skillBand, COL.clear, table.concat(parts))
+    end
+
+    -- The bar under the stats (skillBar): a clear panel over the band that
+    -- notices the cursor (onBarEnter / Exit) -- a clear button, skillBarHit,
+    -- catches it and right clicks over the gaps (onBarClick) -- holding its
+    -- states, one shown at a time (see S.state, SKILL.drawBar): skillState_1
+    -- (the skills) and skillState_2 (the wargear), their names in their
+    -- kinds' colours (skillTxt_<i>) with buttons; and for each stat skills /
+    -- wargear change, skillState_<stat> (and <stat>_w, the wargear alone, for
+    -- 0 wounds) listing those together, each name in the colour of what it
+    -- does to the stat (skillFx_<stat>[_w]_<i>, see S.fxInk), no buttons.
+    -- S.fxStates lists those keys, and has each one's stat. And
+    -- skillState_roll: the title of a roll on show (rollTitle, in the accent
+    -- colour, see S.rollTitle).
+    function S.barXml()
+        local owned, shown = S.owned(), S.state(nil)
+        local title = S.rollTitle()
+        local states = { string.format('<Panel id="skillState_roll" active="%s" rectAlignment="MiddleCenter" width="%g"' ..
+            ' height="%.1f" color="%s" raycastTarget="false">', tostring(shown == "roll"), LAY.colW, LAY.skillBand, COL.clear) ..
+            textXml{ id = "rollTitle", x = 0, y = 0, w = title.w, h = LAY.skillBand, text = title.text, color = COL.accent,
+                     size = title.size, extra = ' raycastTarget="false"' } .. '</Panel>' }
+        for state = 1, #S.KINDS do
+            local items = {}
+            for _, it in ipairs(state == 1 and S.listed() or owned) do
+                if it.state == state then items[#items + 1] = it end
+            end
+            states[#states + 1] = stateXml(state, items, "skillTxt_", S.ink, true, state == shown)
+        end
+        S.fxStates = {}
+        local stats, seen = {}, {}
+        for _, list in ipairs({ CFG.statOrder, CFG.statOrderHover }) do
+            for _, k in ipairs(list) do if not seen[k] then seen[k], stats[#stats + 1] = true, k end end
+        end
+        for _, stat in ipairs(stats) do
+            for _, gearOnly in ipairs({ false, true }) do
+                local key = S.fxKey(stat, gearOnly)
+                if key and not S.fxStates[key] then
+                    local items = {}
+                    for i, it in ipairs(S.fxItems(stat, gearOnly, owned)) do
+                        local copy = {}
+                        for k2, v2 in pairs(it) do copy[k2] = v2 end
+                        items[i] = copy
+                    end
+                    S.fxStates[key], S.fxStates[#S.fxStates + 1] = stat, key
+                    states[#states + 1] = stateXml(key, items, "skillFx_" .. key .. "_", function(it)
+                        return S.fxInk(it, stat)
+                    end, false, false)
+                end
+            end
+        end
+        return string.format(
+            '<Panel id="skillBar" rectAlignment="MiddleCenter" offsetXY="0 %.1f" width="%g" height="%.1f" color="%s"' ..
+            ' onMouseEnter="onBarEnter" onMouseExit="onBarExit">' ..
+            '<Button id="skillBarHit" rectAlignment="MiddleCenter" width="%g" height="%.1f" colors="%s|%s|%s|%s"' ..
+            ' onMouseEnter="onBarEnter" onClick="onBarClick" />%s</Panel>',
+            LAY.skillY, LAY.colW, LAY.skillBand, COL.clear, LAY.colW, LAY.skillBand,
+            COL.clear, COL.clear, COL.clear, COL.clear, table.concat(states))
+    end
+
+    -- `text` in lines no wider than `w` at `size`, broken between words (a
+    -- word too long for a line gets one to itself); a line break in the
+    -- text starts a new line.
+    function S.wrap(text, w, size)
+        local lines = {}
+        for para in (tostring(text) .. "\n"):gmatch("([^\n]*)\n") do
+            local line = nil
+            for word in para:gmatch("%S+") do
+                local next = line and (line .. " " .. word) or word
+                if line and textWidth(next, size, true) > w * FIT then
+                    lines[#lines + 1], line = line, word
+                else
+                    line = next
+                end
+            end
+            if line then lines[#lines + 1] = line end
+        end
+        return lines
+    end
+
+    -- The panel hovering name i shows (skillInfo_<i>, hidden until then): the
+    -- one over the stats that Out of Action and the Recovery Test use
+    -- (ACTIVATION.geometry's size, opaque, no border), with the full name in
+    -- the middle -- or, when SKILLS / WARGEAR has a description, the name
+    -- over it, the two centred together. The description is wrapped here, one
+    -- text per line (TTS's own wrapping can't be measured), at skillInfoFont,
+    -- smaller while it wouldn't fit, all of it between the diamonds' inner
+    -- tips. Built after the stats' own panels, before the diamonds, which
+    -- draw over its corners; it never catches the cursor. `id` is the panel's
+    -- id; `it` has the name and desc.
+    function S.infoXml(id, it)
+        local W, H = ACTIVATION.geometry(0)
+        local pad, df = LAY.skillInfoPad, LAY.skillInfoFont
+        -- the text keeps between A / C's and W2 / W3's inner tips: the
+        -- diamonds draw over the panel's sides
+        local tw = 2 * (LAY.sideX - halfDiag(LAY.sideD)) - 2 * pad
+        local titleH = LAY.midTitleFont * 1.25
+        local desc = trimText(it.desc)
+        local lines = {}
+        if desc ~= "" then
+            repeat
+                lines = S.wrap(desc, tw, df)
+                if #lines * df * 1.25 <= H - 2 * pad - titleH or df <= 8 then break end
+                df = df - 1
+            until false
+        end
+        local lineH = df * 1.25
+        local top = (titleH + #lines * lineH) / 2
+        local parts = { textXml{ w = tw, h = titleH, x = 0, y = top - titleH / 2, text = it.name, color = COL.accent,
+            size = fitSize(it.name, tw, titleH, LAY.midTitleFont, true), extra = ' raycastTarget="false"' } }
+        for k, l in ipairs(lines) do
+            parts[#parts + 1] = textXml{ w = tw, h = lineH, x = 0, y = top - titleH - (k - 0.5) * lineH, text = l,
+                color = COL.popupText, size = fitSize(l, tw, lineH, df, true), extra = ' raycastTarget="false"' }
+        end
+        return string.format(
+            '<Panel id="%s" active="false" rectAlignment="MiddleCenter" width="%g" height="%g"' ..
+            ' color="%s" raycastTarget="false">%s</Panel>',
+            id, W, H, COL.statPlate:sub(1, 7) .. "ff", table.concat(parts))
+    end
+
+    -- Every such panel, all in the same place: one per skill / wargear
+    -- name (skillInfo_<i>), one per condition (condInfo_<i>: hovering its
+    -- icon in the bar under the stats shows it, with or without a
+    -- description; its arrow in C's panel only with one) and one per
+    -- action that has a description (actInfo_<i>, i its place in ACTIONS:
+    -- hovering its arrow in A's panel). S.infoIds lists them all, for
+    -- S.drawInfo.
+    function S.infosXml()
+        local out, ids = {}, {}
+        local function add(id, it) out[#out + 1], ids[#ids + 1] = S.infoXml(id, it), id end
+        for i, it in ipairs((S.split())) do add("skillInfo_" .. i, it) end
+        for i, c in ipairs(CONDITIONS) do add("condInfo_" .. i, { name = c.label, desc = c.desc }) end
+        for i, a in ipairs(ACTIONS) do
+            if trimText(a.desc) ~= "" then add("actInfo_" .. i, { name = a.label, desc = a.desc }) end
+        end
+        S.infoIds = ids
+        return table.concat(out)
+    end
+end
+
+-- A flyout is two elements, both hidden until shown. Its content panel
+-- (`x`, `y` its centre) is see-through, draws over the card and keeps the
+-- flyout open while the cursor is on it. Its background, "<id>Bg", is drawn
+-- early -- behind the diamonds -- and reaches in from the content's outer
+-- edge to the middle of A / C (left) or W2 / W3 (right). flyoutPanel
+-- returns the content and files the background in flyoutBgs, which
+-- buildXml emits before the diamonds.
+local flyoutBgs = {}
+local registerWeaponFlyouts   -- set in section 9, once the flyout tables exist
+local function flyoutPanel(id, x, w, h, inner, y)
+    y = y or 0
+    local inward = x > 0 and LAY.sideX or -LAY.sideX
+    local left   = math.min(x - w / 2, inward)
+    local right  = math.max(x + w / 2, inward)
+    flyoutBgs[#flyoutBgs + 1] = string.format(
+        '<Image id="%sBg" active="false" rectAlignment="MiddleCenter" offsetXY="%s"' ..
+        ' width="%.1f" height="%.1f" color="%s" raycastTarget="false" />',
+        id, xyAttr((left + right) / 2, y), right - left, h, COL.popupBg)
+    return string.format(
+        '<Panel id="%s" active="false" rectAlignment="MiddleCenter" offsetXY="%.1f %.1f"' ..
+        ' width="%.1f" height="%.1f" color="%s" onMouseEnter="onFlyoutEnter"' ..
+        ' onMouseExit="onFlyoutExit">%s</Panel>',
+        id, x, y, w, h, COL.clear, inner)
+end
+
+-- Where the status picker puts each status: the three that aren't current,
+-- as three more diamonds the size of S. With S as the right-hand tip of a
+-- 2x2 grid turned 45 degrees, the four read as one big diamond: above-left
+-- of S, out on the far left, below-left. The current status has no spot.
+local function statusSpots()
+    local hd    = halfDiag(LAY.statusD)
+    local cx    = -LAY.statusX - hd                        -- the big diamond's centre
+    local spots = { { cx, hd }, { cx - hd, 0 }, { cx, -hd } }
+    local at, k = {}, 0
+    for _, s in ipairs(STATUSES) do
+        if s.key ~= fighter.status then
+            k = k + 1
+            at[s.key] = spots[k]
+        end
+    end
+    return at
+end
+
+-- S's icons: one per status, all in S, only the current one shown -- so a
+-- new status is a swap in place (see drawStatus). Placed in S's own
+-- container (statusBox) at S's resting size; the container grows it.
+local function statusIconsXml()
+    local parts = {}
+    for _, s in ipairs(STATUSES) do
+        parts[#parts + 1] = iconXml{ id = "statusIcon_" .. s.key, x = 0, y = 0,
+            d = LAY.sideD * LAY.iconPad, icon = "status_" .. s.key, label = s.short,
+            labelSize = LAY.diamondLabel(s.short, LAY.sideD), labelD = LAY.sideD,
+            active = s.key == fighter.status }
+    end
+    return table.concat(parts)
+end
+
+-- S's flyout: every status as a diamond in a click-through container, the
+-- current one hidden and the others on their statusSpots. The containers
+-- move rather than the diamonds, so a new status is a few attributes. The
+-- flyout itself lets clicks through, so it never covers S; each option
+-- keeps the flyout open while the cursor is on it. Each option is filled
+-- in its status's own colour (the diamond gradient tinted, see
+-- ui.statusFill) with its label in dark ink, so the one wanted is found
+-- by its colour at a glance.
+local function statusPickerXml()
+    local at, parts = statusSpots(), {}
+    for _, s in ipairs(STATUSES) do
+        local p = at[s.key]
+        parts[#parts + 1] = string.format(
+            '<Panel id="statusOptBox_%s" active="%s" rectAlignment="MiddleCenter" offsetXY="%s"' ..
+            ' width="%d" height="%d" color="%s" raycastTarget="false">',
+            s.key, tostring(p ~= nil), xyAttr(p and p[1] or 0, p and p[2] or 0),
+            LAY.statusD, LAY.statusD, COL.clear)
+        parts[#parts + 1] = diamond{
+            id = "statusOpt_" .. s.key, size = LAY.statusD, x = 0, y = 0,
+            icon = "status_" .. s.key, label = s.short, frame = "diamond_frame",
+            labelSize = LAY.diamondLabel(s.short, LAY.statusD), labelD = LAY.statusD,
+            bgColor = ui.statusFill(s), labelColor = COL.statusInk,
+            onClick = "onPickStatus", onEnter = "onFlyoutEnter", onExit = "onFlyoutExit",
+        }
+        parts[#parts + 1] = "</Panel>"
+    end
+    return string.format(
+        '<Panel id="statusPick" active="false" rectAlignment="MiddleCenter" width="%d"' ..
+        ' height="%d" color="%s" raycastTarget="false">%s</Panel>',
+        LAY.cardW, LAY.cardH, COL.clear, table.concat(parts))
+end
+
+-- An entry in A's or C's panel, off or on: its fill and text colour.
+local function toggleLook(on)
+    if on then return COL.toggleOn, COL.toggleTextOn end
+    return COL.toggleOff, COL.toggleTextOff
+end
+
+-- What action `a` costs this fighter: its own cost, unless a skill or
+-- wargear it has -- one that works right now, see SKILL.with -- says
+-- otherwise (`costs`: Inspiring makes Group Activation F). Its diamond in
+-- A's panel shows this, and it is what it spends.
+function SKILL.costOf(a)
+    for _, d in ipairs(SKILL.with("costs")) do
+        if a.key and d.costs[a.key] then return d.costs[a.key] end
+    end
+    return a.cost
+end
+-- How many actions action `a` spends: its cost's first letter -- D two,
+-- F none, anything else (S, B) one -- so "S/C" spends as S.
+function SKILL.cost(a)
+    local c = tostring(SKILL.costOf(a) or ""):sub(1, 1)
+    return c == "D" and 2 or c == "F" and 0 or 1
+end
+-- What an entry shows: whether it is on, its label and -- for an action --
+-- its fill and whether it is dimmed. Actions are never "on" (they are
+-- picked, not switched); their colour says their type. While the fighter
+-- is activated, the actions it has taken and those it can't pay for any
+-- more (a double one with one action left, every one but the free ones
+-- with none) are dimmed -- still clickable, as special skills can allow
+-- it -- until the activation is complete (and every Wyrd action once
+-- Maintain Control (F) has been used: nothing more can be cast this turn,
+-- see fighter.wyrd.locked). Outside an activation nothing
+-- is dimmed, and the Special tab's dice and Recovery Test never are.
+-- One that can be taken once a game (`once`: the Stimm-Slug) is dimmed
+-- from the moment it is, activated or not, for the rest of the game
+-- (fighter.usedOnce).
+local function actionDimmed(a)
+    if a.once and (fighter.usedOnce or {})[a.key] then return true end
+    -- Maintain Control (F) used: nothing more can be cast this turn
+    if a.type == "wyrd" and fighter.activation == "active" and (fighter.wyrd or {}).locked then return true end
+    if a.roll or a.always or fighter.activation ~= "active" then return false end
+    return fighter.usedActions[a.key] == true or SKILL.cost(a) > fighter.actionsLeft
+end
+local function actionState(a) return false, a.label, ACTION_TYPES[a.type or ""], actionDimmed(a) end
+local function conditionState(c) return conditionCount(c.key) > 0, conditionLabel(c) end
+
+-- A colour `k` of the way toward another ("#RRGGBB[AA]", alpha from `a`).
+local function mixColor(a, b, k)
+    local function ch(hex, i) return tonumber(hex:sub(i, i + 1), 16) end
+    local out = "#"
+    for i = 2, 6, 2 do out = out .. string.format("%02X", math.floor(ch(a, i) + (ch(b, i) - ch(a, i)) * k + 0.5)) end
+    return out .. (#a >= 9 and a:sub(8, 9) or "ff")
+end
+
+-- The colour a lit diamond fill (S / A / C ready, a blocked weapon) is
+-- drawn in for tint `col`: the tint itself over the diamond gradient,
+-- or -- until that art is set -- a flat, darker shade of it (the art's
+-- middle is about `col`, its tips far darker).
+function ACTIVATION.litColor(col)
+    return hasAsset("diamond") and col or mixColor(col, "#000000ff", 0.45)
+end
+
+-- A dark colour `col` to tint the diamond gradient with, so the gradient
+-- shows: brightened CFG.diamondDepth times (each channel, up to white)
+-- while the art is set, as it is otherwise (flat). The diamonds' plain
+-- fill and the dice's faces.
+function ui.gradTint(col)
+    if not hasAsset("diamond") then return col end
+    local k, out = tonumber(CFG.diamondDepth) or 1, "#"
+    for i = 2, 6, 2 do
+        out = out .. string.format("%02X", math.min(255, math.floor(tonumber(col:sub(i, i + 1), 16) * k + 0.5)))
+    end
+    return out .. (#col >= 9 and col:sub(8, 9) or "ff")
+end
+
+-- A's / C's lit fill ("an action still to use"): the fighter's status
+-- colour, as the glow round the card -- `spent`: darkened CFG.spendShade
+-- toward black (a hovered attack or action would spend it). As a lit fill
+-- (see ACTIVATION.litColor).
+function ui.actionLit(spent)
+    local c = statusDef(fighter.status).color:sub(1, 7) .. "ff"
+    if spent then c = mixColor(c, "#000000ff", clamp(tonumber(CFG.spendShade) or 0.55, 0, 1)) end
+    return ACTIVATION.litColor(c)
+end
+-- Whether A's / C's lit fill (readyGlow_<n>) shows: while that action is
+-- still to use -- and A's also for the whole of an activation begun
+-- Suppressed (fighter.lostAction: its first action was lost to it), then
+-- in Suppressed's colour darkened as a spent one's (CFG.spendShade), the
+-- second value (before ACTIVATION.litColor); nil for the usual colour.
+function ACTIVATION.readyLook(n)
+    if n == 1 and fighter.lostAction and fighter.activation == "active" and fighter.actionsLeft < 2 then
+        local c = statusDef("suppressed").color:sub(1, 7) .. "ff"
+        return true, mixColor(c, "#000000ff", clamp(tonumber(CFG.spendShade) or 0.55, 0, 1))
+    end
+    return fighter.actionsLeft >= 3 - n, nil
+end
+
+-- A status option's fill in S's picker: its STATUSES colour -- the
+-- gradient tinted with it, or flat until the art is set -- bright enough
+-- under its dark label (COL.statusInk) either way.
+function ui.statusFill(s) return s.color:sub(1, 7) .. "ff" end
+
+-- How entry `e` of panel P looks (to viewer `key`, or as built): its fill,
+-- its name's colour and -- for an action -- its S / D's colour. Shared by
+-- panelXml and drawToggle.
+local function entryLook(P, e, key)
+    local on, label, tint, dim = P.state(e, key)
+    local fill, ink = toggleLook(on)
+    fill = tint or fill
+    local costInk = COL.actCost
+    if dim then
+        fill, ink, costInk = mixColor(fill, COL.popupBg, 0.6), COL.actDimInk, COL.actDimInk
+    end
+    return { label = label, fill = fill, ink = ink, costInk = costInk }
+end
+
+-- A's and C's panels share one shape; PANELS describes each, keyed by the
+-- prefix of its element ids. A has one panel per status ("act_<status>",
+-- flyout "actionsPanel_<status>") and shows the current status's; C has one
+-- ("cond", flyout "conditionsPanel"). Each entry has a spot: its column `c`
+-- (1 next to A / C, 2 beyond it, ...), its row `r` (0 at the top) and how
+-- many share its column (`n`); `w` is its strip's width.
+-- (worked out afresh whenever the rules change)
+local PANELS = {}
+local function actionPanelOf(status) return "act_" .. status end
+RULES.follow(function()
+    for _, s in ipairs(STATUSES) do
+        local cols, list, spots = STATUS_ACTIONS[s.key] or {}, {}, {}
+        for c, side in ipairs({ "right", "left" }) do
+            local keys = {}
+            for _, key in ipairs(cols[side] or {}) do
+                if indexOf(ACTIONS, key) then keys[#keys + 1] = key end
+            end
+            for r, key in ipairs(keys) do
+                list[#list + 1] = ACTIONS[indexOf(ACTIONS, key)]
+                spots[#list] = { c = c, r = r - 1, n = #keys }
+            end
+        end
+        PANELS[actionPanelOf(s.key)] = { id = "actionsPanel_" .. s.key, list = list, spots = spots,
+            w = LAY.popS.actionW, state = actionState, onClick = "onChooseAction", status = s.key }
+    end
+    -- the conditions: columns of pop.condRows, in order
+    local rows, spots = math.max(1, LAY.popS.condRows or LAY.popS.panelRows), {}
+    for i = 1, #CONDITIONS do
+        local c = math.floor((i - 1) / rows) + 1
+        spots[i] = { c = c, r = (i - 1) % rows, n = math.min(rows, #CONDITIONS - (c - 1) * rows) }
+    end
+    PANELS.cond = { id = "conditionsPanel", list = CONDITIONS, spots = spots,
+        w = LAY.popS.entryW, icon = "cond_", state = conditionState,
+        onClick = "onToggleCondition" }
+end)
+
+-- Where everything in one of those panels goes. Each entry is an "arrow": a
+-- strip with a diamond on one end, holding the entry's icon. Every arrow in
+-- every panel is the same size: pop.panelRows of them span A's top tip to C's
+-- bottom tip. Each column is centred on the A / C junction, so a short one
+-- sits between A and C and a long one reaches past them -- the panel is as
+-- tall as its longest column. The first column hangs off A / C: its diamonds
+-- sit on the strips' right ends, their tips against A's and C's edges.
+-- Further columns go on to the left, their diamonds on the left ends. Only
+-- the strip is clickable, not the diamond (hitL..hitR). Card units, from the
+-- card's centre; also returns the panel's extent (left, right, half its
+-- height).
+local function panelLayout(prefix)
+    local P, S = PANELS[prefix], LAY.popS
+    local hd   = halfDiag(LAY.sideD)
+    local rowH = 4 * hd / math.max(1, S.panelRows)
+    local gap  = S.entryGap
+    local dd   = rowH - gap                      -- a diamond, tip to tip
+    local x0   = -(LAY.sideX + hd) - S.gap       -- A / C's outer tips
+    local function rowY(sp) return ((sp.n - 1) / 2 - sp.r) * rowH end
+    -- A diamond level with A's (or C's) left tip would poke into it (a
+    -- column of odd length has them there): the first column moves out until
+    -- no diamond comes nearer A / C than entryGap / 2. Rows above A's top tip
+    -- or below C's bottom tip have nothing to meet.
+    local over = 0
+    for _, sp in pairs(P.spots) do
+        local y = rowY(sp)
+        local d = math.abs(math.abs(y) - hd)     -- from A's / C's left tip, up or down
+        if sp.c == 1 and d < hd then
+            local edge = -(LAY.sideX + hd - d)
+            over = math.max(over, x0 + dd / 2 + gap / 2 - edge)
+        end
+    end
+    x0 = x0 - over
+    local cols, most = 1, 0
+    for _, sp in pairs(P.spots) do cols, most = math.max(cols, sp.c), math.max(most, sp.n) end
+    local colR = { x0 }                          -- where each column's strips end
+    for c = 2, cols do colR[c] = colR[c - 1] - P.w - (c == 2 and 0 or dd / 2) - gap end
+    local cells, left, right = {}, x0, x0 + dd / 2
+    for i = 1, #P.list do
+        local sp = P.spots[i]
+        local c  = sp.c
+        local xr = colR[c]
+        local xl = xr - P.w
+        local cell = { x = (xl + xr) / 2, y = rowY(sp), w = P.w, h = dd, dd = dd }
+        if c == 1 then                           -- diamond on the right end
+            cell.dx = xr
+            cell.textL, cell.textR = xl + S.boxPad, xr - dd / 2
+            cell.hitL, cell.hitR = xl, xr - dd / 2
+        else                                     -- diamond on the left end
+            cell.dx = xl
+            cell.textL, cell.textR = xl + dd / 2, xr - S.boxPad
+            cell.hitL, cell.hitR = xl + dd / 2, xr
+        end
+        cell.textX, cell.textW = (cell.textL + cell.textR) / 2, cell.textR - cell.textL
+        left = math.min(left, c == 1 and xl or xl - dd / 2)
+        cells[i] = cell
+    end
+    return cells, left - S.pad, right, most * rowH / 2 + S.pad
+end
+
+-- The Special tab: A's second panel ("act_sp", flyout "actionsPanel_sp"), the
+-- same whatever the status -- except Seriously Injured, which has only Crawl,
+-- Desperate Escape and Tend Wounds (its Generic tab): then the tab is
+-- "act_spsi" ("actionsPanel_spsi"), just the dice. Whenever else the
+-- fighter's skills are disabled (SKILL.off) it is the dice and the actions
+-- that still work -- its wargear's and its Wyrd powers' and Wyrd actions
+-- ("act_spw", see SKILL.special). Its first column, next to A, holds the dice
+-- (SKILL.ROLLS) every fighter has: they spend no action, are never dimmed,
+-- and only roll (onChooseAction). Further out go a Wyrd fighter's own actions
+-- (ACTIONS marked `wyrd`: Maintain Control, Concentrate), then the fighter's
+-- skills and wargear that are actions (Medicate, the Wyrd powers), all
+-- stacked in one column of up to pop.specialRows (more start another column,
+-- further out). Rebuilt with the card (SKILL.panels, from buildXml): every
+-- panel, so a status change only swaps them (see SKILL.special). Agility
+-- Test, under those, rolls its one D6 at once (see agilityTest). Falling Down
+-- doesn't: it opens its panel over the stats, for the height (see
+-- fallingDown). Nor does Nerve Check (see nerveCheck), and Recovery Test
+-- under it opens the Recovery Test's (see recoveryTest) -- by hand, whenever
+-- it is needed. Out of Action, under those, rolls nothing: it takes the
+-- fighter Out of Action by hand (its friends around take their Nerve Checks,
+-- see setOutOfAction); its diamond shows ASSETS dice_out once set (`icon`),
+-- "†" until then. Roll Dice, Roll Firepower and Roll Injuries throw a D6, a
+-- Firepower or an Injury dice -- clicked again within CFG.diceJoin seconds,
+-- one more to the same roll (see ACTIVATION.stack), like the Mundane
+-- Controller's buttons.
+SKILL.ROLLS = {
+    { key = "roll_dice",      label = "Roll Dice",      cost = "D6",  roll = "d6" },
+    { key = "roll_firepower", label = "Roll Firepower", cost = "FP",  roll = "firepower" },
+    { key = "roll_injuries",  label = "Roll Injuries",  cost = "INJ", roll = "injury" },
+    { key = "agility_test",   label = "Agility Test",   cost = "AT",  roll = "agility" },
+    { key = "falling_down",   label = "Falling Down",   cost = "FD",  roll = "fall" },
+    { key = "nerve_check",    label = "Nerve Check",    cost = "NC",  roll = "nerve" },
+    { key = "recovery_roll",  label = "Recovery Test",  cost = "RT",  roll = "recovery" },
+    { key = "out_of_action",  label = "Out of Action",  cost = "†",   roll = "out", icon = "dice_out" },
+}
+-- The Special panel for `status` -- or, with none, the fighter's as it
+-- stands: the dice alone while it is Seriously Injured; while its skills
+-- are disabled otherwise (SKILL.off: 0 wounds) the dice and what still
+-- works -- wargear never stops working, nor do the Wyrd powers at 0 wounds
+-- -- "act_spw", which a fighter has only when it has such actions
+-- ("act_spsi" does for the others).
+function SKILL.special(status)
+    if (status or fighter.status) == "seriously_injured" then return "act_spsi" end
+    if status == nil and SKILL.off() then return SKILL.gearActs() and "act_spw" or "act_spsi" end
+    return "act_sp"
+end
+SKILL.SPECIALS = { act_sp = "actionsPanel_sp", act_spw = "actionsPanel_spw", act_spsi = "actionsPanel_spsi" }
+SKILL.SPECIAL_ORDER = { "act_sp", "act_spw", "act_spsi" }
+-- Whether action `a` (S.split, or one of ACTIONS) is one that works while
+-- the skills are disabled: a piece of wargear's, or a Wyrd action.
+function SKILL.stillWorks(a) return a.kind == "wargear" or a.type == "wyrd" end
+-- Whether the Special panel of a fighter with its skills disabled has any
+-- action: one of its wargear, or a Wyrd's power or own action.
+function SKILL.gearActs()
+    local _, acts = SKILL.split()
+    for _, a in ipairs(acts) do if SKILL.stillWorks(a) then return true end end
+    return SKILL.wyrdActs()
+end
+-- Whether the fighter has the Wyrd's own actions (ACTIONS marked `wyrd`:
+-- Maintain Control, Concentrate) on its Special tab: a Wyrd (its
+-- category), or anyone with a Wyrd power -- in every status that has the
+-- Special tab's actions (Active, Suppressed, Engaged; see SKILL.special).
+function SKILL.wyrdActs() return fighter.category == "wyrd" or SKILL.hasWyrd() end
+-- The entries of Special panel `prefix` (default: the fighter's as it
+-- stands, SKILL.special): the dice, and after them the actions -- all of
+-- them on "act_sp", those that still work with the skills disabled on
+-- "act_spw" (SKILL.stillWorks), none on "act_spsi".
+function SKILL.specialList(prefix)
+    prefix = prefix or SKILL.special()
+    local _, acts = SKILL.split()
+    local list, spots, rows = {}, {}, math.max(1, LAY.popS.specialRows or 6)
+    for k, r in ipairs(SKILL.ROLLS) do list[k], spots[k] = r, { c = 1, r = k - 1, n = #SKILL.ROLLS } end
+    -- after the dice, one stack: a Wyrd fighter's own actions (ACTIONS
+    -- marked `wyrd`) first, then the skills' / wargear's
+    local group = {}
+    if prefix == "act_spsi" then return list, spots end
+    if SKILL.wyrdActs() then
+        for _, a in ipairs(ACTIONS) do if a.wyrd then group[#group + 1] = a end end
+    end
+    for _, a in ipairs(acts) do
+        if prefix == "act_sp" or SKILL.stillWorks(a) then group[#group + 1] = a end
+    end
+    for i, a in ipairs(group) do
+        local c = math.floor((i - 1) / rows)
+        list[#list + 1] = a
+        spots[#list] = { c = 2 + c, r = (i - 1) % rows, n = math.min(rows, #group - c * rows) }
+    end
+    return list, spots
+end
+function SKILL.panels()
+    for prefix, id in pairs(SKILL.SPECIALS) do
+        if prefix == "act_spw" and not SKILL.gearActs() then
+            PANELS[prefix] = nil                      -- no wargear with an action: no such panel
+        else
+            local list, spots = SKILL.specialList(prefix)
+            PANELS[prefix] = { id = id, list = list, spots = spots, w = LAY.popS.actionW,
+                state = actionState, onClick = "onChooseAction", special = true }
+        end
+    end
+end
+
+-- The panel over the stats that hovering entry `i` of flyout panel
+-- `prefix` (PANELS) shows (see SKILL.infosXml) -- only one with a
+-- description: a condition's, an action's, or on the Special tab a
+-- skill's / wargear's -- else nil (the stats stay).
+function SKILL.entryInfo(prefix, i)
+    local P = PANELS[prefix]
+    local e = P and P.list[i]
+    if not e then return nil end
+    if prefix == "cond" then return trimText(e.desc) ~= "" and "condInfo_" .. i or nil end
+    local n = indexOf(ACTIONS, e.key)
+    if n and ACTIONS[n] == e then return trimText(e.desc) ~= "" and "actInfo_" .. n or nil end
+    if P.special and not e.roll then
+        for k, it in ipairs((SKILL.split())) do
+            if it.action and it.key == e.key then return trimText(it.desc) ~= "" and "skillInfo_" .. k or nil end
+        end
+    end
+    return nil
+end
+
+-- Whether hovering entry `i` of actions panel `prefix` swaps the stats to
+-- the hover view (CFG.statOrderHover: Ld, Wil, Int, Cl) meanwhile: a Wyrd
+-- or Utility action -- those tested against the mind (see onInfoEnter) --
+-- and the Nerve Check (a Cl test).
+function SKILL.mindStats(prefix, i)
+    local P = prefix ~= "cond" and PANELS[prefix] or nil
+    local e = P and P.list[i]
+    return e ~= nil and (e.type == "wyrd" or e.type == "utility" or e.roll == "nerve")
+end
+
+-- One of the Special tab's actions (not the dice), by key (see useAction).
+function SKILL.action(key)
+    for _, a in ipairs((SKILL.specialList())) do
+        if a.key == key and not a.roll then return a end
+    end
+end
+
+-- The tabs over actions panel `prefix` -- nil unless there is a Special
+-- panel: which is this one (1 Generic, 2 Special), the height their
+-- bottom sits at, and each tab's strip (xl .. xr) and the side its point
+-- is on. Each sits over a column of this panel, from the plain end of its
+-- strips to the middle of its S / D diamonds, where its point ends:
+-- Generic over the first, next to A (its point toward A), Special over the
+-- second (its point out to the left). They stand on the panel's own top,
+-- so each panel is only as tall as its actions: switching tabs changes the
+-- height.
+function SKILL.tabs(prefix)
+    local P = PANELS[prefix]
+    if not (P and (P.status or P.special) and PANELS[SKILL.special()]) then return nil end
+    local cells, _, _, half = panelLayout(prefix)
+    local r1 = -(LAY.sideX + halfDiag(LAY.sideD))
+    for i, sp in ipairs(P.spots) do if sp.c == 1 then r1 = cells[i].dx break end end
+    local w, gap, th = P.w, LAY.popS.entryGap, LAY.popS.tabH
+    local l2 = r1 - 2 * w - gap                  -- the second column's diamonds
+    return { active = P.special and 2 or 1, base = half,
+             { xl = r1 - w, xr = r1 - th, side = 1 },
+             { xl = l2 + th, xr = l2 + w, side = -1 } }
+end
+
+-- A's or C's flyout: every entry an arrow (see panelLayout) -- a condition
+-- dark while off, gold while on, an action in its type's colour -- its name
+-- in the strip and its icon (an action: its cost) in the diamond. Strip and
+-- diamond each have a gold edge like the weapon popups' boxes: the shape in
+-- the edge colour, its fill pop.border inside it. Switching only recolours and
+-- relabels the fill in place (see drawToggle), so the panel stays open.
+--   The panel covers S: its background (behind the diamonds) can't, as S
+-- would draw over it, so a cover over the card -- everything left of A's
+-- and C's outer tips, plus the notch between them where S's right tip
+-- shows (a turned square the size of A centred between the tips) -- goes
+-- first in the content, under the arrows. A and C stay uncovered.
+--   With a Special panel (see SKILL.tabs) two tabs sit on top, over the
+-- columns: Generic and Special, the panel's own lit (a click on the other
+-- swaps the panels, onActionTab). Each is a strip with the upper half of
+-- an arrow's point on its outer end -- a turned square whose lower half a
+-- patch of the cover hides -- drawn before the arrows, which draw over
+-- that patch. The content -- and the background -- reach up and out over
+-- them.
+local function panelXml(prefix)
+    local P, S = PANELS[prefix], LAY.popS
+    local cells, left, right, half = panelLayout(prefix)
+    local tabs = SKILL.tabs(prefix)
+    local top  = tabs and tabs.base + S.tabH + S.pad or half
+    if tabs then
+        left  = math.min(left, tabs[2].xl - S.tabH - S.pad)
+        right = math.max(right, tabs[1].xr + S.tabH)
+    end
+    local cx, cy = (left + right) / 2, (top - half) / 2   -- the content panel's centre
+    local b  = S.border
+    local parts = {}
+    local function img(id, x, y, w, h, color, rot, image)
+        parts[#parts + 1] = string.format(
+            '<Image%s rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"%s' ..
+            ' color="%s"%s raycastTarget="false" />', id and string.format(' id="%s"', id) or "",
+            xyAttr(x - cx, y - cy), w, h, rot and ' rotation="0 0 45"' or "", color, imgAttr(image))
+    end
+    local tipX = -(LAY.sideX + halfDiag(LAY.sideD))   -- A's and C's outer tips
+    -- opaque: the two pieces overlap, and a see-through colour would show
+    -- the overlap as a darker seam
+    local cover = COL.popupBg:sub(1, 7) .. "ff"
+    img(nil, (left + tipX) / 2, cy, tipX - left, top + half, cover)
+    -- the notch square: no taller than the panel, and moved right as it
+    -- shrinks, so its right edges still run along A's and C's
+    local hdN = math.min(halfDiag(LAY.sideD), half)
+    img(nil, tipX + halfDiag(LAY.sideD) - hdN, 0, hdN * math.sqrt(2), hdN * math.sqrt(2), cover, true)
+    if tabs then
+        local th, bot = S.tabH, tabs.base
+        for t, name in ipairs({ "Generic", "Special" }) do
+            local T, on = tabs[t], t == tabs.active
+            local fill = on and COL.toggleOn or COL.toggleOff
+            local w, tip = T.xr - T.xl, T.side > 0 and T.xr or T.xl   -- the point's base
+            local out, far = T.side, T.side > 0 and T.xl or T.xr      -- ... and the plain end
+            img(prefix .. "Tab_" .. t, (T.xl + T.xr) / 2, bot + th / 2, w, th, fill)
+            img(prefix .. "TabTip_" .. t, tip, bot, th * math.sqrt(2), th * math.sqrt(2), fill, true)
+            img(nil, tip, bot - th / 2, 2 * th, th, cover)            -- hides the square's lower half
+            -- the edges: top, plain end, bottom (under the point too), the slant
+            local k = b / 2 / math.sqrt(2)
+            parts[#parts + 1] = edgeLineXml((T.xl + T.xr) / 2 - cx, bot + th - b / 2 - cy, w, b, 0, COL.profileEdge)
+                .. edgeLineXml(far - out * b / 2 - cx, bot + th / 2 - cy, th, b, 90, COL.profileEdge)
+                .. edgeLineXml((T.xl + T.xr) / 2 + out * th / 2 - cx, bot + b / 2 - cy, w + th, b, 0, COL.profileEdge)
+                .. edgeLineXml(tip + out * (th / 2 - k) - cx, bot + th / 2 - k - cy, th * math.sqrt(2), b,
+                    -45 * out, COL.profileEdge)
+            parts[#parts + 1] = textXml{ id = prefix .. "TabTxt_" .. t, x = (T.xl + T.xr) / 2 - cx,
+                y = bot + th / 2 - cy, w = w - 2 * S.boxPad, h = th, text = name,
+                color = on and COL.toggleTextOn or COL.actDimInk,
+                size = fitSize(name, w - 2 * S.boxPad, th, S.tabFont, true) }
+            parts[#parts + 1] = string.format(
+                '<Button id="%sTabBtn_%d" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+                ' height="%.1f" colors="%s|%s|%s|%s" onClick="onActionTab" />', prefix, t,
+                xyAttr((T.xl + T.xr) / 2 - cx, bot + th / 2 - cy), w, th, COL.clear,
+                on and COL.clear or COL.hover, on and COL.clear or COL.press, COL.clear)
+        end
+    end
+    for i, e in ipairs(P.list) do
+        local c = cells[i]
+        local look = entryLook(P, e)
+        local label, fill, ink = look.label, look.fill, look.ink
+        local side = c.dd / math.sqrt(2)
+        -- the strip: its edge, then its fill pulled in from the far end, the
+        -- top and the bottom; then the diamond on top, a button of its own
+        -- with a full edge -- edge, then fill inset by the same width
+        -- (with the edge_line art: the fills, and edge lines round them --
+        -- see edgeLineXml)
+        local farX = c.dx > c.x and b / 2 or -b / 2   -- the strip's far end moves in
+        local lines = hasAsset("edge_line")
+        if not lines then img(nil, c.x, c.y, c.w, c.h, COL.profileEdge) end
+        -- (the fill over the health bar's gradient, hp_segment, once set: some depth)
+        img(prefix .. "Bg_" .. i, c.x + farX, c.y, c.w - b, c.h - 2 * b, fill, nil, "hp_segment")
+        if lines then
+            parts[#parts + 1] = edgeFrameXml(c.x - cx, c.y - cy, c.w, c.h, b, COL.profileEdge, 0,
+                c.dx > c.x and "right" or "left")
+        else
+            img(nil, c.dx, c.y, side, side, COL.profileEdge, true)
+        end
+        img(prefix .. "Dia_" .. i, c.dx, c.y, side - 2 * b, side - 2 * b, fill, true)
+        if lines then parts[#parts + 1] = edgeFrameXml(c.dx - cx, c.y - cy, side, side, b, COL.profileEdge, 45) end
+        if P.icon then          -- a condition: its icon
+            parts[#parts + 1] = iconXml{ id = prefix .. "Icon_" .. i, x = c.dx - cx, y = c.y - cy,
+                d = c.dd / 2 * (S.condIconPad or S.iconPad), icon = P.icon .. e.key, label = e.short,
+                labelSize = S.btnFont }
+        else                    -- an action: its cost, S or D (as this fighter pays it)
+            local d, cost = c.dd * S.costPad, SKILL.costOf(e)
+            local art = e.icon and hasAsset(e.icon)   -- or its icon (Out of Action's dagger), in red
+            parts[#parts + 1] = textXml{ id = prefix .. "Cost_" .. i, x = c.dx - cx, y = c.y - cy,
+                w = d, h = d, text = art and "" or cost, color = look.costInk,
+                size = fitSize(cost, d, d, S.valueFont, true) }
+            if art then
+                parts[#parts + 1] = string.format('<Image id="%sCostIcon_%d" rectAlignment="MiddleCenter"' ..
+                    ' offsetXY="%s" width="%.1f" height="%.1f" image="%s" color="%s" raycastTarget="false" />',
+                    prefix, i, xyAttr(c.dx - cx, c.y - cy), d, d, e.icon, statusDef("seriously_injured").color)
+            end
+        end
+        parts[#parts + 1] = textXml{ id = prefix .. "Txt_" .. i, x = c.textX - cx, y = c.y - cy,
+            w = c.textW, h = c.h, text = label, color = ink,
+            size = fitSize(label, c.textW, c.h, S.valueFont, true) }
+        parts[#parts + 1] = string.format(
+            '<Button id="%s_%d" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+            ' height="%.1f" colors="%s|%s|%s|%s" onClick="%s"%s />',
+            prefix, i, xyAttr((c.hitL + c.hitR) / 2 - cx, c.y - cy), c.hitR - c.hitL, c.h,
+            COL.clear, COL.hover, COL.press, COL.clear, P.onClick,
+            (SKILL.entryInfo(prefix, i) or SKILL.mindStats(prefix, i) or ACTIVATION.spender(e, P))
+                and ' onMouseEnter="onInfoEnter" onMouseExit="onInfoExit"' or "")
+    end
+    return flyoutPanel(P.id, cx, right - left, top + half, table.concat(parts), cy)
+end
+
+-- Whether a profile's traits include one matching `pattern` -- a Lua
+-- pattern, lower case, matched against a whole comma-separated trait.
+-- Asked for constantly (what a profile is, what it may do), so each
+-- answer is kept per traits text and pattern.
+local hasTrait
+do
+local known, count = {}, 0
+function hasTrait(p, pattern)
+    local traits = tostring(p.traits or "")
+    local key = traits .. "\0" .. pattern
+    local hit = known[key]
+    if hit ~= nil then return hit end
+    hit = (("," .. traits .. ","):lower():find(",%s*" .. pattern .. "%s*,")) ~= nil
+    if count > 4000 then known, count = {}, 0 end
+    known[key], count = hit, count + 1
+    return hit
+end
+end
+
+-- The traits the card reacts to (RULES.traits).
+local TRAIT = RULES.traits
+-- Whether a profile is a melee one: its traits include "Melee".
+local function isMelee(p) return hasTrait(p, TRAIT.melee) end
+local function hasRapidFire(p) return not isMelee(p) and hasTrait(p, TRAIT.rapidFire) end
+
+-- A weapon's type, for its icon on W1-W3, checked in this order: any
+-- profile Light -> secondary; any profile Melee -> melee; any profile with
+-- no short range ("-") but a long one -> grenade; otherwise primary.
+local WEAPON_TYPES = {
+    primary = "PRI", secondary = "SEC", melee = "MEL", grenade = "GRN",
+}
+local function weaponType(weapon)
+    local profiles = (weapon and weapon.profiles) or {}
+    local function any(test)
+        for _, p in ipairs(profiles) do if test(p) then return true end end
+        return false
+    end
+    local function dash(v) return tostring(v or "-"):match("^%s*%-?%s*$") ~= nil end
+    if any(function(p) return hasTrait(p, TRAIT.light) end) then return "secondary" end
+    if any(isMelee) then return "melee" end
+    if any(function(p) return dash(p.SR) and not dash(p.LR) end) then return "grenade" end
+    return "primary"
+end
+
+-- Whether a profile shows column `key` (see PROFILE_COLS): Am unless it is
+-- melee, D only when it has a value ("-" or blank is none).
+local function showsCol(p, key)
+    if key == "Am" then return not isMelee(p) end
+    if key == "D" then
+        local v = trimText(p.D)
+        return v ~= "" and v ~= "-"
+    end
+    return true
+end
+
+-- The columns a weapon's popup has: each one that at least one of its
+-- profiles shows (every column for an empty slot).
+local function weaponCols(weapon)
+    local profiles, shown = (weapon and weapon.profiles) or {}, {}
+    for i, col in ipairs(PROFILE_COLS) do
+        shown[i] = #profiles == 0
+        for _, p in ipairs(profiles) do shown[i] = shown[i] or showsCol(p, col.key) end
+    end
+    return shown
+end
+
+-- A profile's in-play state (kept on the profile, so it saves with the
+-- fighter): its mode (an index into PROFILE_MODES), its ammo ("out", "jam",
+-- "spent", "combi", "extra" or nil for fine -- it can't fire while out,
+-- jammed or spent), and a melee profile's number of attacks.
+local function profileMode(p)
+    return hasRapidFire(p) and indexOf(PROFILE_MODES, p.mode) or 1
+end
+local function profileDown(p) return p.ammo == "out" or p.ammo == "jam" or p.ammo == "spent" end
+
+-- The weapon traits with rules of their own in play (see the list above
+-- PROFILE_MODES), in one table: the main chunk is near Lua's 200-local
+-- limit. `stabbing` holds, per weapon (the table itself), whether Backstab
+-- was on when its popup last opened; `aiming`, per weapon, whether Aimed
+-- Shot is on (until its popup closes); `volley`, per weapon, a Combi
+-- volley under way this activation (see R.fire); `support`, per weapon,
+-- the Assist (1) or Interference (-1) its melee attacks had when its popup
+-- last opened, and `supportBy` the models giving it (lit up while the
+-- cursor is on its Hit, see TRAIT_RULES.lightSupport); `longShot`, per
+-- profile, whether Marksman's +1 to hit is on (see TRAIT_RULES.measure);
+-- none of them is saved. backstabNear, supportNear and gapTo, which look
+-- round the table, are added in 10b.
+local TRAIT_RULES = { stabbing = {}, aiming = {}, volley = {}, support = {}, supportBy = {}, longShot = {},
+                      reroll = {} }
+do
+    local R = TRAIT_RULES
+
+    -- N of the trait "<name> (N)" on profile p (name: lower case), or nil.
+    function R.number(p, name)
+        local n = ("," .. tostring(p.traits or "") .. ","):lower()
+            :match(",%s*" .. name .. "%s*%(%s*(%d+)%s*%)%s*,")
+        return tonumber(n)
+    end
+    function R.paired(p) return isMelee(p) and R.number(p, TRAIT.paired) or nil end
+    -- Additional Attacks (N) is on only while the fighter has another
+    -- melee weapon equipped (a weapon, not this profile's, with a melee
+    -- profile) -- melee and ranged profiles alike. On, its trait is lit,
+    -- attacking with it is free, a melee profile's charge adds N ("A+1+N")
+    -- and a ranged one has its AA(N) ammo state; off, none of that (a
+    -- melee profile keeps its xN step either way).
+    function R.aaOn(p)
+        if not R.number(p, TRAIT.additional) then return false end
+        local own
+        for i = 1, weaponCount() do
+            local w = weaponAt(i)
+            for _, q in ipairs((w and w.profiles) or {}) do if q == p then own = w end end
+        end
+        for i = 1, weaponCount() do
+            local w = weaponAt(i)
+            if w and w ~= own then
+                for _, q in ipairs(w.profiles or {}) do if isMelee(q) then return true end end
+            end
+        end
+        return false
+    end
+    function R.extra(p) return isMelee(p) and R.number(p, TRAIT.additional) or nil end
+    -- What an on Additional Attacks (N) adds to a melee charge: N, or nil.
+    function R.aaCharge(p) return isMelee(p) and R.aaOn(p) and R.number(p, TRAIT.additional) or nil end
+    -- Backstab: what it adds to melee profile p's Strength when it is on
+    -- (see R.stabbing) -- 1 for a profile with the trait; the Backstab
+    -- skill (one that says `backstab`, while the skills work) gives every
+    -- melee profile the trait, and makes it 2 on one that has it anyway.
+    -- 0 for a profile without it.
+    function R.stab(p)
+        if not isMelee(p) then return 0 end
+        local own, skill = hasTrait(p, TRAIT.backstab), #SKILL.with("backstab") > 0
+        return (own and 1 or 0) + (skill and 1 or 0)
+    end
+    function R.backstab(p) return R.stab(p) > 0 end
+    function R.combi(p) return not isMelee(p) and hasTrait(p, TRAIT.combi) end
+    -- Additional Attacks (N) on a ranged profile, while on (R.aaOn): N
+    -- (its ammo button's "AA(N)" state, ammo "extra"), or nil.
+    function R.extraShots(p) return not isMelee(p) and R.aaOn(p) and R.number(p, TRAIT.additional) or nil end
+    function R.limited(p)
+        return not isMelee(p) and (hasTrait(p, TRAIT.limited) or hasTrait(p, TRAIT.singleShot))
+    end
+
+    -- A melee profile's attack steps before x1, x2 ...: "charge" (A + 1,
+    -- A + 1 + N when Paired and / or with Additional Attacks on), "paired"
+    -- (A + N) and "extra" (xN, Additional Attacks) where the traits have
+    -- them. p.attacks holds the step: a number, one of these names, or nil
+    -- for "charge".
+    function R.steps(p)
+        local s = { "charge" }
+        if R.paired(p) then s[#s + 1] = "paired" end
+        if R.extra(p) then s[#s + 1] = "extra" end
+        return s
+    end
+    -- The step p is on: a number, or a step name its traits allow (else
+    -- "charge"). Also reads what a caller passes: "A+N" / "xN" / "A+1".
+    function R.step(p, v)
+        if v == nil then v = p.attacks end
+        local n = tonumber(v)
+        if n then return math.max(1, math.floor(n)) end
+        v = tostring(v or ""):lower():gsub("%s", "")
+        if (v == "paired" or v == "a+n") and R.paired(p) then return "paired" end
+        if (v == "extra" or v == "xn") and R.extra(p) then return "extra" end
+        return "charge"
+    end
+
+    -- A Combi profile is on Combi only while two of the weapon's Combi
+    -- profiles can fire; count those, leaving out `skip`.
+    function R.combiUp(w, skip)
+        local n = 0
+        for _, q in ipairs((w and w.profiles) or {}) do
+            if q ~= skip and R.combi(q) and not profileDown(q) then n = n + 1 end
+        end
+        return n
+    end
+    -- A Combi volley: firing a weapon on Combi fires its Combi profiles
+    -- together, with the same modifiers -- the players just roll them one
+    -- after the other. So once one is fired on Combi during an activation
+    -- (R.fire), the weapon's other Combi profiles are part of that shot
+    -- until the activation ends (TRAIT_RULES.endVolleys): they stay on
+    -- Combi even if the first went OUT or JAM, stay aimed if it was an
+    -- Aimed Shot, and cost no action of their own (R.attackAction).
+    -- R.volley[w] = { fired = { [profile] = true }, aimed = true | nil }.
+    -- Whether profile p of weapon w is still to be fired in such a volley.
+    function R.held(w, p)
+        local v = R.volley[w]
+        return v ~= nil and R.combi(p) and not v.fired[p]
+    end
+    -- Profile p of weapon w was just fired (`combi`: on Combi): it joins the
+    -- volley still to fire it, else -- a fresh shot on Combi, during an
+    -- activation -- starts a new one, aimed if this shot was.
+    function R.fire(w, p, combi)
+        if not combi or fighter.activation ~= "active" then return end
+        if R.held(w, p) then R.volley[w].fired[p] = true return end
+        R.volley[w] = { fired = { [p] = true }, aimed = (R.aiming[w] and R.canAim(p)) or nil }
+    end
+
+    -- The ammo state a profile shows: its own, but Combi reads as AM once
+    -- fewer than two Combi profiles can fire -- unless it is still to be
+    -- fired in a volley (R.held).
+    -- (AA(N), "extra", only on a profile with Additional Attacks.)
+    function R.ammoState(w, p)
+        if p.ammo == "combi" then
+            return (R.combi(p) and (R.combiUp(w) >= 2 or R.held(w, p))) and "combi" or "fine"
+        end
+        if p.ammo == "extra" then return R.extraShots(p) and "extra" or "fine" end
+        return p.ammo or "fine"
+    end
+    -- The state a click on the ammo button leads to (see PROFILE_MODES):
+    -- down to OUT (left) / JAM (right) -- SPENT for Limited / Single Shot --
+    -- and back up from there; Combi's and AA(N)'s left click goes to AM,
+    -- and coming back up a Combi profile goes to Combi when another one
+    -- can fire, one with Additional Attacks to AA(N).
+    function R.ammoNext(w, p, right)
+        local now  = R.ammoState(w, p)
+        local down = R.limited(p) and "spent" or (right and "jam" or "out")
+        if now == down then
+            if R.combi(p) and not right and R.combiUp(w, p) >= 1 then return "combi" end
+            if R.extraShots(p) and not right then return "extra" end
+            return "fine"
+        end
+        if (now == "combi" or now == "extra") and not right then return "fine" end
+        return down
+    end
+    -- The profiles that are out of ammo -- OUT, which a Reload is for; not
+    -- JAM or SPENT -- over all the fighter's weapons: a list of { i = the
+    -- weapon's slot, pi = the profile's place in it, w = the weapon, p =
+    -- the profile }.
+    function R.empties()
+        local out = {}
+        for i = 1, weaponCount() do
+            local w = weaponAt(i)
+            for pi, p in ipairs((w and w.profiles) or {}) do
+                if R.ammoState(w, p) == "out" then out[#out + 1] = { i = i, pi = pi, w = w, p = p } end
+            end
+        end
+        return out
+    end
+
+    -- Weapon accessories (RULES.accessories). The roster names a weapon
+    -- with them in brackets after it -- "Lasgun (Mono-Sight)" -- and the
+    -- card shows the name without those it knows, each after the traits
+    -- of the weapon's profiles instead (see traitLine).
+    -- A name's entry there, or nil for one not listed: found in any case,
+    -- and whatever isn't a letter or a digit aside (Infra-Sight,
+    -- Infrasight), by the other names it gives too (`aka`).
+    RULES.follow(function() R.accIndex, R.names = nil, {} end)   -- the table may have changed
+    function R.accessory(name)
+        local function key(s) return (tostring(s):lower():gsub("[^%w]", "")) end
+        if not R.accIndex then
+            R.accIndex = {}
+            for _, d in ipairs(RULES.accessories) do
+                for _, a in ipairs(type(d.aka) == "table" and d.aka or {}) do R.accIndex[key(a)] = d end
+            end
+            for _, d in ipairs(RULES.accessories) do R.accIndex[key(d.name)] = d end
+        end
+        return R.accIndex[key(name)]
+    end
+    -- Weapon w's name as shown, and its accessories -- a list of { name
+    -- (capitalised word by word), def = its entry }. Every bracket in the
+    -- roster's name is looked through, item by item (commas): an accessory
+    -- is taken out, anything else stays where it is ("Bolter (Master,
+    -- Mono-Sight)" -> "Bolter (Master)"). Kept per name (R.names).
+    function R.named(w)
+        local full = trimText(w and w.name or "")
+        local got = R.names[full]
+        if not got then
+            local acc = {}
+            local name = full:gsub("%s*%(([^()]*)%)", function(inside)
+                local keep, found = {}, false
+                for each in (inside .. ","):gmatch("([^,]*),") do
+                    local item = trimText(each)
+                    local d = R.accessory(item)
+                    if d then
+                        acc[#acc + 1], found = { name = SKILL.title(item), def = d }, true
+                    elseif item ~= "" then
+                        keep[#keep + 1] = item
+                    end
+                end
+                if not found then return nil end          -- no accessory in it: as it is
+                return #keep > 0 and " (" .. table.concat(keep, ", ") .. ")" or ""
+            end)
+            got = { name = trimText(name), acc = acc }
+            R.names[full] = got
+        end
+        return got.name, got.acc
+    end
+    -- ... just the name ("Weapon" for one without).
+    function R.name(w)
+        local name = R.named(w)
+        return name ~= "" and name or "Weapon"
+    end
+
+    -- A weapon's modifier to hit (w.hit): a whole number, 0 until set,
+    -- kept within hitMax either way.
+    R.hitMax = 9
+    function R.hit(w)
+        local n = math.floor(tonumber(w and w.hit) or 0)
+        return math.max(-R.hitMax, math.min(R.hitMax, n))
+    end
+    -- What Hit shows, and whether Combi changed it: one lower while any
+    -- profile of the weapon is on Combi (firing both is -1 to hit), one
+    -- higher on Aimed Shot (two for a Sharpshooter, or with a Mono-Sight on
+    -- the weapon, R.aimHit) -- which makes up for Combi's, so that no longer
+    -- counts as changed -- never past hitMax either. For a melee profile `p`
+    -- of it, close combat's Assist (one higher) or Interference (one lower)
+    -- counts too (R.support, looked up as the popup opened) -- the third
+    -- value back, 1 / -1, or nil; for a ranged one, Marksman's one higher
+    -- while its target is beyond Short Range (R.longShot).
+    function R.shownHit(w, p)
+        local n, combi = R.hit(w), false
+        for _, q in ipairs((w and w.profiles) or {}) do
+            if R.ammoState(w, q) == "combi" then n, combi = n - 1, true break end
+        end
+        if R.aiming[w] then n, combi = n + R.aimHit(w), false end
+        local support = p and isMelee(p) and w and R.support[w] or nil
+        n = n + (support or 0)
+        if p and R.longShot[p] then n = n + (select(3, R.marksman(p)) or 0) end
+        return math.max(-R.hitMax, math.min(R.hitMax, n)), combi, support
+    end
+
+    -- Aimed Shot: a ranged profile that isn't Heavy (a Heavy one is a
+    -- Braced Shot instead).
+    function R.canAim(p) return not isMelee(p) and not hasTrait(p, TRAIT.heavy) end
+    -- What Aimed Shot with weapon w adds to Hit: 1 -- or what a skill says
+    -- (`aimed`: Sharpshooter, 2), while the skills work, or an accessory of
+    -- the weapon (R.sight: a Mono-Sight, 2); the best of them, never both.
+    function R.aimHit(w)
+        local n = 1
+        for _, it in ipairs(SKILL.with("aimed")) do n = math.max(n, math.floor(tonumber(it.aimed) or 1)) end
+        return math.max(n, R.sight(w) or 1)
+    end
+    -- What weapon w's accessories make of an Aimed Shot with it (`aimed`:
+    -- the best of them), or nil with none that does -- with `name`, whether
+    -- the accessory of that name is such a one.
+    function R.sight(w, name)
+        local best
+        for _, a in ipairs(select(2, R.named(w))) do
+            local n = math.floor(tonumber(a.def.aimed) or 0)
+            if n > 0 and (name == nil or R.accessory(name) == a.def) then best = math.max(best or 0, n) end
+        end
+        return best
+    end
+    -- Whether profile p of weapon w can be aimed right now: during an
+    -- activation only while the fighter's Shoot action is still to make
+    -- and it hasn't Dashed (an Aimed Shot is never one of the free shots,
+    -- see R.shot) -- the rest of a Combi volley as its first shot was.
+    function R.mayAim(w, p)
+        if not R.canAim(p) then return false end
+        if fighter.activation ~= "active" or fighter.status == "engaged" or R.held(w, p) then return true end
+        return not fighter.usedActions.dash and #(fighter.shots or {}) == 0
+    end
+    -- The action an attack with profile p is (an ACTIONS key): Fight,
+    -- Braced Shot (Heavy), Aimed Shot (while on, never Heavy) or Shoot --
+    -- and what it costs when that isn't its ACTIONS entry's (see
+    -- SKILL.cost): none while its Additional Attacks (N) is on (R.aaOn),
+    -- nor for the rest of a Combi volley (R.held: its first shot paid),
+    -- nor for a Gunfighter's second weapon or an Assault weapon after a
+    -- Dash -- the third value back, "gunfighter" / "assault" (see R.shot).
+    function R.attackAction(w, p)
+        local key = isMelee(p) and "fight" or hasTrait(p, TRAIT.heavy) and "braced_shot"
+                    or (R.aiming[w] and R.canAim(p)) and "aimed_shot" or "shoot"
+        local volley = R.held(w, p) and R.ammoState(w, p) == "combi"
+        local _, free = R.shot(w, p)
+        return key, (R.aaOn(p) or volley or free) and 0 or nil, free
+    end
+
+    -- Engaged: only Light and Melee profiles can be used; not Engaged, no
+    -- Melee one (there is nobody to fight) -- and a ranged one only while
+    -- the activation still has a shot for it (R.shot). A weapon a skill
+    -- gives (`w`, the profile's weapon: Headbutt, see SKILL.arm) -- or one
+    -- of the roster's own that is a skill's weapon (w.needs) -- can't be
+    -- used at all while the skills are disabled. A weapon is blocked --
+    -- red on its diamond -- when none of its profiles can.
+    function R.usable(p, w)
+        if w and w.fromWyrd then
+            if not ACTIVATION.wyrdCan() then return false end   -- a Wyrd power's: 0 wounds don't stop it
+        elseif w and (w.fromKind == "skill" or w.needs) and SKILL.off() then
+            return false
+        end
+        if fighter.status == "engaged" then return isMelee(p) or hasTrait(p, TRAIT.light) end
+        if isMelee(p) then return false end
+        return not w or (R.shot(w, p)) == true
+    end
+    -- The stat profile p's hit dice are rolled against: WS for a melee
+    -- profile, and for a Light ranged one fired while Engaged (part of the
+    -- fight); BS for any other shot.
+    function R.hitStat(p)
+        if isMelee(p) or (fighter.status == "engaged" and hasTrait(p, TRAIT.light)) then return "WS" end
+        return "BS"
+    end
+    function R.blocked(w)
+        if not (w and w.profiles and #w.profiles > 0) then return false end
+        for _, p in ipairs(w.profiles) do
+            if R.usable(p, w) then return false end
+        end
+        return true
+    end
+    -- The fill on weapon w's diamond, over its plain one: red while it is
+    -- blocked, yellow -- Combi's colour, a shade darker (R.VOLLEY_SHADE of
+    -- the way to black) so the diamond's gold label still reads on it --
+    -- while a Combi volley of it is under way, until its other Combi
+    -- profiles have fired (R.held); nil for none.
+    -- While Flaming Weapon waits for its weapon to be picked
+    -- (fighter.wyrd.choosing, see ACTIVATION.flame), every melee weapon is
+    -- purple, over all of that.
+    R.VOLLEY_SHADE = 0.3
+    function R.glow(w)
+        if R.flammable(w) then return COL.wyrdInk end
+        if R.blocked(w) then return COL.weaponBlocked end
+        for _, p in ipairs((w and w.profiles) or {}) do
+            if R.held(w, p) and R.ammoState(w, p) == "combi" and R.usable(p, w) then
+                return mixColor(COL.ammoCombi:sub(1, 7) .. "ff", "#000000ff", R.VOLLEY_SHADE)
+            end
+        end
+        return nil
+    end
+
+    -- Shooting in an activation. No action is taken twice, so a fighter makes
+    -- one Shoot action: once an attack with a ranged weapon has been made --
+    -- a Shoot, a Braced Shot or an Aimed Shot, listed in fighter.shots,
+    -- whether it spent an action, used up one taken from A's panel
+    -- (fighter.shotsPaid) or had none left -- its ranged weapons can't be
+    -- used any more; nor after a Dash, which leaves no action to shoot with.
+    -- What still can:
+    --   the rest of a Combi volley (R.held), part of the shot that began it,
+    --     and a profile whose Additional Attacks is on (R.aaOn);
+    --   Fast Shot (a skill that says `shoots`: 2): that many Shoot actions
+    --     -- Shoot only, so not with a Heavy profile (a Braced Shot) nor
+    --     aimed, and only while an action is left for it (or one taken from
+    --     A's panel pays for it);
+    --   Gunfighter (`gunfighter`): a Shoot with a Light profile lets one
+    --     other weapon fire a Light profile as part of it, for no action
+    --     (w.gunfight marks the weapon that began it, until the other has
+    --     fired or another shot is made);
+    --   Assault (the trait -- and with Hip-Shooting, `hipShooting`, every
+    --     ranged profile without Heavy, R.assault): after a Dash, one Shoot
+    --     with such a profile, for no action (fighter.assaulted once made).
+    -- None of it outside an activation, nor while Engaged, where a Light
+    -- weapon is part of the fight. All of it is kept with the fighter until
+    -- the activation is over (TRAIT_RULES.endShots).
+    -- R.shot: whether ranged profile p of weapon w can be fired as things
+    -- stand, and "gunfighter" / "assault" when that shot is a free one.
+    function R.assault(p)
+        if isMelee(p) then return false end
+        return hasTrait(p, TRAIT.assault) or (not hasTrait(p, TRAIT.heavy) and #SKILL.with("hipShooting") > 0)
+    end
+    function R.shoots()
+        local n = 1
+        for _, it in ipairs(SKILL.with("shoots")) do n = math.max(n, math.floor(tonumber(it.shoots) or 1)) end
+        return n
+    end
+    function R.gunfight()
+        if #SKILL.with("gunfighter") == 0 then return false end
+        for i = 1, weaponCount() do
+            if (weaponAt(i) or {}).gunfight then return true end
+        end
+        return false
+    end
+    function R.shot(w, p)
+        if fighter.activation ~= "active" or fighter.status == "engaged" or isMelee(p) then return true end
+        if R.aaOn(p) or (R.held(w, p) and R.ammoState(w, p) == "combi") then return true end
+        local plain = not hasTrait(p, TRAIT.heavy) and not R.aiming[w]      -- a Shoot action
+        local dashed = fighter.usedActions.dash == true
+        if plain and hasTrait(p, TRAIT.light) and not w.gunfight and R.gunfight() then return true, "gunfighter" end
+        if plain and dashed and not fighter.assaulted and R.assault(p) then return true, "assault" end
+        if dashed then return false end
+        local shots = fighter.shots or {}
+        if #shots == 0 then return true end
+        if not plain or #shots >= R.shoots() then return false end
+        if fighter.actionsLeft <= 0 and (tonumber(fighter.shotsPaid) or 0) <= 0 then return false end
+        for _, key in ipairs(shots) do
+            if key ~= "shoot" then return false end
+        end
+        return true
+    end
+
+    -- Marksman (a skill that says `marksman`: N, one): while the fighter
+    -- isn't Engaged, a ranged attack on an enemy beyond the profile's Short
+    -- Range but within its Long Range is N better to hit. Returns ranged
+    -- profile p's Short and Long Range in inches, as shown (no Short Range,
+    -- "-": 0), and N -- nil for a fighter without the skill (or with its
+    -- skills disabled), an Engaged one, or a profile whose ranges aren't
+    -- inches ("E", "T").
+    function R.marksman(p)
+        if isMelee(p) or fighter.status == "engaged" then return nil end
+        local n = 0
+        for _, it in ipairs(SKILL.with("marksman")) do
+            n = math.max(n, it.marksman == true and 1 or tonumber(it.marksman) or 0)
+        end
+        if n <= 0 then return nil end
+        local function inches(key)
+            local t = R.parts(R.adjust(key, p[key] or "-", R.adjSteps(p, key)))
+            if not t or t.token then return nil end
+            return t.dash and 0 or t.num
+        end
+        local sr, lr = inches("SR"), inches("LR")
+        if not (sr and lr and lr > sr) then return nil end
+        return sr, lr, n
+    end
+
+    -- Close combat with two weapons: the first melee weapon a fighter
+    -- attacks with in an activation is the one it fights with (w.fought,
+    -- kept with the weapon until the activation is over, see R.endFight);
+    -- any other is a second weapon, which makes one attack only -- or as
+    -- many as a skill says (`secondary`: Two-Weapon Fighter, two). One with
+    -- Additional Attacks (N) is neither: its attacks come on top.
+    -- R.fought: profile p of weapon w has just attacked.
+    function R.fought(w, p)
+        if fighter.activation ~= "active" or not isMelee(p) or R.number(p, TRAIT.additional) then return end
+        for i = 1, weaponCount() do
+            if (weaponAt(i) or {}).fought then return end
+        end
+        w.fought = true
+    end
+    -- The attacks melee profile p of weapon w starts at when its popup
+    -- opens: 1 (or a skill's `secondary`) for a second weapon, else nil --
+    -- the charge, as ever.
+    function R.opening(w, p)
+        if fighter.activation ~= "active" or w.fought or R.number(p, TRAIT.additional) then return nil end
+        local first = false
+        for i = 1, weaponCount() do
+            first = first or (weaponAt(i) or {}).fought == true
+        end
+        if not first then return nil end
+        local n = 1
+        for _, it in ipairs(SKILL.with("secondary")) do
+            n = math.max(n, math.floor(tonumber(it.secondary) or 1))
+        end
+        return n
+    end
+    -- The activation is over, or a new one starts: no weapon has fought.
+    function R.endFight()
+        for i = 1, weaponCount() do
+            if weaponAt(i) then weaponAt(i).fought = nil end
+        end
+    end
+
+    -- Whether weapon w has a melee profile.
+    function R.melee(w)
+        for _, p in ipairs((w and w.profiles) or {}) do
+            if isMelee(p) then return true end
+        end
+        return false
+    end
+    -- Whether weapon w is one Flaming Weapon could be given to right now:
+    -- a melee weapon, while the power waits for the pick.
+    function R.flammable(w)
+        local wy = fighter.wyrd
+        return type(wy) == "table" and wy.choosing == true and wy.power ~= nil and R.melee(w)
+    end
+    -- What the fighter's Wyrd powers in effect add to melee profile p's L
+    -- (`meleeL`: Warp Strength, +1).
+    function R.warpL(p)
+        local n = 0
+        if not isMelee(p) then return n end
+        for _, it in ipairs(SKILL.with("meleeL")) do
+            if SKILL.live(it) then n = n + (tonumber(it.meleeL) or 0) end
+        end
+        return n
+    end
+
+    -- What the fighter's skills add to melee profile p's Strength (their
+    -- `meleeS`, by trait: Heavy Blows, +1 with Heavy), while they work.
+    function R.blows(p)
+        local n = 0
+        if not isMelee(p) then return n end
+        for _, it in ipairs(SKILL.with("meleeS")) do
+            for trait, add in pairs(it.meleeS) do
+                if TRAIT[trait] and hasTrait(p, TRAIT[trait]) then n = n + (tonumber(add) or 0) end
+            end
+        end
+        return n
+    end
+
+    -- The profile columns a click can adjust (every one but Hit, which is
+    -- the weapon's): a left click on the value makes it one better, a
+    -- right click one worse -- p.adj[key], in steps (+ better), kept on
+    -- the profile (so it saves) until clicked back. `lower`: a lower number
+    -- is better (AP, Am); `mod`: a modifier, "-" being 0 ("-" -> "-1" ->
+    -- "-2"); `min` / `max`: the number never goes past them; `tokens =
+    -- false`: a word (E, T) can't be adjusted, else it takes the steps
+    -- ("S" -> "S+1", "D3" -> "D3+1"). A "-" that isn't a modifier (no
+    -- Strength, no Ammo roll ...) can't either.
+    R.ADJ = {
+        SR = { min = 0, tokens = false }, LR = { min = 0, tokens = false },
+        S  = { min = 1 }, AP = { lower = true, mod = true }, L = { min = 0 },
+        D  = { min = 0 }, Am = { lower = true, min = 2, max = 6 },
+    }
+    -- A value's parts: { dash } for "-" / blank, { num, suffix } for a
+    -- number ('8"', "4+", "-1"), { token, num } for a word with or without
+    -- a number after it ("S", "S+1", "D3"), or nil for anything else.
+    function R.parts(v)
+        local s = trimText(v)
+        if s == "" or s == "-" then return { dash = true } end
+        local sign, n, rest = s:match("^([%+%-]?)(%d+)(.*)$")
+        if n then return { num = tonumber(n) * (sign == "-" and -1 or 1), suffix = rest } end
+        local tok, sg, m = s:match("^(%a%w*)%s*([%+%-])%s*(%d+)$")
+        if tok then return { token = tok, num = tonumber(m) * (sg == "-" and -1 or 1) } end
+        tok = s:match("^(%a%w*)$")
+        if tok then return { token = tok, num = 0 } end
+        return nil
+    end
+    -- Whether column `key` of profile p can be adjusted (see R.ADJ).
+    function R.adjustable(p, key)
+        local a, v = R.ADJ[key], R.parts(p[key])
+        if not (a and v) then return false end
+        if v.dash then return a.mod == true end
+        return not (v.token and a.tokens == false)
+    end
+    -- Text `v` of column `key` moved `steps` better (see R.ADJ) -- as it
+    -- is when it can't be moved.
+    function R.adjust(key, v, steps)
+        local a, t = R.ADJ[key], R.parts(v)
+        if not (a and t) or steps == 0 or (t.dash and not a.mod) or (t.token and a.tokens == false) then
+            return tostring(v or "-")
+        end
+        local n = (t.num or 0) + steps * (a.lower and -1 or 1)
+        if not t.token then n = math.max(a.min or -math.huge, math.min(a.max or math.huge, n)) end
+        if t.token then return t.token .. (n > 0 and "+" .. n or n < 0 and tostring(n) or "") end
+        if a.mod or t.dash then return n == 0 and "-" or string.format("%+d", n) end
+        return tostring(n) .. (t.suffix or "")
+    end
+    -- How many steps column `key` of profile p is adjusted (0 when not).
+    function R.adjSteps(p, key) return math.floor(tonumber(p.adj and p.adj[key]) or 0) end
+
+    -- A profile's value in column `key` as its popup shows it, and its
+    -- colour: moved by its adjustments (R.adjust; green better, orange
+    -- worse), then S one higher (max 10) while Backstab is on -- two with the
+    -- Backstab skill as well, see R.stab -- and by what the fighter's skills
+    -- add (R.blows: Heavy Blows) and a Mounted fighter's Lance on the charge
+    -- (R.lance) -- "4" -> "5", "S" -> "S+1", "S-1" -> "S"; a form it doesn't
+    -- know stays as it is. Both ways at once: yellow. SR and LR as they are:
+    -- light blue for a Marksman (R.marksman). Hit is the weapon's
+    -- (R.shownHit): "+0", green above it, orange below -- yellow where Combi
+    -- took it to 0 or below, or an Assist / Interference to 0. L higher by
+    -- what a Wyrd power in effect adds to melee profiles (R.warpL: Warp
+    -- Strength), in purple.
+    function R.value(w, p, key)
+        if key == "Hit" then
+            local n, combi, support = R.shownHit(w, p)
+            local col = n > 0 and COL.valueUp or (combi and COL.valueBoth)
+                        or (n < 0 and COL.valueMod) or (support and COL.valueBoth) or COL.popupText
+            return (n < 0 and "" or "+") .. n, col
+        end
+        local steps = R.adjSteps(p, key)
+        local v = R.adjust(key, p[key] or "-", steps)
+        if trimText(v) == "" then v = "-" end
+        local warp = key == "L" and R.warpL(p) or 0
+        if warp ~= 0 and tonumber(v) then return tostring(math.max(0, tonumber(v) + warp)), COL.wyrdInk end
+        local more = key == "S" and (R.stabbing[w] and R.stab(p) or 0) + R.blows(p) + R.lance(p) or 0
+        local function ink(up)
+            if not (up or steps < 0) then
+                return (key == "SR" or key == "LR") and R.marksman(p) and COL.marksman or COL.popupText
+            end
+            return STAT.color(up, steps < 0)
+        end
+        if more <= 0 then return v, ink(steps > 0) end
+        local n = tonumber(v)
+        if n then return tostring(math.min(10, n + more)), ink(true) end
+        local base, sign, m = v:match("^%s*(%a+)%s*([%+%-]?)%s*(%d*)%s*$")
+        if not base then return v, ink(steps > 0) end
+        local k = (tonumber(m) or 0) * (sign == "-" and -1 or 1) + more
+        return base .. (k > 0 and "+" .. k or k < 0 and tostring(k) or ""), ink(true)
+    end
+
+    -- The Strength an attack with profile p of weapon w wounds with: its S as
+    -- shown (R.value: adjustments, Backstab, Heavy Blows, Lance), "S" and
+    -- "S+N" read from the fighter's own S (after its changes); nil for none
+    -- ("-").
+    function R.strength(w, p)
+        local t = R.parts(R.value(w, p, "S"))
+        if not t or t.dash then return nil end
+        if t.token then
+            if t.token:upper() ~= "S" then return nil end
+            local s = statNumber("S")
+            return s and math.max(1, s + t.num) or nil
+        end
+        return math.max(1, t.num)
+    end
+    -- Whether profile p of weapon w has no AP as shown -- "-" or 0, after
+    -- adjustments (Iron Jaw asks, see ACTIVATION.woundPlan).
+    function R.noAp(w, p)
+        local t = R.parts(R.value(w, p, "AP"))
+        return t ~= nil and (t.dash == true or t.num == 0)
+    end
+    -- How much profile p of weapon w's AP as shown worsens a save: "-2"
+    -- 2, "-" (or anything else) 0 (see takeSaves).
+    function R.apOf(w, p)
+        local t = R.parts(R.value(w, p, "AP"))
+        return t and t.num and not t.token and t.num < 0 and -t.num or 0
+    end
+    -- Toxin (N+): the number a Wound roll needs instead of Strength
+    -- against Toughness, or nil (a Toxin without a number isn't one).
+    function R.toxin(p)
+        local n = ("," .. tostring(p.traits or "") .. ","):lower()
+            :match(",%s*" .. TRAIT.toxin .. "%s*%(%s*(%d+)%s*%+?%s*%)%s*,")
+        return tonumber(n)
+    end
+
+    -- Marksman's sign between a ranged profile's SR and LR (R.RANGE_SIGN,
+    -- a Text of its own, light blue): whether it shows (R.marksman), its
+    -- centre (x from the stats box's middle), its box's width and its size
+    -- -- the values' own, smaller only to fit between the two as they are
+    -- drawn. `g`: the popup's columns (popupGeom). nil for a melee profile.
+    -- The builder and drawProfile share it.
+    R.RANGE_SIGN = "↔"
+    function R.rangeView(w, p, g)
+        local S = LAY.popS
+        local a, b = indexOf(PROFILE_COLS, "SR"), indexOf(PROFILE_COLS, "LR")
+        if isMelee(p) or not (a and b and g.shown[a] and g.shown[b]) then return nil end
+        local function half(ci, key)             -- half the value's width, as drawn
+            local val = R.value(w, p, key)
+            return textWidth(val, fitSize(val, g.need[ci], g.hd, S.valueFont, true), true) / 2
+        end
+        local l, r = g.colX[a] + half(a, "SR"), g.colX[b] - half(b, "LR")
+        local room = math.max(1, r - l)
+        return { on = R.marksman(p) ~= nil, x = (l + r) / 2 - g.boxW / 2, w = room,
+                 size = math.max(1, fitSize(R.RANGE_SIGN, room, g.hd, S.valueFont, true)) }
+    end
+
+    -- Rapid Fire (N): N (1 for a form without a number), or nil.
+    function R.rapidFire(p)
+        if not hasRapidFire(p) then return nil end
+        return tonumber(("," .. tostring(p.traits or "") .. ","):lower():match(",%s*rapid fire%s*%(%s*(%d+)")) or 1
+    end
+    -- Ammo (N+): the number a ranged profile's Ammo check die must reach
+    -- (see rollAttack) -- the trait's, else its Am column's ("4+") -- or nil;
+    -- moved by the Am column's adjustment (see R.ADJ), within 2-6.
+    function R.ammoNeed(p)
+        if isMelee(p) then return nil end
+        local n = ("," .. tostring(p.traits or "") .. ","):lower()
+            :match(",%s*" .. TRAIT.ammo .. "%s*%(%s*(%d+)%s*%+?%s*%)%s*,")
+        n = tonumber(n or tostring(p.Am or ""):match("^%s*(%d)%s*%+?%s*$"))
+        local steps = R.adjSteps(p, "Am")
+        if n and steps ~= 0 then n = math.max(2, math.min(6, n - steps)) end
+        return n
+    end
+    -- Scarce (N+): the D6 a reload of ranged profile p must reach (see
+    -- ACTIVATION.reloadNow), or nil for one without the trait.
+    function R.scarce(p)
+        if isMelee(p) or not TRAIT.scarce then return nil end
+        return tonumber((("," .. tostring(p.traits or "") .. ","):lower()
+            :match(",%s*" .. TRAIT.scarce .. "%s*%(%s*(%d+)%s*%+?%s*%)%s*,")))
+    end
+    -- Reliable: the first Ammo check rolled for a profile with it is
+    -- ignored (see rollAttack) -- once. p.reliableUsed marks it used until a
+    -- click on the trait (onReliableClick) or the game's start
+    -- (resetReliable) makes it ready again.
+    function R.reliable(p) return hasTrait(p, TRAIT.reliable) end
+    function R.reliableReady(p) return R.reliable(p) and not p.reliableUsed end
+
+    -- The traits that change what an attack's dice do (see
+    -- ACTIVATION.attackDice). Each N of "<trait> (N+)" -- or "(N)" -- in
+    -- the traits `line` (`pattern` the trait's, lower case), as a list.
+    function R.numbers(line, pattern)
+        local out = {}
+        for t in (tostring(line or "") .. ","):gmatch("([^,]*),") do
+            local n = trimText(t):lower():match("^" .. pattern .. "%s*%(%s*(%d+)%s*%+?%s*%)$")
+            if n then out[#out + 1] = tonumber(n) end
+        end
+        return out
+    end
+    -- The lowest of those N, or nil.
+    function R.lowest(line, pattern)
+        local best
+        for _, n in ipairs(pattern and R.numbers(line, pattern) or {}) do best = math.min(best or n, n) end
+        return best
+    end
+    -- Shock (N+): a hit die that hits and reaches N (see ACTIVATION.shocks)
+    -- makes the Wound roll it stands for an automatic 6. N, 6 for a Shock
+    -- without one, or nil.
+    function R.shock(p)
+        if not TRAIT.shock then return nil end
+        return R.lowest(p.traits, TRAIT.shock) or (hasTrait(p, TRAIT.shock) and 6) or nil
+    end
+    -- Blaze (N+): a Wound roll die of N or more makes one more hit (see
+    -- ACTIVATION.woundRoll). The lowest N of every Blaze trait profile p
+    -- has -- a melee one's of weapon w with the one Flaming Weapon gives it
+    -- too (see ACTIVATION.flameTrait) -- or nil.
+    function R.blaze(p, w)
+        local line = tostring(p.traits or "")
+        local fire = w and isMelee(p) and ACTIVATION.flameTrait and ACTIVATION.flameTrait(w)
+        if fire then line = line .. "," .. fire end
+        return R.lowest(line, TRAIT.blaze)
+    end
+    -- What a wound from profile p of weapon w does, as the profile shows
+    -- it (see ACTIVATION.woundPlan): `l` its Lethality ("-": 0), `dmg`
+    -- Damage (N)'s N -- the wounds it takes off; nil: 1 -- and the traits
+    -- that work on its Wound roll and save:
+    -- Rending (N+) `rend` (a natural N+ to wound: AP one worse), Shred (N+)
+    -- `shred` (N+ to wound: L one higher), Concussive (N+) `conc` (each
+    -- N+ to wound: a stack of Concussion), Gas `gas` and Web `web` (no
+    -- armour save; Web does no damage but Webbed instead), Rad-Phage `rad`
+    -- (a wound: Radphage). A trait's N without one: 6.
+    function R.hurts(w, p)
+        local line = tostring(p.traits or "")
+        local function n6(pat)
+            if not pat then return nil end
+            return R.lowest(line, pat) or (hasTrait(p, pat) and 6) or nil
+        end
+        local function has(pat) return pat ~= nil and hasTrait(p, pat) or nil end
+        local most
+        for _, n in ipairs(TRAIT.damage and R.numbers(line, TRAIT.damage) or {}) do most = math.max(most or n, n) end
+        local l = R.parts(R.value(w, p, "L"))
+        return { l = l and l.num and not l.token and math.max(0, l.num) or 0, dmg = most, rend = n6(TRAIT.rending), shred = n6(TRAIT.shred), conc = n6(TRAIT.concussive),
+                 gas = has(TRAIT.gas), web = has(TRAIT.web), rad = has(TRAIT.radphage) }
+    end
+    -- Cursed: an enemy hit makes a Willpower check (see traitHit).
+    function R.cursed(p) return TRAIT.cursed ~= nil and hasTrait(p, TRAIT.cursed) end
+    -- Ranged only: Flash -- an enemy hit is Blind and loses its Ready
+    -- marker (see traitHit) -- and Graviton Pulse, neither rolled to wound;
+    -- Template -- no hit roll, every enemy selected is hit (see
+    -- ACTIVATION.strike).
+    function R.flash(p) return TRAIT.flash ~= nil and not isMelee(p) and hasTrait(p, TRAIT.flash) end
+    function R.graviton(p) return TRAIT.graviton ~= nil and not isMelee(p) and hasTrait(p, TRAIT.graviton) end
+    function R.noWound(p) return R.flash(p) or R.graviton(p) end
+    function R.template(p) return TRAIT.template ~= nil and not isMelee(p) and hasTrait(p, TRAIT.template) end
+    -- Lance: what it adds to melee profile p's Strength -- 1 while its
+    -- attacks are at the charge ("A + 1") and the fighter is Mounted (its
+    -- role line's tags, see ACTIVATION.tags), else 0.
+    function R.lance(p)
+        if not (TRAIT.lance and isMelee(p) and hasTrait(p, TRAIT.lance)) then return 0 end
+        return (R.step(p) == "charge" and ACTIVATION.tags().mounted) and 1 or 0
+    end
+
+    -- The traits a traits line shows in a colour of their own (see
+    -- R.segments): Reliable -- bright green while ready, red once used --
+    -- the Shield / Parry bettering the save right now (bright green;
+    -- the traits' own colour while it doesn't: not Engaged / Engaged, or a
+    -- save already at its best) and Additional Attacks (N) while it is on
+    -- (bright green, see R.aaOn). Lua patterns, each matching a whole trait.
+    -- And, after the traits, an accessory of the weapon that betters its
+    -- Aimed Shot (R.sight: the Mono-Sight) -- R.AIM_MARK, not a pattern --
+    -- bright green while the weapon is aimed. Last of all the weapon's
+    -- re-rolls to hit set by hand (R.reroll, see TRAIT_RULES.setReroll) --
+    -- R.REROLL_MARK -- always bright green.
+    R.AIM_MARK = "<aimed>"
+    R.REROLL_MARK = "<reroll>"
+    RULES.follow(function()
+        R.AA_MARK = TRAIT.additional .. "%s*%(%s*%d+%s*%)"
+        R.MARKED = { TRAIT.reliable, TRAIT.shield, TRAIT.parry, R.AA_MARK }
+    end)
+    function R.markInk(p, mark, w)
+        if mark == TRAIT.reliable then return p.reliableUsed and COL.traitUsed or COL.traitOn end
+        if mark == R.AA_MARK then return R.aaOn(p) and COL.traitOn or COL.popupTraits end
+        if mark == R.AIM_MARK then return (w and R.aiming[w] and R.canAim(p)) and COL.traitOn or COL.popupTraits end
+        if mark == R.REROLL_MARK then return COL.traitOn end
+        return R.saveUp() == mark and COL.traitOn or COL.popupTraits
+    end
+    -- Whether profile p of weapon w has anything marked in its traits line.
+    function R.marked(p, w)
+        for _, m in ipairs(R.MARKED) do if hasTrait(p, m) then return true end end
+        if w and R.reroll[w] then return true end
+        return R.canAim(p) and R.sight(w) ~= nil
+    end
+    -- "shield" / "parry" while that trait makes the save better than it
+    -- would be (see TRAIT_RULES.saveTrait), else nil.
+    function R.saveUp()
+        local t = R.saveTrait()
+        if not t then return nil end
+        local plain = statNumber("Sv")
+        return (not plain or statNumber("Sv", { save = t }) < plain) and t or nil
+    end
+
+    -- A profile's traits line (t, see R.traitLines; `w` its weapon) cut
+    -- round its marked traits (R.MARKED) and the weapon's marked accessory
+    -- (R.AIM_MARK), so each can take a colour of its own: nil when p
+    -- has none; else every piece, left to right on its line -- its text,
+    -- centre (x from the box's middle; y its line's), width and height,
+    -- and `mark` (the trait) for a marked one. The comma after a marked
+    -- trait starts the next piece; pieces are measured with GLYPH_EM and
+    -- set a space apart where the line has one -- TTS may drop a Text's
+    -- edge spaces, so no piece starts or ends with one.
+    function R.segments(p, t, w)
+        if not R.marked(p, w) then return nil end
+        local sights = R.canAim(p) and R.sight(w) ~= nil
+        local rr = w and R.REROLL[R.reroll[w]]
+        local segs, space = {}, textWidth(" ", t.size, true)
+        for k, line in ipairs({ t.text, t.text2 }) do
+            local items, parts, cur = {}, {}, nil
+            for item in (tostring(line) .. ","):gmatch("([^,]*),") do items[#items + 1] = trimText(item) end
+            for n, item in ipairs(items) do
+                local comma = n < #items and "," or ""   -- the line's own comma after it
+                local mark
+                for _, m in ipairs(R.MARKED) do if item:lower():match("^" .. m .. "$") then mark = m end end
+                if not mark and sights and R.sight(w, item) then mark = R.AIM_MARK end
+                if not mark and rr and item == rr then mark = R.REROLL_MARK end
+                if mark then
+                    parts[#parts + 1] = { text = item, mark = mark, gap = #parts > 0 }
+                    cur = nil
+                    if comma ~= "" then
+                        cur = { text = comma, gap = false }
+                        parts[#parts + 1] = cur
+                    end
+                elseif item ~= "" then
+                    if cur then cur.text = cur.text .. " " .. item .. comma
+                    else
+                        cur = { text = item .. comma, gap = #parts > 0 }
+                        parts[#parts + 1] = cur
+                    end
+                end
+            end
+            local total = 0
+            for _, s in ipairs(parts) do
+                s.w = textWidth(s.text, t.size, true)
+                total = total + s.w + (s.gap and space or 0)
+            end
+            local x = -total / 2
+            for _, s in ipairs(parts) do
+                if s.gap then x = x + space end
+                s.x, s.y, s.h = x + s.w / 2, k == 1 and t.y or t.y2, t.h
+                x = x + s.w
+                segs[#segs + 1] = s
+            end
+        end
+        return segs
+    end
+end
+
+-- A melee profile's attacks: how many, and how its button reads (see
+-- TRAIT_RULES.steps). "A + 1" is the fighter's A (after conditions) plus
+-- one; Paired (N) adds N to it and to "A + N".
+local function meleeAttacks(p)
+    local step = TRAIT_RULES.step(p)
+    if type(step) == "number" then return step, "x" .. step end
+    local A, N = statNumber("A") or 1, TRAIT_RULES.paired(p)
+    if step == "extra" then
+        local x = TRAIT_RULES.extra(p)
+        return x, "x" .. x
+    end
+    if step == "paired" then return A + N, "A+" .. N end   -- Paired: short, to stay big
+    local more = (N or 0) + (TRAIT_RULES.aaCharge(p) or 0)   -- Paired's N and / or Additional Attacks' N
+    if more > 0 then return A + 1 + more, "A+1+" .. more end
+    return A + 1, "A + 1"
+end
+
+-- The step above / below a melee profile's attacks: "A + 1" (or its
+-- Paired / Additional Attacks steps) -> 1 -> 2 ... nil stands for the
+-- charge, the lowest.
+local function meleeStep(p, up)
+    local steps, step = TRAIT_RULES.steps(p), TRAIT_RULES.step(p)
+    local k = type(step) == "number" and #steps + step or 1
+    for i, s in ipairs(steps) do if s == step then k = i end end
+    k = math.max(1, k + (up and 1 or -1))
+    if k > #steps then return k - #steps end
+    return k > 1 and steps[k] or nil
+end
+
+-- What the ammo button shows for each state, and its colour.
+local AMMO_LOOK = {
+    fine  = { text = "AM",    col = "ammoFine",  box = "profile" },   -- colours as
+    out   = { text = "OUT",   col = "ammoOut",   box = "profile_out" },  -- COL keys
+    jam   = { text = "JAM",   col = "ammoJam",   box = "profile_jam" },
+    spent = { text = "SPENT", col = "ammoSpent", box = "profile_jam" },
+    combi = { text = "Combi", col = "ammoCombi", box = "profile" },
+    extra = { text = "AA",    col = "ammoCombi", box = "profile" },   -- "AA(N)", see profileView
+}
+local function ammoLook(w, p) return AMMO_LOOK[TRAIT_RULES.ammoState(w, p)] or AMMO_LOOK.fine end
+
+-- A profile's traits line: its traits (its name isn't shown), and after
+-- them the accessories of its weapon `w` (see TRAIT_RULES.named). A melee
+-- profile of the weapon Flaming Weapon set alight has its trait as well
+-- (see ACTIVATION.flameTrait).
+local function traitLine(p, w)
+    local line = p.traits or ""
+    local fire = isMelee(p) and ACTIVATION.flameTrait(w)
+    if fire then line = trimText(line); line = line .. (line ~= "" and ", " or "") .. fire end
+    for _, a in ipairs(select(2, TRAIT_RULES.named(w))) do
+        line = trimText(line)
+        line = line .. (line ~= "" and ", " or "") .. a.name
+    end
+    local rr = w and TRAIT_RULES.REROLL[TRAIT_RULES.reroll[w]]   -- re-rolls to hit, set by hand
+    if rr then line = trimText(line); line = line .. (line ~= "" and ", " or "") .. rr end
+    return line
+end
+
+-- Re-rolls to hit, set by hand on a weapon (a middle click on its Hit, see
+-- TRAIT_RULES.setReroll): "ones" re-rolls every hit die showing a 1,
+-- "all" every one that misses. Each shows as a trait of its own at the end
+-- of the weapon's traits lines, bright green; REROLL_NEXT: the next
+-- click's setting.
+TRAIT_RULES.REROLL = { ones = "RR 1s to hit", all = "RR to hit" }
+TRAIT_RULES.REROLL_NEXT = { none = "ones", ones = "all", all = nil }
+
+-- How many pieces profile p of weapon w's traits line can be cut into
+-- (see TRAIT_RULES.segments) whatever re-roll is set: the builder makes
+-- that many, so setting one needs no rebuild (popup geometry g).
+function TRAIT_RULES.segRoom(w, p, g)
+    local R, was, most = TRAIT_RULES, TRAIT_RULES.reroll[w], 0
+    for _, how in ipairs({ false, "ones", "all" }) do
+        R.reroll[w] = how or nil
+        local segs = R.segments(p, R.traitLines(traitLine(p, w), g), w)
+        most = math.max(most, segs and #segs or 0)
+    end
+    R.reroll[w] = was
+    return most
+end
+
+-- The columns of a weapon's stats box. Each (see weaponCols) fits its header
+-- and its PROFILE_COLS `fit` sample -- never the weapon's own values, so
+-- popups with the same columns are the same width -- with pop.colGap
+-- between them. colX / areaX are measured from the box's left edge.
+-- Kept per set of columns -- and per weapon (its columns never change, its
+-- profiles are fixed), as every redraw of a profile asks.
+local popGeoms = setmetatable({}, { __mode = "k" })
+RULES.follow(function()                    -- which columns a weapon has may have changed
+    for k in pairs(popGeoms) do if type(k) == "table" then popGeoms[k] = nil end end
+end)
+local function popupGeom(weapon)
+    if type(weapon) == "table" and popGeoms[weapon] then return popGeoms[weapon] end
+    local g = popGeoms.of(weapon)
+    if type(weapon) == "table" then popGeoms[weapon] = g end
+    return g
+end
+function popGeoms.of(weapon)
+    local shown, sig = weaponCols(weapon), {}
+    for i = 1, #shown do sig[i] = shown[i] and "1" or "0" end
+    sig = table.concat(sig)
+    if popGeoms[sig] then return popGeoms[sig] end
+    local S, n = LAY.popS, #PROFILE_COLS
+    local g = { need = {}, colX = {}, shown = shown }
+    local count = 0
+    g.areaW = 0
+    for i, col in ipairs(PROFILE_COLS) do
+        g.need[i] = math.max(textWidth(col.key, S.headFont, true),
+                             textWidth(col.fit, S.valueFont, true)) / FIT
+        if shown[i] then g.areaW, count = g.areaW + g.need[i], count + 1 end
+    end
+    g.areaW = g.areaW + S.colGap * math.max(0, count - 1)
+    g.boxW  = 2 * S.boxPad + g.areaW
+    g.areaX = S.boxPad + g.areaW / 2
+    g.traitW = g.boxW - 2 * S.traitPad            -- the traits line, centred in the box
+    local x = S.boxPad
+    for i = 1, n do
+        if shown[i] then
+            g.colX[i] = x + g.need[i] / 2
+            x = x + g.need[i] + S.colGap
+        end
+    end
+    -- The rows, in card units: as tall as W1 tip to tip, a numbers line over
+    -- a traits line; the ATK / AM cells from W1's tip to the divider.
+    g.hd    = halfDiag(LAY.sideD)
+    g.tip   = LAY.weaponX + g.hd                       -- W1's outer tip
+    g.div   = g.tip + S.btnW                           -- the divider before the stats
+    g.cellL = g.tip                                    -- the cells start where W1 ends
+    g.cellW = S.btnW
+    popGeoms[sig] = g
+    return g
+end
+
+-- A profile's traits line as it is drawn: one line (traits.text, and an
+-- empty traits.text2) filling up to traitFit of its width (fitSize alone
+-- keeps FIT) -- or, when that would have to shrink it and two lines (split
+-- after the comma that gives the biggest text, the most even split of
+-- those) would be bigger, two, each half the traits' height, one over the
+-- other. y / y2: their centres from the box's; h: each one's height.
+function TRAIT_RULES.traitLines(line, g)
+    local S = LAY.popS
+    local w = g.traitW * S.traitFit / FIT
+    local t = { text = line, text2 = "", color = COL.popupTraits, y = -g.hd / 2, y2 = -g.hd / 2, h = g.hd,
+                size = fitSize(line, w, g.hd, S.traitFont, true) }
+    if t.size >= S.traitFont then return t end
+    local uneven = math.huge
+    for i = 1, #line do
+        if line:sub(i, i) == "," then
+            local a, b = trimText(line:sub(1, i)), trimText(line:sub(i + 1))
+            local size = math.min(fitSize(a, w, g.hd / 2, S.traitFont, true), fitSize(b, w, g.hd / 2, S.traitFont, true))
+            local off = math.abs(textEm(a) - textEm(b))
+            if b ~= "" and (size > t.size + 0.01 or (size > t.size - 0.01 and t.text2 ~= "" and off < uneven)) then
+                t.text, t.text2, t.size, t.h, uneven = a, b, size, g.hd / 2, off
+                t.y, t.y2 = -g.hd / 4, -3 * g.hd / 4
+            end
+        end
+    end
+    return t
+end
+
+-- Shield (while not Engaged) and Parry (while Engaged): a weapon with a
+-- profile that has it makes the fighter's save one better (see
+-- statNumber). Returns "shield" / "parry" while one applies, else nil --
+-- two such weapons are no better than one -- and the slots of the weapons
+-- that have it (lit up while Sv is hovered, see SKILL.drawSources).
+function TRAIT_RULES.saveTrait()
+    local engaged = fighter.status == "engaged"
+    local want = engaged and TRAIT.parry or TRAIT.shield
+    local from = {}
+    for i = 1, weaponCount() do
+        for _, p in ipairs((weaponAt(i) or {}).profiles or {}) do
+            if hasTrait(p, want) then from[#from + 1] = i break end
+        end
+    end
+    if #from == 0 then return nil end
+    return engaged and "parry" or "shield", from
+end
+
+-- The stats' context for the save alone (see weaponContext): what a stat
+-- test of Sv rolls against.
+function TRAIT_RULES.saveContext()
+    local t, from = TRAIT_RULES.saveTrait()
+    return t and { save = t, saveFrom = from } or nil
+end
+
+-- How profile `pi`'s ATK / RF cell looks on Aimed Shot or off it (see
+-- TRAIT_RULES.canAim): `on`, the labels' colour and, per mode, the
+-- label's size and x from the cell's middle -- on, the sign "⊕" and the
+-- name centred together, shrunk only if the pair needs it -- and `signX`
+-- / `signSize` for the current mode's sign. The sign is a Text of its own
+-- (TRAIT_RULES.AIM_SIGN; in one Text with the name TTS leaves a wide gap
+-- after it), counted about as wide as an O.
+TRAIT_RULES.AIM_SIGN = "⊕"
+function TRAIT_RULES.aimView(i, pi, p, mode)
+    local S, g = LAY.popS, popupGeom(weaponAt(i))
+    local on = TRAIT_RULES.aiming[weaponAt(i)] == true and TRAIT_RULES.canAim(p)
+    local a = { on = on, color = on and COL.valueUp or COL.iconText, modes = {} }
+    for k, m in ipairs(PROFILE_MODES) do
+        local size = fitSize(m.short, g.cellW, g.hd, S.btnFont, true)
+        local x, signX = 0, 0
+        if on then
+            local em = (textEm(m.short) + textEm("O") + 0.1) * 1.06      -- sign, a small gap, name
+            size = math.min(size, g.cellW * FIT / em)
+            local left = -em * size / 2
+            signX = left + textWidth("O", size, true) / 2
+            x = left + em * size - textWidth(m.short, size, true) / 2
+        end
+        a.modes[k] = { size = size, x = x, signX = signX }
+    end
+    a.signX, a.signSize = a.modes[mode].signX, a.modes[mode].size
+    return a
+end
+
+-- How profile `pi` of weapon `i` looks right now -- its box, its traits
+-- line and what its buttons show. Shared by the builder and drawProfile.
+-- The box: out / jammed / spent, else the plain one (a profile an Engaged
+-- fighter can't use has no box of its own: its weapon's diamond turns red
+-- when none of its profiles can be used).
+local function profileView(i, pi, p)
+    local S, g = LAY.popS, popupGeom(weaponAt(i))
+    local ammo = ammoLook(weaponAt(i), p)
+    local line = traitLine(p, weaponAt(i))
+    local v = {
+        box    = ammo.box,
+        melee  = isMelee(p),
+        rapidFire = hasRapidFire(p),
+        combi  = TRAIT_RULES.combi(p),   -- its row reports hovers (BS on Combi)
+        mode   = profileMode(p),
+        traits = TRAIT_RULES.traitLines(line, g),
+    }
+    v.aim = TRAIT_RULES.aimView(i, pi, p, v.mode)       -- Aimed Shot on ATK / RF
+    -- a line with a marked trait in it (TRAIT_RULES.MARKED) is drawn in
+    -- pieces (ptseg_<i>_<pi>_<n>), the plain lines then empty
+    v.segs = TRAIT_RULES.segments(p, v.traits, weaponAt(i))
+    for _, s in ipairs(v.segs or {}) do
+        s.color = s.mark and TRAIT_RULES.markInk(p, s.mark, weaponAt(i)) or v.traits.color
+    end
+    local t = ammo.text
+    if ammo == AMMO_LOOK.extra then t = string.format("AA(%d)", TRAIT_RULES.extraShots(p)) end
+    if v.melee then
+        local _, label = meleeAttacks(p)
+        v.second = { text = label, color = COL.iconText }
+        t = label
+    else
+        v.second = { text = t, color = COL[ammo.col] }
+    end
+    v.second.size = fitSize(t, g.cellW, g.hd, v.melee and S.valueFont or S.btnFont, true)
+    return v
+end
+
+-- A profile's two buttons (see PROFILE_MODES): ATK in the upper half of its
+-- row, AM (or a melee profile's attacks) in the lower half -- the two cells
+-- between W1 and the stats. `y` is the row's centre, `ox` / `oy` the popup
+-- panel's centre (children are placed from it).
+local function profileButtonsXml(i, pi, v, y, ox, oy)
+    local S, g = LAY.popS, popupGeom(weaponAt(i))
+    local tag  = function(t) return string.format("%s_%d_%d", t, i, pi) end
+    local cx   = g.cellL + g.cellW / 2 - ox
+    local up, down = y + g.hd / 2 - oy, y - g.hd / 2 - oy
+    -- the labels sit in a clear panel over the ATK cell, placed from its
+    -- middle, so Aimed Shot's sign can move them sideways (see aimView)
+    local labels = { string.format('<Panel rectAlignment="MiddleCenter" offsetXY="%s" width="%g"' ..
+        ' height="%g" color="%s" raycastTarget="false">', xyAttr(cx, up), g.cellW, g.hd, COL.clear) }
+    local aim = v.aim
+    for k, m in ipairs(PROFILE_MODES) do
+        if k == 1 or v.rapidFire then
+            -- the short name, sized like the AM label below it
+            labels[#labels + 1] = textXml{ id = tag("pmode") .. "_" .. k, x = aim.modes[k].x, y = 0,
+                w = g.cellW, h = g.hd, text = m.short, color = aim.color, size = aim.modes[k].size,
+                extra = string.format(' active="%s"', tostring(k == v.mode)) }
+        end
+    end
+    if not v.melee then                        -- Aimed Shot's sign
+        labels[#labels + 1] = textXml{ id = tag("paimSign"), x = aim.signX, y = 0, w = g.cellW, h = g.hd,
+            text = TRAIT_RULES.AIM_SIGN, color = COL.valueUp, size = aim.signSize,
+            extra = string.format(' active="%s"', tostring(aim.on)) }
+    end
+    labels[#labels + 1] = "</Panel>"
+    -- the green edge round the cell on Aimed Shot, under the labels
+    local edge = not v.melee and string.format('<Panel id="%s" active="%s" rectAlignment="MiddleCenter"' ..
+        ' offsetXY="%s" width="%g" height="%g" color="%s" raycastTarget="false">%s</Panel>',
+        tag("paimEdge"), tostring(aim.on), xyAttr(cx, up), g.cellW, g.hd, COL.clear,
+        edgeFrameXml(0, 0, g.cellW, g.hd, S.aimEdge, COL.valueUp)) or nil
+    local second = textXml{ id = tag("psecond"), x = cx, y = down, w = g.cellW, h = g.hd,
+        text = v.second.text, size = v.second.size, color = v.second.color }
+    -- ATK always reports hovers (A / C show what it would spend), and a
+    -- ranged profile's AM (its Reload, while OUT); the rest of a Combi row
+    -- too (BS on Combi)
+    local function cell(id, cy, inner, under, hover)
+        return layeredButton{ id = id, size = g.hd, w = g.cellW, x = cx, y = cy,
+            bgAsset = "action_bg", under = under, inner = inner, onClick = "onProfileButton",
+            onEnter = hover and "onProfileEnter" or nil, onExit = hover and "onProfileExit" or nil }
+    end
+    return cell(tag("patk"), up, table.concat(labels), edge, true)
+        .. cell(tag(v.melee and "pcnt" or "pammo"), down, second, nil, v.combi or not v.melee)
+end
+
+-- A name split into two lines at the space that best balances them, or nil
+-- when it has no space.
+local function splitTwo(s)
+    local best, bestA, bestB
+    for i in s:gmatch("() ") do
+        local a, b = s:sub(1, i - 1), s:sub(i + 1)
+        local worse = math.max(textEm(a), textEm(b))
+        if a ~= "" and b ~= "" and (not best or worse < best) then best, bestA, bestB = worse, a, b end
+    end
+    return bestA, bestB
+end
+
+-- The popup for one weapon slot, wrapped round W1. One row per profile,
+-- each as tall as W1 tip to tip, stacked and centred on W1: two button
+-- cells -- ATK over AM -- then a gold-edged stats box, numbers over
+-- traits. The cells' left edges run along W1's right edges and, with more
+-- profiles, carry on along the same lines. Above the rows, one header row:
+-- the weapon's name over the cells, the column names over the stats.
+--   TTS draws only rectangles and turned squares, so the slanted edges are
+-- built: the background sits behind the diamonds, and W1 itself cuts the
+-- slants along its edges; further out, turned squares fill the slants.
+local function weaponPopupXml(index, weapon)
+    if not weapon then return "" end              -- an empty slot has no popup
+    -- W1-W3's popups wrap round W1; an extra weapon's round its own diamond,
+    -- below W1 -- the same popup, moved down by `dy`
+    local dy = index > #LAY.weaponSpots and LAY.weaponSpot(index).y or 0
+    local S, g     = LAY.popS, popupGeom(weapon)
+    local profiles = weapon.profiles or {}
+    local n        = #profiles
+    local title    = (TRAIT_RULES.named(weapon))      -- without its accessories: those go with the traits
+
+    local hd, tip, wx = g.hd, g.tip, LAY.weaponX
+    local line     = S.border
+
+    -- Card-unit extents.
+    local rowsTop  = n * hd
+    local right    = g.div + g.boxW + S.pad
+    local colY     = rowsTop + S.headGap + S.headH / 2
+    local nameY    = colY
+    local top      = colY + S.headH / 2 + S.headTop
+    local bottom   = n > 0 and -rowsTop - S.pad or -S.pad
+    local left     = tip
+    local ox, oy   = (left + right) / 2, (top + bottom) / 2
+    local function at(x, y) return x - ox, y - oy end
+
+    -- The turned squares that fill the slants beyond W1: one at W1's tip
+    -- line every 2 * hd, each wholly inside the rows.
+    local slants = {}
+    for y = hd, rowsTop - hd + 1e-6, 2 * hd do
+        slants[#slants + 1] = y
+        slants[#slants + 1] = -y
+    end
+    local filled = (#slants > 0 and slants[#slants - 1] or 0) + hd   -- slants reach this high
+
+    -- The left edge at height y: W1's edges, carried on as a zigzag (tip at
+    -- even multiples of hd, W1's centre line at odd ones) -- as far as the
+    -- slants reach; beyond them (the outermost half-rows of 3+ profiles) the
+    -- edge is straight, at the tip.
+    local function edgeX(y)
+        if n == 0 or math.abs(y) > filled + 1e-6 then return tip end
+        local m = (math.abs(y) % (2 * hd)) / hd
+        return wx + hd * math.abs(1 - m)
+    end
+
+    -- ---- background (behind the diamonds) ----
+    local bg = {}
+    local function rect(x0, x1, y0, y1)
+        bg[#bg + 1] = string.format(
+            '<Image rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"' ..
+            ' color="%s" raycastTarget="false" />',
+            xyAttr((x0 + x1) / 2, (y0 + y1) / 2), x1 - x0, y1 - y0, COL.popupBg)
+    end
+    if n == 1 then
+        -- one profile: no slants, so one rectangle from W1's centre line
+        -- does it all -- the header, the row and the margin under it alike
+        rect(wx, right, bottom, top)
+    else
+        if n > 0 then
+            rect(tip, right, bottom, rowsTop)                -- the rows, right of W1's tip
+            rect(wx, tip, -hd, hd)                           -- behind W1: it cuts the slants
+        end
+        -- the header row, reaching down to the bottom of the top row's ATK cell
+        rect(n > 0 and wx or tip, right, n > 0 and rowsTop - hd or bottom, top)
+    end
+    for _, y in ipairs(slants) do                            -- turned squares further out
+        bg[#bg + 1] = string.format(
+            '<Image rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"' ..
+            ' rotation="0 0 45" color="%s" raycastTarget="false" />',
+            xyAttr(tip, y), hd * math.sqrt(2), hd * math.sqrt(2), COL.popupBg)
+    end
+    -- the rule between each row's ATK and AM cells, from W1's centre line --
+    -- behind W1, so only the part past its tip shows
+    for pi = 1, n do
+        local rowY = (n + 1 - 2 * pi) * hd
+        bg[#bg + 1] = edgeLineXml((wx + g.div) / 2, rowY, g.div - wx, line, 0, COL.profileEdge)
+    end
+    flyoutBgs[#flyoutBgs + 1] = string.format(
+        '<Panel id="pop_%dBg" active="false" rectAlignment="MiddleCenter" offsetXY="0 %.1f"' ..
+        ' width="%d" height="%d" color="%s" raycastTarget="false">%s</Panel>',
+        index, dy, LAY.cardW, LAY.cardH, COL.clear, table.concat(bg))
+
+    -- ---- content (over the diamonds) ----
+    local parts = {}
+    local function hline(x0, x1, y, thick)                   -- a gold rule
+        local cx, cy = at((x0 + x1) / 2, y)
+        parts[#parts + 1] = edgeLineXml(cx, cy, x1 - x0, thick or line, 0, COL.profileEdge)
+    end
+    local function slant(x0, y0, x1, y1)                     -- a gold rule along a slant
+        local cx, cy = at((x0 + x1) / 2, (y0 + y1) / 2)
+        parts[#parts + 1] = edgeLineXml(cx, cy, math.sqrt((x1 - x0) ^ 2 + (y1 - y0) ^ 2), line,
+            (y1 - y0) * (x1 - x0) > 0 and 45 or -45, COL.profileEdge)
+    end
+
+    -- Header row: the weapon's name over the cells (from W1's centre line,
+    -- clear of W2), the column names over the stats.
+    local nameL = n > 0 and wx or tip
+    local nameW = (n > 0 and g.div or right - S.pad) - nameL
+    local unstable = false
+    for _, p in ipairs(profiles) do unstable = unstable or hasTrait(p, TRAIT.unstable) end
+    -- A warning sign in front of the name of an Unstable weapon -- the
+    -- plain text sign (U+26A0), not the emoji: its variation selector
+    -- (U+FE0F) opens a wide gap in TTS and pushes the sign out of the
+    -- panel. Fitted with the name, but drawn as its own text
+    -- (ptitleWarn_<i>, see `emit`).
+    local warn = "⚠"
+    if unstable then title = warn .. " " .. title end
+    -- A long name takes two lines, using the whole strip above the rows --
+    -- when that lets it be noticeably bigger. The panel's size never changes.
+    -- The name may use nameFit of its width (fitSize alone keeps FIT).
+    local stripH = top - rowsTop
+    local function fit(s, w, h) return fitSize(s, w * S.nameFit / FIT, h, S.titleFont, true) end
+    local function fitName(w)
+        local one = fit(title, w, S.headH)
+        local a, b = splitTwo(title)
+        if a then
+            local two = math.min(fit(a, w, stripH / 2), fit(b, w, stripH / 2))
+            if two > one * 1.1 then return { a, b }, two end
+        end
+        return { title }, one
+    end
+    local lines, size = fitName(nameW)
+    local nameX, textW = nameL + nameW / 2, nameW
+    -- One text per line: TTS's own line spacing is too loose, and each line
+    -- as its own text puts them exactly nameLeading font sizes apart,
+    -- centred on the strip. ptitle_<i> is the first line, ptitle_<i>_2 the
+    -- second. A line starting with the warning sign puts the sign in its own
+    -- text right before the name, the pair centred together, so however
+    -- wide TTS draws the sign it can't move the name or leave a gap.
+    local function emit(id, l, y, h)
+        local x = nameX
+        if l:sub(1, #warn + 1) == warn .. " " then
+            l = l:sub(#warn + 2)
+            local sw, gap, nw = textWidth(warn, size, true), textWidth(" ", size, true), textWidth(l, size, true)
+            local left = nameX - (sw + gap + nw) / 2
+            local sx, sy = at(left + sw / 2, y)
+            parts[#parts + 1] = textXml{ id = "ptitleWarn_" .. index, x = sx, y = sy, w = size * 1.5,
+                h = h, text = warn, color = COL.accent, size = size }
+            x = left + sw + gap + nw / 2
+        end
+        local tx, ty = at(x, y)
+        parts[#parts + 1] = textXml{ id = id, x = tx, y = ty, w = textW, h = h, text = l,
+            color = COL.accent, size = size }
+    end
+    if #lines == 1 then
+        emit("ptitle_" .. index, lines[1], nameY, S.headH)
+    else
+        local pitch = size * S.nameLeading
+        for k, l in ipairs(lines) do
+            emit("ptitle_" .. index .. (k == 1 and "" or "_2"), l,
+                (rowsTop + top) / 2 + (k == 1 and 1 or -1) * pitch / 2, stripH / 2)
+        end
+    end
+    if n > 0 then
+        for i, col in ipairs(PROFILE_COLS) do
+            if g.shown[i] then
+                local hx, hy = at(g.div + g.colX[i], colY)
+                parts[#parts + 1] = textXml{ id = string.format("phead_%d_%d", index, i),
+                    x = hx, y = hy, w = g.need[i], h = S.headH, text = col.key,
+                    color = COL.popupHead, size = fitSize(col.key, g.need[i], S.headH, S.headFont, true) }
+            end
+        end
+    end
+
+    -- The rows.
+    for pi, p in ipairs(profiles) do
+        local v, inner = profileView(index, pi, p), {}
+        local rowY = (n + 1 - 2 * pi) * hd
+        local bx   = g.div + g.boxW / 2              -- the stats box's centre ...
+        local lx   = g.div                           -- ... and its left edge
+
+        -- a rule between the numbers and the traits
+        inner[#inner + 1] = edgeLineXml(lx + g.areaX - bx, 0, g.areaW, line, 0, COL.profileEdge)
+        -- Marksman's sign between SR and LR, under their buttons
+        local rv = TRAIT_RULES.rangeView(weapon, p, g)
+        if rv then
+            inner[#inner + 1] = textXml{ id = string.format("prange_%d_%d", index, pi), x = rv.x, y = hd / 2,
+                w = rv.w, h = hd, text = TRAIT_RULES.RANGE_SIGN, color = COL.marksman, size = rv.size,
+                extra = string.format(' active="%s" raycastTarget="false"', tostring(rv.on)) }
+        end
+        for i, col in ipairs(PROFILE_COLS) do
+            if g.shown[i] and showsCol(p, col.key) then
+                local val, tint = TRAIT_RULES.value(weapon, p, col.key)
+                inner[#inner + 1] = textXml{ id = string.format("pval_%d_%d_%d", index, pi, i),
+                    x = lx + g.colX[i] - bx, y = hd / 2, w = g.need[i], h = hd, text = val,
+                    color = tint, size = fitSize(val, g.need[i], hd, S.valueFont, true) }
+                if col.key == "Hit" then   -- a button over it: +1 / -1
+                    -- inside the box's edges: the value's column, and as
+                    -- much of the box's padding as its border leaves
+                    local bw = g.need[i] + 2 * math.max(0, S.boxPad - S.border)
+                    -- the green edge round it while re-rolls to hit are set
+                    inner[#inner + 1] = string.format('<Panel id="phitEdge_%d_%d" active="%s"' ..
+                        ' rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f" color="%s"' ..
+                        ' raycastTarget="false">%s</Panel>', index, pi,
+                        tostring(TRAIT_RULES.reroll[weapon] ~= nil), xyAttr(lx + g.colX[i] - bx, hd / 2), bw,
+                        hd - 2 * S.border, COL.clear,
+                        edgeFrameXml(0, 0, bw, hd - 2 * S.border, S.aimEdge, COL.valueUp))
+                    inner[#inner + 1] = string.format(
+                        '<Button id="phit_%d_%d" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+                        ' height="%.1f" colors="%s|%s|%s|%s" onClick="onHitClick" onMouseEnter="onHitEnter"' ..
+                        ' onMouseExit="onHitExit" />', index, pi,
+                        xyAttr(lx + g.colX[i] - bx, hd / 2), bw, hd - 2 * S.border, COL.clear, COL.hover,
+                        COL.press, COL.clear)
+                elseif TRAIT_RULES.adjustable(p, col.key) then
+                    -- any other value that can be adjusted (TRAIT_RULES.ADJ):
+                    -- a button over it, one better / one worse, reaching
+                    -- halfway to the next column -- or, at the box's ends, as
+                    -- far as its border leaves (a Combi row reports hovers)
+                    local function reach(dir)
+                        for j = i + dir, dir > 0 and #PROFILE_COLS or 1, dir do
+                            if g.shown[j] then return S.colGap / 2 end
+                        end
+                        return math.max(0, S.boxPad - S.border)
+                    end
+                    local l, r = reach(-1), reach(1)
+                    inner[#inner + 1] = string.format(
+                        '<Button id="padj_%d_%d_%d" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+                        ' height="%.1f" colors="%s|%s|%s|%s" onClick="onProfileStatClick"%s />', index, pi, i,
+                        xyAttr(lx + g.colX[i] - bx + (r - l) / 2, hd / 2), g.need[i] + l + r,
+                        hd - 2 * S.border, COL.clear, COL.hover, COL.press, COL.clear,
+                        v.combi and ' onMouseEnter="onProfileEnter" onMouseExit="onProfileExit"' or "")
+                end
+            end
+        end
+        local tr = v.traits           -- one line, or two (see TRAIT_RULES.traitLines)
+        inner[#inner + 1] = textXml{ id = string.format("ptraits_%d_%d", index, pi),
+            x = 0, y = tr.y, w = g.traitW, h = tr.h, text = v.segs and "" or tr.text,
+            color = tr.color, style = "BoldItalic", size = tr.size }
+        inner[#inner + 1] = textXml{ id = string.format("ptraits2_%d_%d", index, pi),
+            x = 0, y = tr.y2, w = g.traitW, h = tr.h, text = v.segs and "" or tr.text2,
+            color = tr.color, style = "BoldItalic", size = tr.size }
+        -- ... or in pieces, each marked trait in its own colour; Reliable
+        -- with a clear button over it (left click: used / ready again)
+        -- (as many as any re-roll setting needs: those not used now empty)
+        for n = 1, TRAIT_RULES.segRoom(weapon, p, g) do
+            local s = v.segs and v.segs[n] or { x = 0, y = tr.y, w = 0, h = tr.h, text = "", color = tr.color }
+            inner[#inner + 1] = textXml{ id = string.format("ptseg_%d_%d_%d", index, pi, n),
+                x = s.x, y = s.y, w = s.w / FIT + 2, h = s.h, text = s.text,
+                color = s.color, style = "BoldItalic", size = tr.size }
+            if s.mark == TRAIT.reliable then
+                inner[#inner + 1] = string.format(
+                    '<Button id="prelBtn_%d_%d" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f"' ..
+                    ' height="%.1f" colors="%s|%s|%s|%s" onClick="onReliableClick" />', index, pi,
+                    xyAttr(s.x, s.y), s.w + 8, s.h, COL.clear, COL.hover, COL.press, COL.clear)
+            end
+        end
+        local bxl, byl = at(bx, rowY)
+        parts[#parts + 1] = edgedBox(string.format("prof_%d_%d", index, pi), bxl, byl,
+            g.boxW, 2 * hd, v.box, table.concat(inner), v.combi)
+
+        -- the rule on top of the row (the last row's bottom too), matching
+        -- the stats boxes' edges, which lie just inside each box: the
+        -- outermost rules sit just inside the rows, and between two rows
+        -- the rule is both boxes' edges, twice as thick, on the boundary.
+        -- The one between ATK and AM is in the background, behind W1.
+        if pi == 1 then
+            hline(edgeX(rowY + hd - line / 2), g.div, rowY + hd - line / 2)
+        else
+            hline(edgeX(rowY + hd), g.div, rowY + hd, 2 * line)
+        end
+        if pi == n then hline(edgeX(rowY - hd + line / 2), g.div, rowY - hd + line / 2) end
+        parts[#parts + 1] = profileButtonsXml(index, pi, v, rowY, ox, oy)
+    end
+
+    -- the slanted outer edges, where W1 isn't there to draw them
+    for _, y in ipairs(slants) do
+        local s = y > 0 and 1 or -1
+        slant(wx, y, tip, y + s * hd)
+        if math.abs(y) > hd then slant(wx, y, tip, y - s * hd) end
+    end
+
+    return string.format(
+        '<Panel id="pop_%d" active="false" rectAlignment="MiddleCenter" offsetXY="%s"' ..
+        ' width="%.1f" height="%.1f" color="%s" onMouseEnter="onFlyoutEnter"' ..
+        ' onMouseExit="onFlyoutExit">%s</Panel>',
+        index, xyAttr(ox, oy + dy), right - left, top - bottom, COL.clear, table.concat(parts))
+end
+
+-- Whose copies of the card to build: with billboard on, one per seated
+-- player (limited to CFG.visibility when that is set), each shown only to
+-- that player; otherwise -- or with nobody seated -- one shared copy, "all".
+local function wantedViewers()
+    if CFG.billboard then
+        local allowed = CFG.visibility ~= "" and ("|" .. CFG.visibility .. "|") or nil
+        local keys = {}
+        for _, p in ipairs(Player.getPlayers()) do
+            if p.seated and (not allowed or allowed:find("|" .. p.color .. "|", 1, true)) then
+                keys[#keys + 1] = p.color
+            end
+        end
+        if #keys > 0 then table.sort(keys); return keys end
+    end
+    return { "all" }
+end
+
+-- The player a copy turns to face ("all": the first player there is).
+local function facingPlayer(key)
+    if key == "all" then return Player.getPlayers()[1] end
+    local p = Player[key]
+    if p and p.seated then return p end
+end
+
+-- The yaw that turns a copy's front to player p, or nil while that can't be
+-- read: a player's pointer doesn't always exist (joining, loading, a hand
+-- not yet spawned), and asking for its rotation then throws a C# "Object
+-- reference not set to an instance of an object". `own`: the model's own
+-- yaw, when the caller has it.
+local function yawFor(p, own)
+    local ok, r = pcall(function() return p.getPointerRotation() end)
+    if not ok or type(r) ~= "number" then return nil end
+    return ((own or self.getRotation().y) - r) % 360 + CFG.faceOffset
+end
+
+-- An angle difference folded into -180..180.
+local function wrapAngle(d) return ((d + 180) % 360) - 180 end
+
+-- The frame and trim art the appearance calls for, as asset names (nil:
+-- none). A URL is registered as "looks_frame" / "looks_trim"; anything
+-- else ("none", the default, or blank) is no art.
+local function looksArt()
+    local function pick(value, dyn)
+        if value:match("^https?://") then dynamicAssets[dyn] = value return dyn end
+        dynamicAssets[dyn] = nil
+        return nil
+    end
+    return pick(looks.frame, "looks_frame"), pick(looks.trim, "looks_trim")
+end
+
+-- The model's height (see section 10b), used here to float the card.
+local modelHeight
+
+-- Where every copy of the card goes and how big it is: the root panel's
+-- position and the inner panel's scale, as TTS attribute strings. The size
+-- is CFG.scale divided by the model's scale (the mean of x and z), so the
+-- card looks the same on any model. The height is the model's own
+-- (fighter.height, in its local units, so a rescale carries it along) plus
+-- CFG.headGap and the tilted card's lower half, clear of the head -- or
+-- CFG.position's while it is unknown -- and then as much higher or lower
+-- as it was moved by hand (fighter.lift, inches; see setLift).
+local function placement()
+    local ok, s = pcall(function() return self.getScale() end)
+    local sx, sy, sz = 1, 1, 1
+    if ok and s then
+        sx, sy, sz = tonumber(s.x or s[1]) or 1, tonumber(s.y or s[2]) or 1, tonumber(s.z or s[3]) or 1
+    end
+    local k = math.max(0.01, (math.abs(sx) + math.abs(sz)) / 2)
+    sy = math.max(0.01, math.abs(sy))
+    local c, p = {}, {}
+    for n in CFG.scale:gmatch("[%d.%-]+") do c[#c + 1] = tonumber(n) / k end
+    for n in CFG.position:gmatch("[%d.%-]+") do p[#p + 1] = tonumber(n) end
+    local h = tonumber(fighter.height)
+    if h then
+        local lift = LAY.cardH / 2 * c[2] * math.abs(math.sin(math.rad(CFG.standAngle)))
+        p[3] = -((h + CFG.headGap / sy) * 100 + lift)       -- 100 UI units per local unit
+    end
+    p[3] = p[3] - (tonumber(fighter.lift) or 0) / sy * 100
+    return string.format("%.1f %.1f %.1f", p[1], p[2], p[3]),
+           string.format("%.4f %.4f %.4f", c[1], c[2], c[3])
+end
+
+-- The fighter's name as it stands above the card: its rank's symbol
+-- (`sym`, none for an unknown rank; CFG.rankScale times the name's size), a
+-- space and the name -- CFG.groupMark after it while the fighter is group
+-- activated (see setGroupActivated) -- fitted into LAY.nameW together and
+-- centred as one. `copies`: the texts drawn for each, { the id's ending,
+-- how far off across, up } -- its drop shadow and the four corners of its
+-- rim, then the text itself. `arrowX`, `arrowD`: how far from the middle
+-- the arrows beside it sit (LAY.nameArrowGap clear of its ends), and
+-- their size. The builder and ui.drawName share it.
+function ui.nameView()
+    local nameH = LAY.nameFont * 1.25
+    local name  = fighter.name or ""
+    if fighter.grouped and (CFG.groupMark or "") ~= "" then name = name .. " " .. CFG.groupMark end
+    local sym   = CFG.rankSymbols[tostring(fighter.rank or ""):lower()]
+    local k     = CFG.rankScale
+    local function across(size)          -- the symbol, a space and the name
+        if not sym then return 0, 0, textWidth(name, size, true) end
+        return textWidth(sym, size * k, true), textWidth(" ", size, true), textWidth(name, size, true)
+    end
+    local s1, g1, n1 = across(1)
+    local size = math.min(LAY.nameFont, nameH / 1.2, LAY.nameW * FIT / math.max(s1 + g1 + n1, 1e-6))
+    local symW, gap, nmW = across(size)
+    local left = -(symW + gap + nmW) / 2
+    local sd, ol = LAY.nameShadow * LAY.nameFont, LAY.nameOutline * LAY.nameFont
+    local copies = {}
+    if sd > 0 then copies[#copies + 1] = { "Shadow", sd, -sd } end
+    if ol > 0 then
+        for i, c in ipairs({ { -1, 1 }, { 1, 1 }, { -1, -1 }, { 1, -1 } }) do
+            copies[#copies + 1] = { "Rim_" .. i, c[1] * ol, c[2] * ol }
+        end
+    end
+    copies[#copies + 1] = { "", 0, 0 }      -- the text itself, last
+    local ad = LAY.nameArrow * LAY.nameFont
+    return { name = name, sym = sym, size = size, symSize = size * k, h = nameH,
+             y = LAY.cardH / 2 + LAY.nameGap + nameH / 2, w = symW + gap + nmW,
+             nameX = left + symW + gap + nmW / 2, symX = left + symW / 2, copies = copies,
+             arrowD = ad, arrowX = (symW + gap + nmW) / 2 + LAY.nameArrowGap + ad * 1.25 / 2 }
+end
+
+-- The arrows either side of the name (CFG.nameArrows: down on the left,
+-- up on the right), in the clear container nameArrows, hidden until the
+-- cursor is on the name (see onNameEnter): each a glyph in the name's
+-- colour over its shadow (name<Dir>Txt, name<Dir>Shadow) under a clear
+-- button with the usual hover tint (nameDown / nameUp -> onNameArrow),
+-- which keeps the arrows shown while the cursor is on it.
+function ui.arrowsXml(nv)
+    local box, sd = nv.arrowD * 1.25, LAY.nameShadow * nv.arrowD
+    local out = { string.format('<Panel id="nameArrows" active="false" rectAlignment="MiddleCenter" offsetXY="%s"' ..
+        ' width="%.1f" height="%.1f" color="%s" raycastTarget="false">', xyAttr(0, nv.y),
+        LAY.nameW + 2 * (LAY.nameArrowGap + box), nv.h, COL.clear) }
+    for _, a in ipairs({ { "nameDown", -1, CFG.nameArrows.down }, { "nameUp", 1, CFG.nameArrows.up } }) do
+        local x = a[2] * nv.arrowX
+        out[#out + 1] = textXml{ id = a[1] .. "Shadow", x = x + sd, y = -sd, w = box, h = box, text = a[3],
+            color = COL.nameShadow, size = nv.arrowD, extra = ' raycastTarget="false"' }
+        out[#out + 1] = textXml{ id = a[1] .. "Txt", x = x, y = 0, w = box, h = box, text = a[3],
+            color = COL.value, size = nv.arrowD, extra = ' raycastTarget="false"' }
+        out[#out + 1] = string.format(
+            '<Button id="%s" rectAlignment="MiddleCenter" offsetXY="%s" width="%.1f" height="%.1f"' ..
+            ' colors="%s|%s|%s|%s" onClick="onNameArrow" onMouseEnter="onNameEnter" onMouseExit="onNameExit" />',
+            a[1], xyAttr(x, 0), box, box, COL.clear, COL.hover, COL.press, COL.clear)
+    end
+    out[#out + 1] = "</Panel>"
+    return table.concat(out)
+end
+
+-- The whole card: the content is built once, then wrapped once per viewer
+-- (see wantedViewers) with every id prefixed by the viewer's key --
+-- "Red_statVal_1" -- so each copy can be changed on its own. Each copy is
+-- two panels: the outer one placed and turned to face its player, the inner
+-- one stood upright and scaled (see placement).
+local function buildXml()
+    -- The flyouts first: building them files their backgrounds (flyoutBgs).
+    -- The Special panels are set up before the rest (SKILL.panels): the
+    -- other actions panels' tabs lead to them.
+    flyoutBgs = {}
+    ui.rawTexts = {}
+    SKILL.panels()
+    SKILL.registerFlyouts()
+    local flyouts = { statusPickerXml(), panelXml("cond") }
+    for _, st in ipairs(STATUSES) do flyouts[#flyouts + 1] = panelXml(actionPanelOf(st.key)) end
+    for _, prefix in ipairs(SKILL.SPECIAL_ORDER) do
+        if PANELS[prefix] then flyouts[#flyouts + 1] = panelXml(prefix) end
+    end
+    registerWeaponFlyouts()
+    for i = 1, weaponCount() do
+        flyouts[#flyouts + 1] = weaponPopupXml(i, weaponAt(i))
+    end
+
+    -- Three clear layers the size of the card: cardBack (the frame, glow,
+    -- click blocker and the flyouts' backgrounds), cardHead (the health bar
+    -- and the name) and cardBody (everything else). A right click on the
+    -- name hides the first and last on that player's copy (view.compact,
+    -- see ui.setCompact): just the name and the health bar, on a black
+    -- plate (hpBack) and moved down by LAY.compactDrop. Each copy fills in
+    -- its own @@FULL@@, @@COMPACT@@ and @@HEADXY@@ (see the copies below).
+    local function layer(id)
+        return string.format('<Panel id="%s" active="@@FULL@@" rectAlignment="MiddleCenter" width="%d"' ..
+            ' height="%d" color="%s" raycastTarget="false">', id, LAY.cardW, LAY.cardH, COL.clear)
+    end
+    local x = { layer("cardBack") }
+
+    -- Background frame art, drawn at the size LAY gives it whatever the
+    -- image's own pixel size: the art the model's appearance names, tinted
+    -- with the background colour unless it says not to, then its trim over it
+    -- in the edges colour. No art (the default): nothing behind the card at
+    -- all.
+    local frameArt, trimArt = looksArt()
+    if frameArt then
+        x[#x + 1] = string.format(
+            '<Image id="frameArt" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g"' ..
+            ' height="%g" color="%s" image="%s" raycastTarget="false" />',
+            LAY.frameX, LAY.frameY, LAY.frameW, LAY.frameH,
+            looks.tint == "no" and "#FFFFFFff" or COL.frame, frameArt)
+    end
+    if trimArt then
+        x[#x + 1] = string.format(
+            '<Image id="frameTrim" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g"' ..
+            ' height="%g" color="%s" image="%s" raycastTarget="false" />',
+            LAY.frameX, LAY.frameY, LAY.frameW, LAY.frameH, COL.frameTrim, trimArt)
+    end
+    -- the status glow round the card's outline (see ui.glowColor)
+    if ui.glowing() then
+        x[#x + 1] = string.format(
+            '<Image id="statusGlow" rectAlignment="MiddleCenter" offsetXY="%g 0" width="%g"' ..
+            ' height="%g" color="%s" image="status_glow" raycastTarget="false" />',
+            (LAY.glowL + LAY.glowR) / 2, LAY.glowR - LAY.glowL, LAY.glowH, ui.glowColor())
+    end
+    -- the chevrons either side while the fighter is activated
+    x[#x + 1] = ui.activeXml()
+
+    -- Click blocker: behind everything interactive, but it still catches a
+    -- click that misses a button, so it can't fall through. With no
+    -- background art it is the stats' own panel, in the background colour,
+    -- so they don't float on the table; under frame art it is invisible.
+    x[#x + 1] = string.format(
+        '<Panel id="clickBlock" rectAlignment="MiddleCenter" width="%g" height="%g"' ..
+        ' color="%s" raycastTarget="true" />',
+        LAY.blockW, LAY.blockH, frameArt and COL.clear or COL.frame)
+    -- With no background art, the skills' band (C's centre down to its
+    -- bottom tip, between C and W3, whose slants hide its corners) gets a
+    -- plate of its own so the names stand out: the dice panel's black --
+    -- which the stats above it wear while dice show -- or, with the
+    -- hp_segment art set, that gradient (like the actions' strips) in
+    -- COL.skillBack, near black.
+    if not frameArt then
+        local grad = hasAsset("hp_segment")
+        x[#x + 1] = string.format(
+            '<Image id="skillBack" rectAlignment="MiddleCenter" offsetXY="0 %.1f" width="%g" height="%.1f"' ..
+            ' color="%s"%s raycastTarget="false" />',
+            -(LAY.sideY + halfDiag(LAY.sideD) / 2), 2 * LAY.sideX, halfDiag(LAY.sideD),
+            grad and COL.skillBack or COL.dicePanel, imgAttr("hp_segment"))
+    end
+
+    -- The flyouts' backgrounds, behind everything on the card but the frame.
+    x[#x + 1] = table.concat(flyoutBgs)
+    x[#x + 1] = "</Panel>"                    -- cardBack
+
+    x[#x + 1] = string.format('<Panel id="cardHead" rectAlignment="MiddleCenter" offsetXY="@@HEADXY@@" width="%d"' ..
+        ' height="%d" color="%s" raycastTarget="false">', LAY.cardW, LAY.cardH, COL.clear)
+    local e = LAY.compactEdge
+    x[#x + 1] = string.format('<Image id="hpBack" active="@@COMPACT@@" rectAlignment="MiddleCenter" offsetXY="0 %g"' ..
+        ' width="%g" height="%g" color="%s" raycastTarget="false" />', LAY.hpY, LAY.hpW + 2 * e, LAY.hpH + 2 * e,
+        COL.hpBack)
+    x[#x + 1] = hpBarXml()
+
+    -- the fighter's name centred above the card, its rank's symbol in front
+    -- (fighterRank: its own text, rankScale times the name's size -- TTS
+    -- shows rich-text size tags as text), both in the text colour over
+    -- their shadow and rim: dark copies of the text, offset, drawn first --
+    -- as sharp as the name itself (a Unity shadow/outline effect hazes at
+    -- range). The pair is fitted into nameW together and centred as one
+    -- (see ui.nameView).
+    local nv = ui.nameView()
+    for _, c in ipairs(nv.copies) do
+        local col = c[1] == "" and COL.value or COL.nameShadow
+        if nv.sym then
+            x[#x + 1] = textXml{ id = "fighterRank" .. c[1], x = nv.symX + c[2], y = nv.y + c[3], w = LAY.nameW,
+                h = nv.h, text = nv.sym, color = col, size = nv.symSize, extra = ' raycastTarget="false"' }
+        end
+        x[#x + 1] = textXml{ id = "fighterName" .. c[1], x = nv.nameX + c[2], y = nv.y + c[3], w = LAY.nameW,
+            h = nv.h, text = nv.name, color = col, size = nv.size, extra = ' raycastTarget="false"' }
+    end
+    -- a clear button over the name: a right click there toggles the
+    -- compact card (onNameClick), and the cursor on it shows the arrows
+    -- beside the name that raise and lower the card (ui.arrowsXml)
+    x[#x + 1] = string.format(
+        '<Button id="nameBtn" rectAlignment="MiddleCenter" offsetXY="%s" width="%g" height="%g"' ..
+        ' colors="%s|%s|%s|%s" onClick="onNameClick" onMouseEnter="onNameEnter" onMouseExit="onNameExit" />',
+        xyAttr(0, nv.y), nv.w, nv.h,                    -- the pair is centred
+        COL.clear, COL.clear, COL.clear, COL.clear)
+    x[#x + 1] = ui.arrowsXml(nv)
+    x[#x + 1] = "</Panel>"                    -- cardHead
+    x[#x + 1] = layer("cardBody")
+    x[#x + 1] = conditionBarXml()             -- under the card
+    x[#x + 1] = SKILL.barXml()                -- skills and wargear, under the stats
+    x[#x + 1] = statBlockXml(TRAIT_RULES.saveContext())   -- as drawStats will: Shield / Parry
+    x[#x + 1] = ACTIVATION.panelXml()         -- Out of Action / Recovery Test, over the stats
+    x[#x + 1] = SKILL.infosXml()              -- a hovered name's panel, the same place
+    x[#x + 1] = ACTIVATION.diceXml()          -- a roll's dice, over those
+
+    -- Left diamonds: S alone on the point (A's size, growing while its
+    -- picker is open), with the A / C pair stacked inboard of it. All three
+    -- open flyouts. Every one of the card's diamonds wears the
+    -- diamond_frame art (tinted accent) as its border, over its fill and
+    -- lit fill, under its icon.
+    local triggers = { onClick = "onTriggerClick", onEnter = "onTriggerEnter", onExit = "onTriggerExit" }
+    local function trigger(o)
+        for k, v in pairs(triggers) do o[k] = v end
+        o.frame = "diamond_frame"
+        if o.label then o.labelSize, o.labelD = LAY.diamondLabel(o.label, o.size), o.size end
+        return diamond(o)
+    end
+    -- A diamond's fill over its plain one and under its icon: S's green
+    -- "ready to activate" (readyGlow_S), A's and C's "action to use"
+    -- (readyGlow_1 / _2) -- all switched by drawReady -- and a weapon's red
+    -- "can't be used now" (blockedGlow_<i>, drawGlows -- yellow while its
+    -- Combi volley is under way, see TRAIT_RULES.glow): the one white
+    -- gradient, ASSETS diamond, tinted `col` -- or, until it is set, a flat
+    -- darker shade of `col` (the art's middle is about `col`, its tips far
+    -- darker). Built as things stand. `d`: its side (A's size unless given).
+    local function glowXml(id, on, gx, gy, col, d)
+        d = d or LAY.sideD
+        return string.format(
+            '<Image id="%s" active="%s" rectAlignment="MiddleCenter" offsetXY="%g %g"' ..
+            ' width="%g" height="%g" rotation="0 0 45" color="%s"%s raycastTarget="false" />',
+            id, tostring(on), gx, gy, d, d, ACTIVATION.litColor(col), imgAttr("diamond"))
+    end
+    -- S in a container of its own (statusBox), A's size at rest: the
+    -- container is scaled up while its picker is open (ui.growStatus)
+    x[#x + 1] = string.format(
+        '<Panel id="statusBox" rectAlignment="MiddleCenter" offsetXY="%s" width="%g" height="%g"' ..
+        ' scale="1 1 1" color="%s" raycastTarget="false">', xyAttr(-LAY.statusRestX, 0), LAY.sideD, LAY.sideD, COL.clear)
+    x[#x + 1] = trigger{ id = "btnStatus", size = LAY.sideD, x = 0, y = 0,
+        under = glowXml("readyGlow_S", fighter.activation == "ready", 0, 0, COL.ready, LAY.sideD) ..
+            string.format('<Image id="statusFill_S" active="false" rectAlignment="MiddleCenter" width="%g"' ..
+            ' height="%g" rotation="0 0 45" color="%s"%s raycastTarget="false" />', LAY.sideD, LAY.sideD,
+            ui.statusFill(statusDef(fighter.status)), imgAttr("diamond")),
+        inner = statusIconsXml() }
+    x[#x + 1] = "</Panel>"
+    local function glow(n)
+        local on, lost = ACTIVATION.readyLook(n)
+        return glowXml("readyGlow_" .. n, on, -LAY.sideX, n == 1 and LAY.sideY or -LAY.sideY,
+            lost or statusDef(fighter.status).color:sub(1, 7) .. "ff")
+    end
+    -- A shows the fighter's type (ASSETS type_<category>) once its art is set
+    local typeIcon = fighter.category and "type_" .. tostring(fighter.category)
+    x[#x + 1] = trigger{ id = "btnActions", size = LAY.sideD, x = -LAY.sideX, y = LAY.sideY, under = glow(1),
+        icon = (typeIcon and hasAsset(typeIcon)) and typeIcon or "menu_actions", label = "A" }
+    x[#x + 1] = trigger{ id = "btnConditions", size = LAY.sideD, x = -LAY.sideX, y = -LAY.sideY, under = glow(2),
+        icon = "menu_conditions", label = "C" }
+
+    -- Right diamonds, mirroring the left but all one size. An empty weapon
+    -- slot's diamond is blank and disabled (and has no popup). Weapons past
+    -- the three slots get diamonds below W1 in a container, "moreWeapons",
+    -- shown only while a weapon popup is open (see showFlyout). Over the red
+    -- "blocked" fill (TRAIT_RULES.glow), fxGlow_<i>: lit in a colour while a
+    -- hovered stat is changed by the weapon (see SKILL.drawSources) -- the
+    -- diamond art tinted, see-through enough to keep the icon readable.
+    local function weaponDiamond(i)
+        local w, spot = weaponAt(i), LAY.weaponSpot(i)
+        if w then
+            local kind, glow = weaponType(w), TRAIT_RULES.glow(w)
+            local fx = string.format(
+                '<Image id="fxGlow_%d" active="false" rectAlignment="MiddleCenter" offsetXY="%g %g"' ..
+                ' width="%g" height="%g" rotation="0 0 45" color="%s"%s raycastTarget="false" />',
+                i, spot.x, spot.y, LAY.sideD, LAY.sideD, SKILL.glowColor(COL.valueUp), imgAttr("diamond"))
+            return trigger{ id = "btnWeapon_" .. i, size = LAY.sideD, x = spot.x, y = spot.y,
+                icon = resolveIcon(w.icon, "wpnIcon_" .. i) or "wpn_" .. kind,
+                label = WEAPON_TYPES[kind],
+                under = glowXml("blockedGlow_" .. i, glow ~= nil, spot.x, spot.y,
+                    glow or COL.weaponBlocked) .. fx }
+        end
+        return diamond{ id = "btnWeapon_" .. i, size = LAY.sideD, x = spot.x, y = spot.y,
+            frame = "diamond_frame", disabled = true }
+    end
+    for i = 1, #LAY.weaponSpots do x[#x + 1] = weaponDiamond(i) end
+    if weaponCount() > #LAY.weaponSpots then
+        local more = {}
+        for i = #LAY.weaponSpots + 1, weaponCount() do more[#more + 1] = weaponDiamond(i) end
+        x[#x + 1] = string.format(
+            '<Panel id="moreWeapons" active="false" rectAlignment="MiddleCenter" width="%d"' ..
+            ' height="%d" color="%s" raycastTarget="false">%s</Panel>',
+            LAY.cardW, LAY.cardH, COL.clear, table.concat(more))
+    end
+
+    -- a hovered value's Set plate, over the diamonds and the condition bar,
+    -- then the flyouts' content last, so it draws over everything else
+    x[#x + 1] = statPlatesXml()
+    x[#x + 1] = table.concat(flyouts)
+    x[#x + 1] = "</Panel>"                    -- cardBody
+    local content = table.concat(x)
+
+    -- The copies. Neither root panel catches clicks itself -- only the click
+    -- blocker and the buttons do -- so the card's empty corners stay
+    -- click-through.
+    local out = {}
+    local pos, size = placement()
+    ui.placed = pos .. "|" .. size          -- what update() compares a rescale with
+    for _, key in ipairs(ui.viewers) do
+        local vis = key ~= "all" and key or CFG.visibility
+        out[#out + 1] = string.format(
+            '<Panel id="%s_mundaRoot" active="%s" position="%s" rotation="0 0 %.1f"' ..
+            ' width="%d" height="%d" color="%s" raycastTarget="false"%s>' ..
+            '<Panel id="%s_mundaTilt" rotation="%g 0 0" scale="%s" width="%d" height="%d" color="%s"' ..
+            ' raycastTarget="false">',
+            key, tostring(ui.visible), pos, view(key).yaw, LAY.cardW, LAY.cardH,
+            COL.clear, vis ~= "" and string.format(' visibility="%s"', vis) or "",
+            key, CFG.standAngle, size, LAY.cardW, LAY.cardH, COL.clear)
+        local compact = view(key).compact == true
+        out[#out + 1] = (content:gsub(' id="', ' id="' .. key .. '_')
+                                :gsub("@@FULL@@", tostring(not compact))
+                                :gsub("@@COMPACT@@", tostring(compact))
+                                :gsub("@@HEADXY@@", ui.headXY(compact)))
+        out[#out + 1] = "</Panel></Panel>"
+    end
+    return table.concat(out)
+end
+
+--============================================================================
+-- 9. DRAWING IN PLACE
+--    Everything that changes in play goes through setAttr / setText. They
+--    remember every attribute and text TTS is showing and send only what
+--    differs. Right after a rebuild the memory is refilled from the same
+--    state functions the builders used -- without sending -- so the first
+--    change after it sends just that change. Each takes an optional viewer
+--    key: that player's copy only, or -- without one -- every copy.
+--============================================================================
+
+local sent, seeding = {}, false
+
+local function setAttr(id, name, value, key)
+    if not ui.built then return end
+    if not key then
+        for _, k in ipairs(ui.viewers) do setAttr(id, name, value, k) end
+        return
+    end
+    value = tostring(value)
+    local full = key .. "_" .. id
+    local c    = full .. "|" .. name
+    if sent[c] == value then return end
+    sent[c] = value
+    if not seeding then self.UI.setAttribute(full, name, value) end
+end
+
+local function setText(id, text, key)
+    if not ui.built then return end
+    if not key then
+        for _, k in ipairs(ui.viewers) do setText(id, text, k) end
+        return
+    end
+    text = tostring(text)
+    local full = key .. "_" .. id
+    local c    = full .. "|#text"
+    if sent[c] == text then return end
+    sent[c] = text
+    if not seeding then self.UI.setValue(full, text) end
+end
+
+-- A text's size changed in place: font size, scale and box together (see
+-- textSize), `w` x `h` on the card.
+local function setTextSize(id, size, w, h, key)
+    local t = textSize(size, w, h)
+    setAttr(id, "fontSize", t.fontSize, key)
+    setAttr(id, "scale", t.scale, key)
+    setAttr(id, "width", t.width, key)
+    setAttr(id, "height", t.height, key)
+end
+
+-- Which flyout each trigger opens, and every flyout there is. Only one shows
+-- at a time. Hovering a trigger shows its flyout, until the cursor has
+-- left both (see requestHide); nothing keeps one open. A opens the
+-- actions panel of the current status (see flyoutOf).
+local FLYOUT_OF = { btnStatus = "statusPick", btnConditions = "conditionsPanel" }
+local FLYOUTS   = { "statusPick", "conditionsPanel" }
+local HAS_BG    = { conditionsPanel = true }   -- + every actions panel and pop_<i>
+local IS_ACTIONS = {}                          -- the actions panels' flyout ids
+for _, st in ipairs(STATUSES) do
+    local f = PANELS[actionPanelOf(st.key)].id
+    FLYOUTS[#FLYOUTS + 1], HAS_BG[f], IS_ACTIONS[f] = f, true, true
+end
+-- The weapon popups, one per weapon (extras too), registered afresh on
+-- every build as the number of weapons can change.
+registerWeaponFlyouts = function()
+    for k in pairs(FLYOUT_OF) do if k:match("^btnWeapon_") then FLYOUT_OF[k] = nil end end
+    for k in pairs(HAS_BG) do if k:match("^pop_") then HAS_BG[k] = nil end end
+    for j = #FLYOUTS, 1, -1 do if FLYOUTS[j]:match("^pop_") then table.remove(FLYOUTS, j) end end
+    for i = 1, math.max(#LAY.weaponSpots, fighter and weaponCount() or 0) do
+        FLYOUT_OF["btnWeapon_" .. i] = "pop_" .. i
+        FLYOUTS[#FLYOUTS + 1] = "pop_" .. i
+        HAS_BG["pop_" .. i] = true
+    end
+end
+registerWeaponFlyouts()
+-- The Special panels, likewise registered afresh on every build (see
+-- SKILL.panels): they come and go with the fighter's skills.
+function SKILL.registerFlyouts()
+    local ours = {}
+    for _, id in pairs(SKILL.SPECIALS) do ours[id] = true end
+    for k in pairs(HAS_BG) do if ours[k] then HAS_BG[k], IS_ACTIONS[k] = nil, nil end end
+    for j = #FLYOUTS, 1, -1 do if ours[FLYOUTS[j]] then table.remove(FLYOUTS, j) end end
+    for prefix in pairs(SKILL.SPECIALS) do
+        local P = PANELS[prefix]
+        if P then FLYOUTS[#FLYOUTS + 1], HAS_BG[P.id], IS_ACTIONS[P.id] = P.id, true, true end
+    end
+end
+-- A opens the current status's panel -- its Special one while viewer
+-- `key` has that tab chosen (view `actTab`, see onActionTab).
+local function flyoutOf(trigger, key)
+    if trigger == "btnActions" then
+        local sp = PANELS[SKILL.special()]
+        if sp and key and view(key).actTab == "special" then return sp.id end
+        return PANELS[actionPanelOf(fighter.status)].id
+    end
+    return FLYOUT_OF[trigger]
+end
+
+-- Switches a box (see edgedBox) to another kind in place.
+local function drawBox(id, kind)
+    setAttr(id, "color", boxColor(kind))
+end
+
+-- S at rest (A's size, on the left point) or grown to statusD while its
+-- picker is open on viewer `key`'s copy -- its right tip stays where A's
+-- and C's tips meet, so the options open round it in the same place. The
+-- whole of S sits in the container statusBox, so this is two attributes. Grown,
+-- S is also filled in its status's colour (statusFill_S, over the ready
+-- green) with its stand-in label in dark ink, like the options round it.
+function ui.growStatus(key, on)
+    local k = LAY.statusD / LAY.sideD
+    setAttr("statusBox", "scale", on and string.format("%g %g 1", k, k) or "1 1 1", key)
+    setAttr("statusBox", "offsetXY", xyAttr(-(on and LAY.statusX or LAY.statusRestX), 0), key)
+    setAttr("statusFill_S", "active", on, key)
+    if on then setAttr("statusFill_S", "color", ui.statusFill(statusDef(fighter.status)), key) end
+    for _, s in ipairs(STATUSES) do
+        if not hasAsset("status_" .. s.key) then
+            setAttr("statusIcon_" .. s.key, "color", on and COL.statusInk or COL.iconText, key)
+        end
+    end
+end
+
+-- Shows flyout `id` on viewer `key`'s copy and hides the rest; nil hides
+-- them all. A flyout that was hidden and now shows is "opened" (see
+-- openedFlyout) unless `quiet`. The viewer's stats are redrawn when what's
+-- open changes: an open weapon can change them (see weaponContext).
+local openedFlyout, redrawStats, redrawActions
+local function showFlyout(id, key, quiet)
+    for _, f in ipairs(FLYOUTS) do
+        local was = sent[key .. "_" .. f .. "|active"] == "true"
+        setAttr(f, "active", f == id, key)
+        if HAS_BG[f] then setAttr(f .. "Bg", "active", f == id, key) end
+        if f == id and not was and not quiet and not seeding then openedFlyout(f, key) end
+        -- a weapon popup closing ends its Aimed Shot, and what was measured
+        -- for it (Marksman)
+        if was and f ~= id and not seeding and f:match("^pop_%d+$") then
+            TRAIT_RULES.setAim(tonumber(f:match("%d+")), false)
+            TRAIT_RULES.setReroll(tonumber(f:match("%d+")), nil)   -- and its re-rolls to hit
+            TRAIT_RULES.measure(tonumber(f:match("%d+")), nil, true)
+        end
+    end
+    -- S grows while its picker shows
+    ui.growStatus(key, id == "statusPick")
+    -- the extra weapons' diamonds, while any weapon popup is open
+    if weaponCount() > #LAY.weaponSpots then
+        setAttr("moreWeapons", "active", tostring(id or ""):match("^pop_") ~= nil, key)
+    end
+    local v = view(key)
+    -- a hovered Hit goes with its popup (a hidden button sends no exit),
+    -- and with it the highlight on the models changing it
+    if v.hitHover and id ~= "pop_" .. v.hitHover then
+        v.hitHover = nil
+        TRAIT_RULES.lightSupport()
+    end
+    -- a hovered ATK / RF goes with its popup (a hidden cell sends no exit)
+    if v.costHover and id ~= "pop_" .. (tostring(v.costHover):match("^r?(%d+)") or "") then
+        v.costHover = nil
+        if not seeding then ACTIVATION.drawReady() end   -- drawReady comes later
+    end
+    -- a hovered action's preview goes with its panel (a hidden entry sends no exit)
+    if v.actHover then
+        local P = PANELS[tostring(v.actHover):match("^(.-)_%d+$") or ""]
+        if not P or P.id ~= id then
+            v.actHover = nil
+            if not seeding then ACTIVATION.drawReady() end
+        end
+    end
+    -- the hover stats a Wyrd / Utility entry showed go with its flyout
+    -- (a hidden entry sends no exit)
+    local mind = v.mindFrom
+    if mind then
+        local P = PANELS[mind:match("^(.-)_%d+$") or ""]
+        if not P or P.id ~= id then v.mindFrom = nil end
+    end
+    if v.open ~= id or (mind and not v.mindFrom) then
+        v.open = id
+        if not seeding then redrawStats(key) end
+    end
+    -- an entry's panel goes with its flyout (a hidden entry sends no exit)
+    if v.infoFrom and not v.infoFrom:match("^condBar_") and not seeding then
+        local P = PANELS[v.infoFrom:match("^(.-)_%d+$") or ""]
+        if not P or P.id ~= id then
+            v.infoHover, v.infoFrom = nil, nil
+            SKILL.drawInfo(key)
+        end
+    end
+    -- A opens on the Generic tab again
+    if not IS_ACTIONS[id or ""] then v.actTab = nil end
+end
+
+-- What the weapon popup open on viewer `key`'s card does to their stats:
+-- for a melee weapon `unwieldy` (a profile has the trait) and `charge` (a
+-- profile attacks at "A + 1" / "A + 1 + N"), `melee` being its slot;
+-- `combi` (the weapon's slot) while the viewer hovers a profile on Combi
+-- (see onProfileEnter); `save` while a Shield or Parry weapon betters the
+-- save, `saveFrom` the slots of those weapons (see TRAIT_RULES.saveTrait);
+-- else nil.
+local function weaponContext(key)
+    local v = view(key)
+    local i = tonumber(tostring(v.open or ""):match("^pop_(%d+)$"))
+    local w = i and weaponAt(i)
+    local ctx
+    for pi, p in ipairs((w and w.profiles) or {}) do
+        if isMelee(p) then
+            ctx = ctx or {}
+            ctx.melee = i
+            if hasTrait(p, TRAIT.unwieldy) then ctx.unwieldy = true end
+            if TRAIT_RULES.step(p) == "charge" then ctx.charge = true end
+        elseif v.profHover == i .. "_" .. pi and TRAIT_RULES.ammoState(w, p) == "combi"
+               and not TRAIT_RULES.aiming[w] then        -- Aimed Shot makes up for Combi's -1
+            ctx = ctx or {}
+            ctx.combi = i
+        end
+    end
+    local save, from = TRAIT_RULES.saveTrait()   -- Shield / Parry: always, popup open or not
+    if save then
+        ctx = ctx or {}
+        ctx.save, ctx.saveFrom = save, from
+    end
+    return ctx
+end
+
+-- The stat block on one viewer's copy (or every copy), for the view that
+-- viewer has on show and the stats as they stand -- with the hovered
+-- value's Set plate and the sources of what changes it (see
+-- SKILL.drawSources).
+local function drawStats(key)
+    if not key then
+        TRAIT_RULES.drawMarks()   -- the save may have changed: a Shield / Parry's colour
+        for _, k in ipairs(ui.viewers) do drawStats(k) end
+        return
+    end
+    local v = view(key)
+    for _, c in ipairs(statCells(v.statsHover or v.mindFrom ~= nil, weaponContext(key))) do
+        setText(c.id, c.text, key)
+        setAttr(c.id, "offsetXY", xyAttr(c.x, c.y), key)
+        setTextSize(c.id, c.size, c.w, c.h, key)
+        setAttr(c.id, "color", c.color, key)
+    end
+    for i, t in ipairs(statTools(v)) do setAttr("statSet_" .. i, "active", t.set, key) end
+    SKILL.drawSources(key)
+end
+
+-- A colour for a lit weapon diamond (fxGlow_<i>): see-through enough that
+-- the weapon's icon stays readable on it.
+function SKILL.glowColor(c) return c:sub(1, 7) .. "B3" end
+-- ... and for a lit condition icon (condFx_<i>, drawn over it): lighter,
+-- so the icon shows through.
+function SKILL.fxTint(c) return c:sub(1, 7) .. "80" end
+
+-- Where the stat viewer `key` hovers (view statCol) gets its changes from
+-- (see STAT.effects), lit up on their copy in the colour each gives it:
+-- the names under the stats (their text), the weapons' diamonds (fxGlow_<i>)
+-- and the conditions' icons in the bar (condFx_<i>). Everything else as
+-- usual -- so nothing is lit while no stat, or one nothing changes, is
+-- hovered.
+function SKILL.drawSources(key)
+    local v = view(key)
+    local stat = v.statCol and (v.statsHover and STAT.hoverOrder() or CFG.statOrder)[v.statCol]
+    local lit = { item = {}, weapon = {}, condition = {} }
+    if stat then
+        for _, e in ipairs(STAT.effects(stat, weaponContext(key))) do
+            if e.i then lit[e.kind][e.i] = STAT.color(e.up, e.down, e.capped, e.wyrd) end
+        end
+    end
+    -- the skills / wargear changing it: all together in the bar meanwhile
+    -- (at 0 wounds the wargear alone -- the skills are disabled). A stat
+    -- changed by something else only (a condition, a weapon, a number set
+    -- by hand): the bar empty meanwhile ("none" matches no state).
+    local changed = stat and (next(STAT.effects(stat, weaponContext(key))) ~= nil
+                              or statEdited(stat) or pendingStats[stat] ~= nil)
+    v.barFx = stat and (next(lit.item) and SKILL.fxKey(stat, SKILL.off()) or (changed and "none")) or nil
+    SKILL.drawBar(key)
+    -- ... each name there in the colour of what it does as things stand
+    -- (one that changes the stat only at times: Mesh Armour, the Stimm-Slug)
+    local owned = SKILL.fxStates and #SKILL.fxStates > 0 and SKILL.owned() or nil
+    for _, fx in ipairs(SKILL.fxStates or {}) do
+        local st = SKILL.fxStates[fx]
+        for _, it in ipairs(SKILL.fxItems(st, fx ~= st, owned)) do
+            setAttr("skillFx_" .. fx .. "_" .. it.bar, "color", SKILL.fxInk(it, st), key)
+        end
+    end
+    -- ... and the weapons a Fight / Shoot action just taken lights up
+    -- (ACTIVATION.pulseWeapons), where no stat lights them
+    local pulse = ACTIVATION.pulse
+    for i = 1, weaponCount() do
+        if weaponAt(i) then
+            local c = lit.weapon[i] or (pulse and pulse.weapons[i] and pulse.color) or nil
+            if c then setAttr("fxGlow_" .. i, "color", SKILL.glowColor(c), key) end
+            setAttr("fxGlow_" .. i, "active", c ~= nil, key)
+        end
+    end
+    for i = 1, #CONDITIONS do
+        if lit.condition[i] then setAttr("condFx_" .. i, "color", SKILL.fxTint(lit.condition[i]), key) end
+        setAttr("condFx_" .. i, "active", lit.condition[i] ~= nil, key)
+    end
+end
+
+-- The health bar on one viewer's copy (or every copy), for the wounds as
+-- they stand, with the segments up to the one that viewer hovers lit as a
+-- preview -- and its 0-wounds frame and text.
+local function drawHp(key)
+    if not key then
+        for _, k in ipairs(ui.viewers) do drawHp(k) end
+        return
+    end
+    local upTo = idNum(view(key).hpHover, "hpSeg") or 0
+    for i = 1, hpMax() do
+        local s = hpSegment(i, upTo)
+        setAttr("hpSeg_" .. i, "colors", s.colors, key)
+        setAttr("hpSeg_" .. i, "image", s.image, key)
+    end
+    setAttr("hpOut", "active", hpOut(), key)
+    SKILL.drawBar(key)                  -- at 0 wounds, the wargear
+end
+
+redrawStats = drawStats
+
+-- S's icon, and the picker's options around it.
+local function drawStatus()
+    for _, s in ipairs(STATUSES) do
+        setAttr("statusIcon_" .. s.key, "active", s.key == fighter.status)
+    end
+    if ui.glowing() then setAttr("statusGlow", "color", ui.glowColor()) end
+    ACTIVATION.drawReady()                  -- A / C are lit in the status's colour
+    local at = statusSpots()
+    for _, s in ipairs(STATUSES) do
+        local p = at[s.key]
+        if p then setAttr("statusOptBox_" .. s.key, "offsetXY", xyAttr(p[1], p[2])) end
+        setAttr("statusOptBox_" .. s.key, "active", p ~= nil)
+    end
+end
+
+-- The actions an attack with profile `pi` of weapon `i` would spend
+-- right now (see ACTIVATION.spendAttack): during an activation its
+-- action's cost (Fight 2, Shoot 1, Braced / Aimed Shot 2, 0 while its
+-- Additional Attacks is on and for the other free shots, see
+-- TRAIT_RULES.attackAction), at most what is left; 0 when it can't attack
+-- or outside one. The action may be paid for already: a melee attack
+-- after the activation's Fight (taken from A's panel, or paid by an
+-- earlier melee attack -- the second weapon's attacks are part of the same
+-- Fight) spends nothing, nor does a ranged one after a Shoot, Braced Shot
+-- or Aimed Shot taken from A's panel that no shot has used yet
+-- (fighter.shotsPaid).
+function ACTIVATION.attackCost(i, pi)
+    local w = weaponAt(i)
+    local p = w and w.profiles and w.profiles[pi]
+    if not p or fighter.activation ~= "active" or fighter.actionsLeft <= 0 then return 0 end
+    if profileDown(p) or not TRAIT_RULES.usable(p, w) then return 0 end
+    local key, cost = TRAIT_RULES.attackAction(w, p)
+    if cost == nil and ACTIVATION.prepaid(key) then return 0 end
+    local entry = ACTIONS[indexOf(ACTIONS, key) or 0]
+    return math.min(fighter.actionsLeft, cost or (entry and SKILL.cost(entry)) or 1)
+end
+
+-- Whether an attack that is action `key` ("fight", "shoot", ...) is paid
+-- for already (see ACTIVATION.attackCost).
+function ACTIVATION.prepaid(key)
+    if key == "fight" then return fighter.usedActions.fight == true end
+    return (tonumber(fighter.shotsPaid) or 0) > 0
+end
+
+-- Fight and the Shoot actions, taken from A's panel, light up for a moment
+-- (CFG.weaponFlash seconds) the diamonds of the weapons they are for, in
+-- the action's colour (ACTIVATION.actionGlow): Fight every melee weapon,
+-- Shoot every ranged one, Braced Shot those with a Heavy profile, Aimed
+-- Shot those that can be aimed. The diamonds are the fxGlow_<i> a hovered
+-- stat's sources light (SKILL.drawSources draws both). Returns whether
+-- any weapon lit up.
+ACTIVATION.PULSE = {
+    fight       = function(p) return isMelee(p) end,
+    shoot       = function(p) return not isMelee(p) end,
+    braced_shot = function(p) return not isMelee(p) and hasTrait(p, TRAIT.heavy) end,
+    aimed_shot  = function(p) return TRAIT_RULES.canAim(p) end,
+}
+function ACTIVATION.pulseWeapons(key)
+    local fits = ACTIVATION.PULSE[key]
+    if not fits then return false end
+    local lit = {}
+    for i = 1, weaponCount() do
+        for _, p in ipairs((weaponAt(i) or {}).profiles or {}) do
+            if fits(p) then lit[i] = true end
+        end
+    end
+    if next(lit) == nil then return false end
+    local c, token = ACTIVATION.actionGlow(key), {}
+    ACTIVATION.pulse = { weapons = lit, token = token, color = string.format("#%02X%02X%02Xff",
+        math.floor(c[1] * 255 + 0.5), math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5)) }
+    for _, k in ipairs(ui.viewers) do SKILL.drawSources(k) end
+    Wait.time(function()
+        if not (ACTIVATION.pulse and ACTIVATION.pulse.token == token) then return end
+        ACTIVATION.pulse = nil
+        for _, k in ipairs(ui.viewers) do SKILL.drawSources(k) end
+    end, tonumber(CFG.weaponFlash) or 1.5)
+    return true
+end
+
+-- What the ATK / RF viewer `key` hovers (view.costHover, "<i>_<pi>")
+-- would spend (see drawReady) -- or the AM of a profile out of ammo
+-- ("r<i>_<pi>": its Reload, see ACTIVATION.reloadCost) -- or the entry of an actions panel they
+-- hover (view.actHover, "<prefix>_<n>", see onInfoEnter): what useAction
+-- would take for it, its cost as this fighter pays it, at most what is left.
+function ACTIVATION.hoverSpends(key)
+    local v = view(key)
+    local prefix, n = tostring(v.actHover or ""):match("^(act_.+)_(%d+)$")
+    local P = PANELS[prefix or ""]
+    local a = P and P.list[tonumber(n)]
+    if a then
+        if a.roll or a.always or fighter.actionsLeft <= 0 then return 0 end
+        return math.min(fighter.actionsLeft, SKILL.cost(a))
+    end
+    local r, i, pi = tostring(v.costHover or ""):match("^(r?)(%d+)_(%d+)$")
+    if r == "r" then return ACTIVATION.reloadCost(tonumber(i), tonumber(pi)) end
+    return i and ACTIVATION.attackCost(tonumber(i), tonumber(pi)) or 0
+end
+
+-- What a middle click on the AM of weapon `i`'s profile `pi` would spend
+-- (see reloadWeapon): the Reload's cost while it is OUT and the fighter is
+-- active with actions left, at most what is left; else 0.
+function ACTIVATION.reloadCost(i, pi)
+    local w = weaponAt(i)
+    local p = w and w.profiles and w.profiles[pi]
+    local entry = ACTIONS[indexOf(ACTIONS, "reload") or 0]
+    if not (p and entry) or TRAIT_RULES.ammoState(w, p) ~= "out" then return 0 end
+    if fighter.activation ~= "active" or fighter.actionsLeft <= 0 then return 0 end
+    return math.min(fighter.actionsLeft, SKILL.cost(entry))
+end
+
+-- Whether entry `e` of panel P is an action a click spends from (not the
+-- Special tab's dice, nor one that never spends): hovering it previews
+-- that on A / C (see hoverSpends), so its button notices the cursor.
+function ACTIVATION.spender(e, P) return not P.icon and not e.roll and not e.always end
+
+-- The fighter's round: S green while it is ready to activate; then the
+-- actions still to take, on A and C: A green while both are left, C while
+-- at least one is -- so A goes out first. On each viewer's copy, those
+-- the ATK / RF or the action they hover would spend are darker (see
+-- ui.actionLit, ACTIVATION.hoverSpends). A / C are lit in the status's
+-- colour, so drawStatus redraws them too. An activation begun Suppressed
+-- shows A -- the action it lost -- dimmed in Suppressed's colour
+-- throughout (see ACTIVATION.readyLook).
+local function drawReady()
+    setAttr("readyGlow_S", "active", fighter.activation == "ready")
+    setAttr("activeMark", "active", ui.activeShown())
+    for n = 1, ui.activeParts or 0 do setAttr("activeMark_" .. n, "color", ui.activeColor()) end
+    local lost = {}
+    for n = 1, 2 do
+        local on
+        on, lost[n] = ACTIVATION.readyLook(n)
+        setAttr("readyGlow_" .. n, "active", on)
+    end
+    for _, key in ipairs(ui.viewers) do
+        local after = fighter.actionsLeft - ACTIVATION.hoverSpends(key)
+        for n = 1, 2 do
+            local spent = fighter.actionsLeft >= 3 - n and after < 3 - n
+            setAttr("readyGlow_" .. n, "color", lost[n] and ACTIVATION.litColor(lost[n]) or ui.actionLit(spent), key)
+        end
+    end
+    ACTIVATION.drawReach()            -- Group Activation hovered: pre-measuring
+end
+ACTIVATION.drawReady = drawReady      -- for showFlyout, defined before it
+
+-- The cursor on an action's strip or an ATK / RF cell (`field`: view's
+-- actHover / costHover, `id` what it is on) and off it again. The strips
+-- sit a little apart, and crossing that gap on the way to the next one
+-- would switch A's / C's preview off and on -- a flicker. So leaving only
+-- clears it after CFG.popupLinger, and entering anything calls a waiting
+-- clear off (each field has its own token, like requestHide's).
+function ACTIVATION.hoverEnter(key, field, id)
+    local v = view(key)
+    v[field .. "Token"] = (v[field .. "Token"] or 0) + 1
+    if v[field] == id then return end
+    v[field] = id
+    drawReady()
+end
+function ACTIVATION.hoverLeave(key, field, id)
+    local v = view(key)
+    if v[field] ~= id then return end
+    local tk = field .. "Token"
+    v[tk] = (v[tk] or 0) + 1
+    local token = v[tk]
+    Wait.time(function()
+        if token ~= v[tk] or v[field] ~= id then return end
+        v[field] = nil
+        drawReady()
+    end, CFG.popupLinger)
+end
+
+-- The panels over the stats (see ACTIVATION.panelXml): Out of Action, or
+-- the Recovery Test with its number of dice -- or, with an enemy within
+-- 1", its one Out of Action button.
+function ACTIVATION.draw()
+    setAttr("outPanel", "active", fighter.outOfAction == true)
+    setAttr("recoveryPanel", "active", ACTIVATION.isOpen())
+    setAttr("recoveryRow", "active", not ACTIVATION.doomed())
+    setAttr("recoveryDoom", "active", ACTIVATION.doomed())
+    if fighter.recovery then setText("recoveryValTxt", tostring(fighter.recovery.dice)) end
+    setAttr("nervePanel", "active", ACTIVATION.nerveOpen())
+    if ACTIVATION.nerve then
+        local v, s = ACTIVATION.nerveValue(), LAY.midDiamond * LAY.iconPad
+        setText("nerveValTxt", v)
+        setTextSize("nerveValTxt", fitSize(v, s, s, LAY.midBtnFont, true), s, s)
+        setAttr("nerveValTxt", "color", ACTIVATION.nerveInk())
+        -- a Nerve Check's title and "Cl", Group Activation's and "Ld",
+        -- Falling Down's and "Height"
+        local head, stat = ACTIVATION.nerveTexts()
+        setText("nerveTitle", head.text)
+        setTextSize("nerveTitle", head.size, head.w, head.h)
+        setText("nerveStat", stat.text)
+        setTextSize("nerveStat", stat.size, stat.w, stat.h)
+        setAttr("nerveStat", "offsetXY", xyAttr(stat.x, stat.y))
+    end
+    setAttr("nerveConfirm", "active", ACTIVATION.nerveAsks())   -- a height to confirm: OK over the die
+    local asking = ACTIVATION.questioning()                     -- a question: Continue and X, nothing else
+    setAttr("nerveRow", "active", not asking)
+    setAttr("nerveQuestion", "active", asking)
+    setAttr("nerveQGo", "active", not ACTIVATION.asksPair())   -- ... or a yes and an X (In Cover?)
+    setAttr("nerveQPair", "active", ACTIVATION.asksPair())
+end
+
+-- The name above the card, in place (see ui.nameView): a group
+-- activation's sign coming or going changes its text and, with that, its
+-- size and where it and the rank's symbol sit -- on the text, its shadow
+-- and its rim alike.
+function ui.drawName()
+    local v = ui.nameView()
+    for _, c in ipairs(v.copies) do
+        if v.sym then
+            setTextSize("fighterRank" .. c[1], v.symSize, LAY.nameW, v.h)
+            setAttr("fighterRank" .. c[1], "offsetXY", xyAttr(v.symX + c[2], v.y + c[3]))
+        end
+        setText("fighterName" .. c[1], v.name)
+        setTextSize("fighterName" .. c[1], v.size, LAY.nameW, v.h)
+        setAttr("fighterName" .. c[1], "offsetXY", xyAttr(v.nameX + c[2], v.y + c[3]))
+    end
+    setAttr("nameBtn", "width", string.format("%g", v.w))
+    local sd = LAY.nameShadow * v.arrowD          -- the arrows keep to the name's ends
+    for id, side in pairs({ nameDown = -1, nameUp = 1 }) do
+        setAttr(id .. "Shadow", "offsetXY", xyAttr(side * v.arrowX + sd, -sd))
+        setAttr(id .. "Txt", "offsetXY", xyAttr(side * v.arrowX, 0))
+        setAttr(id, "offsetXY", xyAttr(side * v.arrowX, 0))
+    end
+end
+
+-- The arrows beside the name on each player's copy (or `key`'s only):
+-- shown while that player's cursor is on the name or on them
+-- (view.nameHover).
+function ui.drawArrows(key)
+    for _, k in ipairs(key and { key } or ui.viewers) do
+        setAttr("nameArrows", "active", view(k).nameHover == true, k)
+    end
+end
+
+-- The dice panel (see ACTIVATION.diceXml) as ACTIVATION.diceView has it:
+-- hidden, "Rolling Dice...", or the roll on show -- each face (its size,
+-- place and marks) and the results beside them, set in place. Hidden,
+-- nothing else is touched (it is out of sight); nor, while rolling, are
+-- the faces.
+function ACTIVATION.drawDice()
+    local v = ACTIVATION.diceView()
+    setAttr("dicePanel", "active", v.on)
+    if not v.on then return end
+    setAttr("diceWait", "active", v.rolling)
+    local function size(id, d)
+        local t = string.format("%.1f", d)
+        setAttr(id, "width", t)
+        setAttr(id, "height", t)
+    end
+    for i, s in ipairs(v.slots) do
+        local id, f, D = "_" .. i, s.face, s.D
+        setAttr("dieSlot" .. id, "active", s.on)
+        if s.on then
+            setAttr("dieSlot" .. id, "offsetXY", xyAttr(s.x, s.y))
+            size("dieSlot" .. id, D)
+            size("dieEdge" .. id, D)   -- the frame art fills the slot (see ACTIVATION.faceSide)
+            setAttr("dieEdge" .. id, "color", f.ink)
+            size("dieFace" .. id, ACTIVATION.faceSide(D))
+            setAttr("dieFace" .. id, "color", ui.gradTint(f.fill))
+            if hasAsset("dice_ammo") then
+                setAttr("dieWm" .. id, "active", f.wm ~= nil)
+                if f.wm then size("dieWm" .. id, ACTIVATION.watermark(D)) end
+            end
+            for k = 1, #ACTIVATION.PIP_SPOTS do
+                local pid = "diePip" .. id .. "_" .. k
+                setAttr(pid, "active", f.pips[k] == true)
+                if f.pips[k] then
+                    local px, py, pw = ACTIVATION.pipAt(k, ACTIVATION.markSide(D))
+                    setAttr(pid, "offsetXY", xyAttr(px, py))
+                    size(pid, pw)
+                    setAttr(pid, "color", f.ink)
+                end
+            end
+            setAttr("dieNum" .. id, "active", f.num ~= nil)
+            if f.num then
+                setText("dieNum" .. id, f.num)
+                setAttr("dieNum" .. id, "color", f.numInk)
+                setAttr("dieNum" .. id, "offsetXY", xyAttr(f.numX, f.numY))
+                setTextSize("dieNum" .. id, f.numSize, f.numW, f.numH)
+            end
+            setAttr("dieIcon" .. id, "active", f.icon ~= nil)
+            if f.icon then
+                setAttr("dieIcon" .. id, "image", f.icon)
+                setAttr("dieIcon" .. id, "color", f.iconInk)
+                setAttr("dieIcon" .. id, "offsetXY", xyAttr(f.iconX, 0))
+                size("dieIcon" .. id, f.iconD)
+            end
+            setAttr("dieMark" .. id, "active", f.mark ~= nil)
+            if f.mark then
+                setAttr("dieMark" .. id, "color", f.markInk)
+                setAttr("dieMark" .. id, "offsetXY", xyAttr(f.markX, 0))
+                setTextSize("dieMark" .. id, f.markSize, f.markW, ACTIVATION.markSide(D) * 0.84)
+            end
+            for k, g in ipairs(s.syms) do       -- the signs over it (Shock, Blaze)
+                local sid = "dieSym" .. id .. "_" .. k
+                setAttr(sid, "active", g.on)
+                if g.on then
+                    setText(sid, g.text)
+                    setAttr(sid, "color", g.ink)
+                    setAttr(sid, "offsetXY", xyAttr(g.x, g.y))
+                    setTextSize(sid, g.size, g.w, g.h)
+                end
+            end
+        end
+    end
+    -- the result at the right end
+    local b = v.sum or {}
+    setAttr("diceSum", "active", b.text ~= nil)
+    if b.text then
+        setText("diceSum", b.text)
+        setAttr("diceSum", "color", b.ink)
+        setAttr("diceSum", "offsetXY", xyAttr(b.x, 0))
+        setTextSize("diceSum", b.size, b.w / FIT + 2, b.size * 1.25)
+    end
+    setAttr("diceSumIcon", "active", b.icon ~= nil)
+    if b.icon then
+        setAttr("diceSumIcon", "image", b.icon)
+        setAttr("diceSumIcon", "color", b.ink)
+        setAttr("diceSumIcon", "offsetXY", xyAttr(b.x, 0))
+        size("diceSumIcon", b.d)
+    end
+    -- what the Ammo checks came to, at the left end (OUT / JAM / SPENT)
+    local a = v.ammo
+    setAttr("ammoSum", "active", a ~= nil)
+    if a then
+        setText("ammoSum", a.text)
+        setAttr("ammoSum", "color", a.ink)
+        setAttr("ammoSum", "offsetXY", xyAttr(a.x, 0))
+        setTextSize("ammoSum", a.size, a.w / FIT + 2, a.size * 1.25)
+    end
+    -- the best result at the left end (the Injury dice action)
+    local l = v.best or {}
+    setAttr("diceBest", "active", l.text ~= nil)
+    if l.text then
+        setText("diceBest", l.text)
+        setAttr("diceBest", "color", l.ink)
+        setAttr("diceBest", "offsetXY", xyAttr(l.x, 0))
+        setTextSize("diceBest", l.size, l.w / FIT + 2, l.size * 1.25)
+    end
+    setAttr("diceBestIcon", "active", l.icon ~= nil)
+    if l.icon then
+        setAttr("diceBestIcon", "image", l.icon)
+        setAttr("diceBestIcon", "color", l.ink)
+        setAttr("diceBestIcon", "offsetXY", xyAttr(l.x, 0))
+        size("diceBestIcon", l.d)
+    end
+end
+
+-- A roll on its way (ACTIVATION.roll = { title, rolling = true }): the
+-- panel over the stats says "Rolling Dice...", the bar under them names
+-- it (see SKILL.state) -- until ACTIVATION.showDice has its faces.
+function ACTIVATION.rolling(title)
+    ACTIVATION.roll = { title = title, rolling = true }
+    ACTIVATION.rollToken = (ACTIVATION.rollToken or 0) + 1
+    ACTIVATION.drawDice()
+    SKILL.drawBar()
+end
+
+-- Shows a roll's dice over the stats -- roll = { title = what was rolled
+-- (in the bar under the stats), kind = "d6" / "firepower" / "injury" (or
+-- `kinds`, one per die), faces = { ... }, and what shows it came out: hl
+-- (a stat check: green passed, orange failed; `hls` per die), sum + sumInk
+-- ("∑9", "∑4", "Miss") and ammoState ("out" / "jam" / "spent": at the
+-- left end), or result (an Injury result: its icon; `best` too for the
+-- Injury dice action), ammoDie (the Ammo trait's die), syms (per die, the
+-- signs over it: ACTIVATION.signs) -- on every
+-- player's copy, for at least CFG.diceShow seconds (roll.held meanwhile),
+-- whatever the cursor does; only a newer roll replaces it sooner. After
+-- that it goes -- unless the cursor is on the panel or the bar
+-- (ACTIVATION.rollHover, per viewer): then it stays until CFG.diceLeave
+-- seconds after the cursor has left them (see ACTIVATION.rollLeave).
+function ACTIVATION.showDice(roll)
+    ACTIVATION.roll = roll
+    ACTIVATION.rollToken = (ACTIVATION.rollToken or 0) + 1
+    roll.held = true
+    ACTIVATION.drawDice()
+    SKILL.drawBar()
+    Wait.time(function()
+        if ACTIVATION.roll ~= roll then return end
+        roll.held = nil
+        if not next(ACTIVATION.rollHover) and not ACTIVATION.leaving then ACTIVATION.hideDice() end
+    end, CFG.diceShow)
+end
+function ACTIVATION.hideDice()
+    ACTIVATION.roll, ACTIVATION.rollHover, ACTIVATION.leaving = nil, {}, nil
+    ACTIVATION.rollToken = (ACTIVATION.rollToken or 0) + 1
+    ACTIVATION.drawDice()
+    SKILL.drawBar()
+end
+
+-- The cursor onto the dice panel or the bar under the stats (viewer
+-- `key`) while a roll shows: it stays past CFG.diceShow. Leaving hides the
+-- roll's faces CFG.diceLeave seconds later -- so moving from one to the
+-- other isn't leaving -- but never while they are still held (their
+-- first CFG.diceShow seconds, see ACTIVATION.showDice: that wait hides
+-- them), nor a roll still on its way (that shows its faces as usual).
+-- ACTIVATION.leaving is the leave waiting meanwhile: the end of the held
+-- time leaves the faces to it, so they never go sooner than CFG.diceLeave
+-- after the cursor.
+ACTIVATION.rollHover = {}
+function ACTIVATION.rollEnter(key)
+    if not ACTIVATION.roll then return end
+    ACTIVATION.rollHover[key] = true
+    ACTIVATION.leaveToken = (ACTIVATION.leaveToken or 0) + 1
+    ACTIVATION.leaving = nil
+end
+function ACTIVATION.rollLeave(key)
+    if not ACTIVATION.rollHover[key] then return end
+    ACTIVATION.rollHover[key] = nil
+    ACTIVATION.leaveToken = (ACTIVATION.leaveToken or 0) + 1
+    local t, roll = ACTIVATION.leaveToken, ACTIVATION.roll
+    ACTIVATION.leaving = t
+    Wait.time(function()
+        if ACTIVATION.leaving == t then ACTIVATION.leaving = nil end
+        if t == ACTIVATION.leaveToken and roll and ACTIVATION.roll == roll and not roll.rolling
+           and not roll.held and not next(ACTIVATION.rollHover) then
+            ACTIVATION.hideDice()
+        end
+    end, CFG.diceLeave or CFG.popupLinger)
+end
+
+-- Toggle `i` of A's or C's panel: its colours and label.
+-- (on viewer `key`'s copy, or every copy)
+local function drawToggle(prefix, i, key)
+    local P = PANELS[prefix]
+    local c = panelLayout(prefix)[i]
+    local look = entryLook(P, P.list[i], key)
+    setAttr(prefix .. "Bg_" .. i, "color", look.fill, key)
+    setAttr(prefix .. "Dia_" .. i, "color", look.fill, key)
+    setAttr(prefix .. "Txt_" .. i, "color", look.ink, key)
+    setText(prefix .. "Txt_" .. i, look.label, key)
+    setTextSize(prefix .. "Txt_" .. i, fitSize(look.label, c.textW, c.h, LAY.popS.valueFont, true),
+        c.textW, c.h, key)
+    if P.icon then return end
+    setAttr(prefix .. "Cost_" .. i, "color", look.costInk, key)
+    -- an action's cost, as the fighter pays it now: a skill that changes
+    -- it stops with the skills (see SKILL.costOf)
+    local e = P.list[i]
+    if not (e.icon and hasAsset(e.icon)) then
+        local d, cost = c.dd * LAY.popS.costPad, tostring(SKILL.costOf(e) or "")
+        setText(prefix .. "Cost_" .. i, cost, key)
+        setTextSize(prefix .. "Cost_" .. i, fitSize(cost, d, d, LAY.popS.valueFont, true), d, d, key)
+    end
+end
+
+-- Every action in every status's panel, for the actions used and left, on
+-- viewer `key`'s copy or every copy.
+local function drawActions(key)
+    if not key then
+        for _, k in ipairs(ui.viewers) do drawActions(k) end
+        return
+    end
+    local prefixes = {}
+    for _, prefix in ipairs(SKILL.SPECIAL_ORDER) do prefixes[#prefixes + 1] = prefix end
+    for _, st in ipairs(STATUSES) do prefixes[#prefixes + 1] = actionPanelOf(st.key) end
+    for _, prefix in ipairs(prefixes) do
+        for i = 1, #((PANELS[prefix] or {}).list or {}) do drawToggle(prefix, i, key) end
+    end
+end
+redrawActions = drawActions
+
+-- The panel over the stats viewer `key` sees (or every copy's), the rest
+-- hidden: a hovered condition's or panel entry's (v.infoHover, see
+-- onInfoEnter), else the hovered name's -- only while that name's state
+-- is the one shown (a name hidden under the cursor never says the cursor
+-- left).
+function SKILL.drawInfo(key)
+    if not key then
+        for _, k in ipairs(ui.viewers) do SKILL.drawInfo(k) end
+        return
+    end
+    local v, owned = view(key), SKILL.owned()
+    local it = owned[v.skillHover or 0]
+    if it and it.state ~= SKILL.state(v) then v.skillHover = nil end
+    local shown = v.infoHover or (v.barInfo and v.skillHover and "skillInfo_" .. v.skillHover)
+    for _, id in ipairs(SKILL.infoIds or {}) do setAttr(id, "active", shown == id, key) end
+end
+
+-- The bar's state on viewer `key`'s copy (see SKILL.state): the title of
+-- a roll on show, else the skills or the wargear, the rest hidden, and
+-- the name panels to match.
+function SKILL.drawBar(key)
+    if not key then
+        for _, k in ipairs(ui.viewers) do SKILL.drawBar(k) end
+        return
+    end
+    local shown = SKILL.state(view(key))
+    setAttr("skillState_roll", "active", shown == "roll", key)
+    if shown == "roll" then
+        local t = SKILL.rollTitle()
+        setText("rollTitle", t.text, key)
+        setTextSize("rollTitle", t.size, t.w, LAY.skillBand, key)
+    end
+    for state = 1, #SKILL.KINDS do setAttr("skillState_" .. state, "active", state == shown, key) end
+    for _, fx in ipairs(SKILL.fxStates or {}) do setAttr("skillState_" .. fx, "active", fx == shown, key) end
+    SKILL.drawInfo(key)
+end
+
+-- The Wyrd powers' names under the stats, for the power in effect (see
+-- ACTIVATION.cast): purple, with CFG.wyrdMark before it (SKILL.label) --
+-- in the bar and in the panels of the stats it changes -- the rest as they
+-- are. On every copy, in place (the bar keeps room for the mark).
+function SKILL.drawWyrd()
+    for _, it in ipairs(SKILL.owned()) do
+        if it.kind == "skill" and it.type == "wyrd" and STAT.works(it) then
+            setAttr("skillTxt_" .. it.bar, "color", SKILL.ink(it))
+            setText("skillTxt_" .. it.bar, SKILL.label(it))
+            for _, fx in ipairs(SKILL.fxStates or {}) do
+                if SKILL.fxStates[fx] and it.maintained and (it.maintained[SKILL.fxStates[fx]] or 0) ~= 0 then
+                    setText("skillFx_" .. fx .. "_" .. it.bar, SKILL.label(it))
+                end
+            end
+        end
+    end
+end
+
+-- The names of wargear that can burn out (`burns`: the Refractor Shield)
+-- under the stats, grey while it is (see setBurnt) -- in place, on every
+-- copy.
+function SKILL.drawBurnt()
+    for _, it in ipairs(SKILL.owned()) do
+        if it.burns and (it.kind ~= "skill" or STAT.works(it)) then
+            setAttr("skillTxt_" .. it.bar, "color", SKILL.ink(it))
+        end
+    end
+end
+
+-- The condition bar: the slots of the conditions that are on, centred, with
+-- their stack counts; the rest hidden.
+local function drawConditionBar()
+    local slots = conditionSlots()
+    for i, c in ipairs(CONDITIONS) do
+        local s, n = slots[i], conditionCount(c.key)
+        if s then
+            setAttr("condSlot_" .. i, "offsetXY", xyAttr(s.x, s.y))
+            local badge, size = stackBadge(n)
+            setText("condCount_" .. i, badge)
+            local bw, bh = badgePlate()
+            setTextSize("condCount_" .. i, size, bw, bh)
+            setAttr("condBadge_" .. i, "active", n >= 2)
+        end
+        setAttr("condSlot_" .. i, "active", s ~= nil)
+        -- an icon gone from under the cursor sends no exit: its panel goes too
+        if not s then
+            for _, key in ipairs(ui.viewers) do
+                local v = view(key)
+                if v.infoFrom == "condBar_" .. i then
+                    v.infoHover, v.infoFrom = nil, nil
+                    if not seeding then SKILL.drawInfo(key) end
+                end
+            end
+        end
+    end
+end
+
+-- Profile `pi` of weapon `i`: its box, traits line, button labels, S
+-- (Backstab raises it) and Hit (the weapon's modifier).
+local function drawProfile(i, pi)
+    local p = weaponAt(i) and weaponAt(i).profiles[pi]
+    if not p then return end
+    local v   = profileView(i, pi, p)
+    local tag = function(t) return string.format("%s_%d_%d", t, i, pi) end
+    drawBox(tag("prof"), v.box)
+    local g = popupGeom(weaponAt(i))
+    for ci, col in ipairs(PROFILE_COLS) do
+        if g.shown[ci] and showsCol(p, col.key) then
+            local id = string.format("%s_%d", tag("pval"), ci)
+            local val, tint = TRAIT_RULES.value(weaponAt(i), p, col.key)
+            setText(id, val)
+            setAttr(id, "color", tint)
+            setTextSize(id, fitSize(val, g.need[ci], g.hd, LAY.popS.valueFont, true), g.need[ci], g.hd)
+        end
+    end
+    for _, k in ipairs({ "", "2" }) do
+        local id = tag("ptraits" .. k)
+        setText(id, v.segs and "" or v.traits["text" .. k])
+        setAttr(id, "color", v.traits.color)
+        setAttr(id, "offsetXY", xyAttr(0, v.traits["y" .. k]))
+        setTextSize(id, v.traits.size, g.traitW, v.traits.h)
+    end
+    -- the pieces: their colours (Reliable ready / used, Shield / Parry at
+    -- work) and, as a re-roll set by hand lengthens the line, their text
+    -- and place; Reliable's button follows its piece
+    for n = 1, TRAIT_RULES.segRoom(weaponAt(i), p, g) do
+        local s = v.segs and v.segs[n] or { x = 0, y = v.traits.y, w = 0, h = v.traits.h, text = "",
+                                            color = v.traits.color }
+        local id = tag("ptseg") .. "_" .. n
+        setText(id, s.text)
+        setAttr(id, "color", s.color)
+        setAttr(id, "offsetXY", xyAttr(s.x, s.y))
+        setTextSize(id, v.traits.size, s.w / FIT + 2, s.h)
+        if s.mark == TRAIT.reliable then
+            setAttr(tag("prelBtn"), "offsetXY", xyAttr(s.x, s.y))
+            setAttr(tag("prelBtn"), "width", string.format("%.1f", s.w + 8))
+        end
+    end
+    -- the green edge round Hit while re-rolls to hit are set
+    for ci, col in ipairs(PROFILE_COLS) do
+        if col.key == "Hit" and g.shown[ci] and showsCol(p, col.key) then
+            setAttr(tag("phitEdge"), "active", TRAIT_RULES.reroll[weaponAt(i)] ~= nil)
+        end
+    end
+    setText(tag("psecond"), v.second.text)
+    setAttr(tag("psecond"), "color", v.second.color)
+    setTextSize(tag("psecond"), v.second.size, g.cellW, g.hd)
+    if v.rapidFire then
+        for k = 1, #PROFILE_MODES do setAttr(tag("pmode") .. "_" .. k, "active", k == v.mode) end
+    end
+    if v.melee then return end
+    -- Marksman's sign between SR and LR
+    local rv = TRAIT_RULES.rangeView(weaponAt(i), p, g)
+    if rv then
+        setAttr(tag("prange"), "active", rv.on)
+        setAttr(tag("prange"), "offsetXY", xyAttr(rv.x, g.hd / 2))
+        setTextSize(tag("prange"), rv.size, rv.w, g.hd)
+    end
+    -- Aimed Shot: the edge, the sign, the labels green and moved over
+    setAttr(tag("paimEdge"), "active", v.aim.on)
+    for k in ipairs(PROFILE_MODES) do
+        if k == 1 or v.rapidFire then
+            local id, a = tag("pmode") .. "_" .. k, v.aim.modes[k]
+            setAttr(id, "color", v.aim.color)
+            setAttr(id, "offsetXY", xyAttr(a.x, 0))
+            setTextSize(id, a.size, g.cellW, g.hd)
+        end
+    end
+    setAttr(tag("paimSign"), "active", v.aim.on)
+    setAttr(tag("paimSign"), "offsetXY", xyAttr(v.aim.signX, 0))
+    setTextSize(tag("paimSign"), v.aim.signSize, g.cellW, g.hd)
+end
+
+-- Aimed Shot on weapon `i` on or off (see TRAIT_RULES.canAim): every
+-- profile of it redrawn (Hit, the ATK / RF cells), and the stats (a
+-- hovered Combi profile no longer lowers BS's colour).
+function TRAIT_RULES.setAim(i, on)
+    local w = weaponAt(i)
+    if not w or (TRAIT_RULES.aiming[w] == true) == (on == true) then return end
+    TRAIT_RULES.aiming[w] = on and true or nil
+    for pi = 1, #(w.profiles or {}) do drawProfile(i, pi) end
+    drawStats()
+end
+
+-- Re-rolls to hit on weapon `i`, set by hand: `how` "ones" (every hit die
+-- showing a 1), "all" (every one that misses) or nil (none). Every profile
+-- of it redrawn: the trait at the end of its traits line, the green edge
+-- round Hit. Kept only while the weapon's popup is open (see showFlyout).
+function TRAIT_RULES.setReroll(i, how)
+    local w = weaponAt(i)
+    if not w or TRAIT_RULES.reroll[w] == how then return end
+    TRAIT_RULES.reroll[w] = how
+    for pi = 1, #(w.profiles or {}) do drawProfile(i, pi) end
+end
+
+-- The marked traits' colours in every profile's traits line (see
+-- TRAIT_RULES.segments) -- after anything that can change the save.
+function TRAIT_RULES.drawMarks()
+    for i = 1, weaponCount() do
+        local w = weaponAt(i)
+        for pi, p in ipairs((w and w.profiles) or {}) do
+            if TRAIT_RULES.marked(p, w) then drawProfile(i, pi) end
+        end
+    end
+end
+
+-- The fill on every weapon's diamond (blockedGlow_<i>, see
+-- TRAIT_RULES.glow): red on one the fighter can't use as things stand -- a
+-- ranged one while Engaged, a melee one while not, a skill's while the
+-- skills are disabled, a ranged one once the activation's shot is made
+-- (TRAIT_RULES.usable) -- yellow on one in the middle of a Combi volley.
+function TRAIT_RULES.drawGlows()
+    for i = 1, weaponCount() do
+        local w = weaponAt(i)
+        if w then
+            local col = TRAIT_RULES.glow(w)
+            setAttr("blockedGlow_" .. i, "color", ACTIVATION.litColor(col or COL.weaponBlocked))
+            setAttr("blockedGlow_" .. i, "active", col ~= nil)
+        end
+    end
+end
+
+-- Every weapon's profiles and its diamond's fill -- after a status change.
+-- (A field, not a local: the main chunk is at Lua's 200-local limit.)
+function TRAIT_RULES.drawWeapons()
+    TRAIT_RULES.drawGlows()
+    for i = 1, weaponCount() do
+        local w = weaponAt(i)
+        for pi = 1, #((w and w.profiles) or {}) do drawProfile(i, pi) end
+    end
+end
+
+-- Marksman: how far the enemy `player` (a Player or a colour) has selected
+-- is from the fighter decides, for each profile of weapon `i`, whether its
+-- +1 to hit is on (TRAIT_RULES.longShot: beyond its Short Range, within its
+-- Long Range, base to base). With no player nothing is: every profile's is
+-- off. An enemy with A Perfect Void in effect (`void`, see
+-- engageInfo) within that many inches is always at Long Range, never
+-- Short. Returns whether anything changed; `draw`: the weapon's profiles
+-- are redrawn when it did.
+function TRAIT_RULES.measure(i, player, draw)
+    local R, w = TRAIT_RULES, weaponAt(i)
+    local gap, aim, asked, changed = nil, nil, player == nil, false
+    for _, p in ipairs((w and w.profiles) or {}) do
+        local sr, lr = R.marksman(p)
+        if sr and not asked then
+            if R.gapTo then gap, aim = R.gapTo(player) end
+            asked = true
+        end
+        local void = gap and aim and tonumber(aim.void)
+        local on = (sr and gap and ((void and gap <= void + CFG.engageSlack)
+                    or (gap > sr + CFG.engageSlack and gap <= lr + CFG.engageSlack))) and true or nil
+        changed = changed or on ~= R.longShot[p]
+        R.longShot[p] = on
+    end
+    if changed and draw then
+        for pi = 1, #w.profiles do drawProfile(i, pi) end
+    end
+    return changed
+end
+
+-- Aimed Shot goes off every weapon that can't be aimed any more (see
+-- TRAIT_RULES.mayAim): the activation's shot was made, or the fighter
+-- Dashed.
+function TRAIT_RULES.dropAims()
+    local R = TRAIT_RULES
+    for i = 1, weaponCount() do
+        local w = weaponAt(i)
+        if w and R.aiming[w] then
+            local may = false
+            for _, p in ipairs(w.profiles or {}) do may = may or R.mayAim(w, p) end
+            if not may then R.setAim(i, false) end
+        end
+    end
+end
+
+-- A ranged attack was just made with profile p of weapon w (`attack`, see
+-- attackWith): what that leaves the activation's shooting with (see
+-- TRAIT_RULES.shot), and the weapons' diamonds to match. Every shot is
+-- the fighter's Shoot action -- paid now, by a Shoot taken from A's panel,
+-- or with no action left to pay -- as is the free one after a Dash; not
+-- the rest of a Combi volley nor one with Additional Attacks on
+-- (attack.cost 0). A Gunfighter's Shoot with a Light profile opens the
+-- second weapon's, and that one closes it.
+function TRAIT_RULES.shotFired(w, p, attack)
+    local R = TRAIT_RULES
+    if not attack.melee then fighter.aimedShot = nil end   -- the panel's Aimed Shot is made
+    if attack.melee or fighter.activation ~= "active" or fighter.status == "engaged" then return end
+    local function close()
+        for i = 1, weaponCount() do
+            if weaponAt(i) then weaponAt(i).gunfight = nil end
+        end
+    end
+    if attack.free == "gunfighter" then
+        close()
+    elseif attack.free == "assault" or attack.cost == nil then
+        close()
+        if attack.free then fighter.assaulted = true else
+            fighter.shots = fighter.shots or {}
+            fighter.shots[#fighter.shots + 1] = attack.action
+        end
+        if attack.action == "shoot" and hasTrait(p, TRAIT.light) and #SKILL.with("gunfighter") > 0 then
+            w.gunfight = true
+        end
+    end
+    R.dropAims()
+    R.drawGlows()
+end
+
+-- The fighter's activation is over (or a new one starts): no shot has
+-- been made (see TRAIT_RULES.shot), and no ranged weapon is red for it.
+function TRAIT_RULES.endShots()
+    fighter.shots, fighter.assaulted, fighter.shotsPaid, fighter.aimedShot = nil, nil, nil, nil
+    for i = 1, weaponCount() do
+        if weaponAt(i) then weaponAt(i).gunfight = nil end
+    end
+    TRAIT_RULES.drawGlows()
+end
+
+-- The fighter's activation is over (or a new one starts): every Combi
+-- volley under way ends (see TRAIT_RULES.held), and its weapon shows
+-- Combi only where two profiles can fire again.
+function TRAIT_RULES.endVolleys()
+    if next(TRAIT_RULES.volley) == nil then return end
+    TRAIT_RULES.volley = {}
+    TRAIT_RULES.drawWeapons()
+    drawStats()
+end
+
+-- Opening a weapon's popup (on viewer `key`'s copy) resets its profiles: a
+-- melee one's attacks to "A + 1" ("A+1+N" with Paired, or Additional
+-- Attacks on) -- "x1" once the fighter has attacked with another melee
+-- weapon this activation ("x2" for a Two-Weapon Fighter; see
+-- TRAIT_RULES.opening) --, a Rapid Fire one to RF (ATK while
+-- the fighter is Engaged), a Combi one that can fire to Combi (while two
+-- can, or while it is still to be fired in a Combi volley), a ranged one
+-- with Additional Attacks that can fire to AA(N); Aimed Shot is off --
+-- unless the weapon's Combi volley under way was aimed, or an Aimed Shot
+-- taken from A's panel is waiting for its shot (fighter.aimedShot: then
+-- every weapon that can be aimed opens aimed, see useAction). A weapon with
+-- Backstab looks round the table for it now (for the enemy that viewer
+-- has selected, see TRAIT_RULES.backstabNear), and a melee weapon of an
+-- Engaged fighter for its Assist or Interference (see
+-- TRAIT_RULES.supportNear). Where pre-measuring is allowed
+-- (CFG.preMeasure) a Marksman's weapon measures to that enemy now, for
+-- its +1 to hit (TRAIT_RULES.measure); otherwise that waits for the shot.
+-- The profiles are shared, so every copy shows the reset.
+openedFlyout = function(id, key)
+    local R = TRAIT_RULES
+    local i = tonumber(tostring(id):match("^pop_(%d+)$"))
+    local w = i and weaponAt(i)
+    if not w then return end
+    local stab, melee = false, false
+    R.aiming[w] = nil                          -- Aimed Shot starts off ...
+    for _, p in ipairs(w.profiles or {}) do    -- ... but a volley's rest keeps its aim
+        if R.held(w, p) and not profileDown(p) then R.aiming[w] = R.volley[w].aimed end
+        -- ... and the panel's Aimed Shot aims every weapon it can
+        if fighter.aimedShot and fighter.activation == "active" and R.mayAim(w, p) then R.aiming[w] = true end
+    end
+    for _, p in ipairs(w.profiles or {}) do
+        if isMelee(p) then
+            p.attacks = R.opening(w, p)        -- nil, the charge: A + 1 (+ N)
+            stab, melee = stab or R.backstab(p), true
+        else
+            if hasRapidFire(p) then p.mode = fighter.status == "engaged" and "attack" or "rapid_fire" end
+            if R.combi(p) and not profileDown(p) and (R.combiUp(w) >= 2 or R.held(w, p)) then p.ammo = "combi"
+            elseif R.extraShots(p) and not profileDown(p) then p.ammo = "extra" end
+        end
+    end
+    R.stabbing[w] = stab and R.backstabNear ~= nil and R.backstabNear(key) or nil
+    R.support[w], R.supportBy[w] = nil, nil
+    if melee and fighter.status == "engaged" and R.supportNear then
+        local n, by = R.supportNear(key)
+        R.support[w], R.supportBy[w] = n, n and by or nil
+    end
+    R.measure(i, CFG.preMeasure and key or nil)
+    for pi = 1, #(w.profiles or {}) do drawProfile(i, pi) end
+end
+
+-- Everything that changes in play, drawn to match the state -- after a
+-- rebuild this only refills the memory, since the XML already matches.
+local function drawAll()
+    for _, key in ipairs(ui.viewers) do showFlyout(nil, key, true) end
+    SKILL.wasOff = SKILL.off()        -- what SKILL.switched compares with
+    SKILL.wasShape = SKILL.shape()
+    SKILL.builtShape = SKILL.wasShape  -- what the bar was laid out for (see SKILL.switched)
+    drawStats()
+    SKILL.drawWyrd()
+    SKILL.drawBurnt()
+    drawHp()
+    drawStatus()
+    drawReady()
+    ACTIVATION.draw()
+    ACTIVATION.drawDice()
+    drawActions()
+    for i = 1, #CONDITIONS do drawToggle("cond", i) end
+    drawConditionBar()
+    TRAIT_RULES.drawWeapons()
+    SKILL.drawInfo()
+    ui.drawName()
+    ui.drawArrows()
+    ui.drawCompact()
+end
+
+-- Where the name and the health bar (cardHead) sit: in place, or moved
+-- down LAY.compactDrop on the compact card.
+function ui.headXY(compact) return xyAttr(0, compact and LAY.compactDrop or 0) end
+
+-- The compact card on each player's copy (view.compact): everything but
+-- the name and the health bar hidden, those two moved down with the bar's
+-- black plate under it -- or, `key`, on that one's only.
+function ui.drawCompact(key)
+    for _, k in ipairs(key and { key } or ui.viewers) do
+        local on = view(k).compact == true
+        setAttr("cardBack", "active", not on, k)
+        setAttr("cardBody", "active", not on, k)
+        setAttr("hpBack", "active", on, k)
+        setAttr("cardHead", "offsetXY", ui.headXY(on), k)
+    end
+end
+
+-- Switches player `key`'s copy to the compact card (just the name and the
+-- health bar) or back. Everything that copy had open or hovered goes: a
+-- hidden element never sends its exit, so it would come back stuck.
+function ui.setCompact(key, on)
+    local v = view(key)
+    v.compact = on == true
+    v.actTab = nil
+    v.statsHover, v.statCol, v.headHeld = false, nil, nil
+    v.skillHover, v.barHover, v.barFx, v.barInfo, v.barFlip = nil, nil, nil, nil, nil
+    v.infoHover, v.infoFrom, v.mindFrom = nil, nil, nil
+    v.nameHover = nil                 -- the name moves from under the cursor
+    for stat, p in pairs(pendingStats) do
+        if p.by == key then pendingStats[stat] = nil end
+    end
+    showFlyout(nil, key, true)
+    drawStats(key)
+    SKILL.drawBar(key)
+    SKILL.drawInfo(key)
+    ui.drawArrows(key)
+    ui.drawCompact(key)
+    return v.compact
+end
+
+-- Puts every copy where placement() has it now, at its size, in place --
+-- when either has changed: the model was rescaled, or the card raised or
+-- lowered by hand.
+function ui.place()
+    local pos, size = placement()
+    if pos .. "|" .. size == ui.placed then return end
+    ui.placed = pos .. "|" .. size
+    for _, key in ipairs(ui.viewers) do
+        self.UI.setAttribute(key .. "_mundaRoot", "position", pos)
+        self.UI.setAttribute(key .. "_mundaTilt", "scale", size)
+    end
+end
+
+-- Full rebuild, for changes to the card's structure: a new fighter, weapon or
+-- stat line, new art, or players sitting down or leaving. Everything else is
+-- drawn in place. Each copy starts out facing its player; hovers reset (and
+-- with them stat numbers changed but not kept), and every flyout is closed.
+function refresh()
+    ui.viewers = wantedViewers()
+    ui.facing, ui.still = nil, nil              -- who each copy faces: looked up again
+    for k in pairs(pendingStats) do pendingStats[k] = nil end
+    for _, key in ipairs(ui.viewers) do
+        local v = view(key)
+        v.statsHover, v.hpHover, v.pushed, v.statCol = false, nil, nil, nil
+        v.skillHover, v.barHover, v.barFx, v.barInfo, v.barFlip = nil, nil, nil, nil, nil
+        v.infoHover, v.infoFrom, v.mindFrom = nil, nil, nil
+        v.nameHover = nil
+        local p = CFG.billboard and facingPlayer(key)
+        local yaw = p and yawFor(p)
+        if yaw then v.yaw = yaw % 360 end
+    end
+    local xml = buildXml()                      -- registers weapon icon URLs ...
+    self.UI.setXml(xml, buildAssetList())       -- ... before the assets are sent
+    ui.built = true
+    sent, seeding = {}, true
+    drawAll()
+    seeding = false
+    -- the texts with & < > in them, as plain text once TTS has built the
+    -- card (see textXml); remembered as sent, so a later setText compares
+    local raw = ui.rawTexts
+    local function sendRaw()
+        if ui.rawTexts ~= raw then return end             -- rebuilt since
+        if self.UI.loading then Wait.frames(sendRaw, 5) return end
+        for _, key in ipairs(ui.viewers) do
+            for _, r in ipairs(raw) do
+                sent[key .. "_" .. r.id .. "|#text"] = r.text
+                self.UI.setValue(key .. "_" .. r.id, r.text)
+            end
+        end
+    end
+    if #raw > 0 then Wait.frames(sendRaw, 1) end
+end
+
+-- Deferred close, so the cursor can travel from a trigger onto its flyout
+-- without it vanishing on the way.
+local function requestHide(key, delay)
+    local v = view(key)
+    v.hoverToken = v.hoverToken + 1
+    local token = v.hoverToken
+    Wait.time(function()
+        if token == v.hoverToken then showFlyout(nil, key) end
+    end, delay or CFG.popupLinger)
+end
+
+local function cancelHide(key)
+    local v = view(key)
+    v.hoverToken = v.hoverToken + 1
+end
+
+-- Turning to face the players: every frame (at most every 20 ms) each copy
+-- eases toward its player and sends its rotation only once it has moved a
+-- quarter of a degree -- and once every copy faces its player (ui.still),
+-- only every CFG.faceIdle seconds, until a player's view turns again:
+-- every card on the table does this, so a still camera costs little.
+-- Every 2 s the seated players are checked again, and the card rebuilt
+-- when they changed; who each copy faces is looked up then too
+-- (ui.facing). Every second the model's scale is looked at as well:
+-- rescaled, every copy is moved and resized in place (see placement), so
+-- the card keeps its size and stays over the head.
+-- (ui.turnAt / ui.seatAt: when it last turned / checked the seats.)
+function update()
+    -- Nothing to turn until the card exists -- and not while TTS is still
+    -- building it from the XML: its elements aren't there to be set yet.
+    if not ui.built or self.UI.loading then return end
+    local now = os.clock()
+    if now - (ui.placeCheck or 0) > 1 then
+        ui.placeCheck = now
+        ui.place()
+    end
+    if not CFG.billboard then return end
+    local dt  = now - (ui.turnAt or 0)
+    if dt < (ui.still and (tonumber(CFG.faceIdle) or 0.02) or 0.02) then return end
+    ui.turnAt = now
+    if now - (ui.seatAt or 0) > 2 then
+        ui.seatAt = now
+        if table.concat(wantedViewers(), ",") ~= table.concat(ui.viewers, ",") then
+            refresh()
+            return
+        end
+        ui.facing = nil
+    end
+    if not ui.facing then
+        ui.facing = {}
+        for _, key in ipairs(ui.viewers) do ui.facing[key] = facingPlayer(key) or false end
+    end
+    -- (after a still spell the first step eases as from one frame or two)
+    local a = CFG.faceSmooth > 0 and (1 - math.exp(-math.min(dt, 0.05) / CFG.faceSmooth)) or 1
+    local okR, rot = pcall(function() return self.getRotation() end)
+    local own = okR and rot and tonumber(rot.y) or nil
+    local still = own ~= nil
+    for _, key in ipairs(ui.viewers) do
+        local p   = ui.facing[key]
+        local yaw = own and p and yawFor(p, own)
+        if yaw then
+            local v = view(key)
+            local turn = wrapAngle(yaw - v.yaw)
+            v.yaw = (v.yaw + turn * a) % 360
+            if math.abs(turn) > 0.25 then still = false end
+            if not v.pushed or math.abs(wrapAngle(v.yaw - v.pushed)) > 0.25 then
+                v.pushed = v.yaw
+                self.UI.setAttribute(key .. "_mundaRoot", "rotation",
+                                     string.format("0 0 %.1f", v.yaw))
+            end
+        end
+    end
+    ui.still = still
+end
+
+--============================================================================
+-- 10. UI EVENT HANDLERS
+--       TTS calls these as  handler(player, value, id). The id carries the
+--       viewer's key in front ("Red_btnWeapon_1"); viewerOf splits it off,
+--       so hovers and flyouts stay on that player's copy.
+--============================================================================
+
+local function viewerOf(id)
+    local k, rest = tostring(id or ""):match("^(%a+)_(.+)$")
+    if k and ui.view[k] then return k, rest end
+    return ui.viewers[1], id
+end
+
+-- Flyout triggers: S, A, C and the weapon diamonds.
+function onTriggerEnter(player, value, id)
+    local key; key, id = viewerOf(id)
+    local f = flyoutOf(id, key)
+    if not f then return end
+    cancelHide(key)
+    showFlyout(f, key)
+end
+
+function onTriggerExit(player, value, id) requestHide((viewerOf(id))) end
+
+-- A click on a trigger: only S does anything -- it runs the fighter's
+-- round: a left click activates a ready fighter (see activate) and
+-- finishes an active one's activation, actions left or not (see
+-- completeActivation); a right click readies it -- ending an activation
+-- -- or, on one already ready, takes that back (see setReady). A click on
+-- A, C or a weapon changes nothing: their flyouts open while the cursor is
+-- on them and close by themselves -- but while Flaming Weapon waits for its
+-- weapon, a left click on a melee weapon picks it (see ACTIVATION.flame).
+function onTriggerClick(player, value, id)
+    local _; _, id = viewerOf(id)
+    local slot = tonumber(tostring(id or ""):match("^btnWeapon_(%d+)$"))
+    if slot and tostring(value) ~= "-2" and TRAIT_RULES.flammable(weaponAt(slot)) then
+        ACTIVATION.flame(slot)
+        return
+    end
+    if id ~= "btnStatus" then return end
+    if tostring(value) == "-2" then
+        setReady({ value = fighter.activation ~= "ready", hand = true })
+    elseif fighter.activation == "ready" then
+        activate(player)
+    elseif fighter.activation == "active" then
+        completeActivation()
+    end
+end
+
+-- The flyouts themselves stay open while the cursor is on them.
+function onFlyoutEnter(player, value, id) cancelHide((viewerOf(id))) end
+function onFlyoutExit(player, value, id)  requestHide((viewerOf(id))) end
+
+-- A status diamond in S's flyout. Picking one closes the flyout.
+function onPickStatus(player, value, id)
+    local key; key, id = viewerOf(id)
+    local s = tostring(id or ""):match("^statusOpt_(.+)$")
+    if not (s and indexOf(STATUSES, s)) then return end
+    setStatus(s)
+    showFlyout(nil, key)
+end
+
+-- The fighter's name over the card: a right click shows only the name and
+-- the health bar on that player's copy, another the whole card again.
+function onNameClick(player, value, id)
+    local key = viewerOf(id)
+    if tostring(value) ~= "-2" then return end
+    ui.setCompact(key, not view(key).compact)
+end
+
+-- The cursor on the name, or on one of the arrows beside it: that player
+-- sees the arrows (see ui.arrowsXml). Off them, the arrows go after
+-- CFG.popupLinger unless the cursor is back on either by then: there is a
+-- gap to cross between the name and an arrow. After a press on an arrow
+-- they wait CFG.tabLinger instead (view.nameMoved): the card has moved
+-- from under the cursor, which needs a moment to follow.
+function onNameEnter(player, value, id)
+    local key = viewerOf(id)
+    local v = view(key)
+    v.nameToken, v.nameMoved = (v.nameToken or 0) + 1, nil
+    if v.nameHover then return end
+    v.nameHover = true
+    ui.drawArrows(key)
+end
+function onNameExit(player, value, id)
+    local key = viewerOf(id)
+    local v = view(key)
+    v.nameToken = (v.nameToken or 0) + 1
+    local token = v.nameToken
+    Wait.time(function()
+        if token ~= v.nameToken then return end
+        v.nameHover, v.nameMoved = nil, nil
+        ui.drawArrows(key)
+    end, v.nameMoved and CFG.tabLinger or CFG.popupLinger)
+end
+
+-- An arrow beside the name: the card one step lower (nameDown) or higher
+-- (nameUp), see nudgeLift.
+function onNameArrow(player, value, id)
+    local key, bare = viewerOf(id)
+    nudgeLift(bare == "nameUp" and 1 or -1)
+    view(key).nameMoved = true
+end
+
+-- An action in A's panel: a left click takes it (see useAction), which
+-- spends its cost from the actions left -- dimmed or not. `value` is the
+-- mouse button, "-1" left, "-2" right.
+function onChooseAction(player, value, id)
+    local _; _, id = viewerOf(id)
+    local prefix, n = tostring(id or ""):match("^(act_.+)_(%d+)$")
+    local P = PANELS[prefix or ""]
+    local a = P and P.list[tonumber(n)]
+    if not a or tostring(value) == "-2" then return end
+    if a.roll then                               -- the Special tab's dice: no action spent
+        if a.roll == "nerve" then nerveCheck(player)
+        elseif a.roll == "agility" then agilityTest(nil, player)
+        elseif a.roll == "fall" then fallingDown()
+        elseif a.roll == "out" then setOutOfAction(true)
+        elseif a.roll == "recovery" then recoveryTest()
+        else ACTIVATION.stack(a.roll, player) end
+        return
+    end
+    useAction(a.key, player)
+end
+
+-- The panels over the stats. Revive: back from Out of Action (still
+-- Seriously Injured). The Recovery Test's number of dice: a left click one
+-- more, a right click one fewer; its die rolls them (see rollRecovery),
+-- its X closes it. With an enemy within 1" its one button, the dagger:
+-- a left click takes the fighter Out of Action, a right click closes the
+-- panel (it has no X).
+function onRevive(player, value, id) setOutOfAction(false) end
+function onRecoveryValue(player, value, id)
+    if fighter.recovery then setRecoveryDice(fighter.recovery.dice + (tostring(value) == "-2" and -1 or 1)) end
+end
+function onRecoveryRoll(player, value, id) rollRecovery(player) end
+function onRecoveryClose(player, value, id) closeRecovery() end
+function onRecoveryOut(player, value, id)
+    local rec = fighter.recovery
+    if not rec then return end
+    if tostring(value) == "-2" then closeRecovery() return end
+    setOutOfAction({ value = true, why = rec.foes and ('within 1" of ' .. rec.foes) or nil })
+end
+
+-- The cursor onto a roll's dice over the stats, and off them again (see
+-- ACTIVATION.rollEnter / rollLeave).
+function onDiceEnter(player, value, id) ACTIVATION.rollEnter((viewerOf(id))) end
+function onDiceExit(player, value, id) ACTIVATION.rollLeave((viewerOf(id))) end
+
+-- The Nerve Check's panel: its Cl by hand (left click one more, right click
+-- one fewer), its die rolls the check (see rollNerve), X closes it. With
+-- Falling Down's height in it, the first diamond is the inches fallen, and OK
+-- lies over the die (see ACTIVATION.fall). A question has Continue (see
+-- ACTIVATION.goOn) and an X of its own, which calls off what was asked about.
+function onNerveValue(player, value, id)
+    local n = ACTIVATION.nerve
+    if n and n.value then setNerveValue(n.value + (tostring(value) == "-2" and -1 or 1)) end
+end
+function onNerveRoll(player, value, id) rollNerve(player) end
+function onNerveClose(player, value, id) ACTIVATION.giveUp(player) end
+function onNerveOk(player, value, id) ACTIVATION.fall(player) end
+function onNerveGo(player, value, id) ACTIVATION.goOn(player) end
+
+-- A tab over A's panel (Generic / Special): the viewer's panel is swapped
+-- for the other one of the same status, in place. The old one vanished
+-- under the cursor, so -- as for a status change -- the new one is asked
+-- to close and entering it keeps it open; as it may be shorter or taller,
+-- its tabs elsewhere, it waits CFG.tabLinger for that.
+function onActionTab(player, value, id)
+    local key; key, id = viewerOf(id)
+    local t = tonumber(tostring(id or ""):match("TabBtn_(%d+)$"))
+    if not t then return end
+    local v = view(key)
+    v.actTab = t == 2 and "special" or nil
+    local f = flyoutOf("btnActions", key)
+    if v.open == f then return end
+    cancelHide(key)
+    showFlyout(f, key)
+    requestHide(key, CFG.tabLinger)
+end
+
+-- A skill's or wargear's name under the stats: while the cursor is on it,
+-- that player sees the panel with its full name and description. Moving
+-- between names may deliver the new one's enter first, so leaving only
+-- hides the name's own panel.
+function onSkillEnter(player, value, id)
+    local key; key, id = viewerOf(id)
+    local i = idNum(id, "skillBtn")
+    if not i then return end
+    local v = view(key)
+    v.skillHover, v.barHover = i, true
+    SKILL.drawBar(key)
+end
+
+-- The cursor onto the bar under the stats: it shows the wargear (see
+-- SKILL.state); off it, the skills again. A roll's title there keeps its
+-- dice on show while the cursor is on it (see ACTIVATION.rollEnter).
+function onBarEnter(player, value, id)
+    local key = viewerOf(id)
+    view(key).barHover = true
+    ACTIVATION.rollEnter(key)
+    SKILL.drawBar(key)
+end
+function onBarExit(player, value, id)
+    local key = viewerOf(id)
+    local v = view(key)
+    v.barHover, v.skillHover, v.barInfo, v.barFlip = nil, nil, nil, nil
+    ACTIVATION.rollLeave(key)
+    SKILL.drawBar(key)
+end
+
+-- A click on the bar: a left click on a name switches its panel -- and
+-- every other name's, as the cursor comes onto it -- on or off
+-- (v.barInfo); a right click anywhere switches between the wargear and
+-- the skills (v.barFlip; not at 0 wounds, when the skills are disabled).
+-- Both last until the cursor leaves the bar. A left click on wargear that
+-- can burn out (the Refractor Shield) burns it out or puts it back
+-- (setBurnt) instead, and one on a Continuous Wyrd power puts it in effect
+-- or ends it.
+function onBarClick(player, value, id)
+    local key; key, id = viewerOf(id)
+    local v = view(key)
+    v.barHover = true
+    local it = idNum(id, "skillBtn") and SKILL.owned()[idNum(id, "skillBtn")]
+    if tostring(value) == "-2" then
+        v.barFlip = not v.barFlip or nil
+    elseif it and it.burns then
+        setBurnt(it.key)                         -- burnt out, or back
+    elseif it and SKILL.maintainable(it) then
+        setMaintained({ key = it.key }, player)   -- a Continuous power: in effect, or not
+    elseif idNum(id, "skillBtn") then
+        v.barInfo = not v.barInfo or nil
+        v.skillHover = idNum(id, "skillBtn")
+    end
+    SKILL.drawBar(key)
+end
+function onSkillExit(player, value, id)
+    local key; key, id = viewerOf(id)
+    local v = view(key)
+    if v.skillHover ~= idNum(id, "skillBtn") then return end
+    v.skillHover = nil
+    SKILL.drawInfo(key)
+end
+
+-- A condition's icon in the bar under the stats (condBar_<i>) or an entry
+-- in A's / C's panel (<prefix>_<i>): while the cursor is on it, that player
+-- sees its panel over the stats -- the condition's name (and description),
+-- an entry's description (see SKILL.entryInfo; without one the stats stay).
+-- Moving between them may deliver the new one's enter first, so leaving
+-- only hides the panel it showed -- and only after CFG.popupLinger.
+-- A Wyrd or Utility action also swaps the stats to the hover view (Ld,
+-- Wil, Int, Cl) while the cursor is on it (see SKILL.mindStats), with the
+-- same grace on leaving (its own token: the two are left separately).
+function onInfoEnter(player, value, id)
+    local key; key, id = viewerOf(id)
+    local panel, mind
+    if tostring(id):match("^act_") then          -- an action: A / C preview what it spends
+        ACTIVATION.hoverEnter(key, "actHover", id)
+    end
+    local i = idNum(id, "condBar")
+    if i then
+        panel = CONDITIONS[i] and "condInfo_" .. i
+    else
+        local prefix, n = tostring(id):match("^(.-)_(%d+)$")
+        panel = prefix and SKILL.entryInfo(prefix, tonumber(n))
+        mind = prefix and SKILL.mindStats(prefix, tonumber(n))
+    end
+    local v = view(key)
+    if mind then
+        local was = v.mindFrom
+        v.mindFrom, v.mindToken = id, (v.mindToken or 0) + 1
+        if not was then drawStats(key) end
+    end
+    if not panel then return end
+    v.infoHover, v.infoFrom = panel, id
+    v.infoToken = (v.infoToken or 0) + 1
+    SKILL.drawInfo(key)
+end
+function onInfoExit(player, value, id)
+    local key; key, id = viewerOf(id)
+    local v = view(key)
+    ACTIVATION.hoverLeave(key, "actHover", id)
+    if v.mindFrom == id then
+        v.mindToken = (v.mindToken or 0) + 1
+        local token = v.mindToken
+        Wait.time(function()
+            if token ~= v.mindToken or v.mindFrom ~= id then return end
+            v.mindFrom = nil
+            drawStats(key)
+        end, CFG.popupLinger)
+    end
+    if v.infoFrom ~= id then return end
+    -- a moment's grace: sliding onto the next icon may send this exit
+    -- before its enter, and the panel would blink off and on between them
+    v.infoToken = (v.infoToken or 0) + 1
+    local token = v.infoToken
+    Wait.time(function()
+        if token ~= v.infoToken or v.infoFrom ~= id then return end
+        v.infoHover, v.infoFrom = nil, nil
+        SKILL.drawInfo(key)
+    end, CFG.popupLinger)
+end
+
+-- A condition toggle in C's panel. A left click switches it on or off; for
+-- a stacking one (Concussion) it takes a stack off instead while there are
+-- two or more. A right click adds a stack to a stacking one (switching it on
+-- if it is off) and does nothing to the others ...
+function onToggleCondition(player, value, id)
+    local _; _, id = viewerOf(id)
+    local c = CONDITIONS[idNum(id, "cond") or 0]
+    if not c then return end
+    local n = conditionCount(c.key)
+    if tostring(value) == "-2" then
+        if c.stacks then setCondition(c.key, n + 1) end
+        return
+    end
+    setCondition(c.key, (c.stacks and n >= 2) and n - 1 or (n > 0 and 0 or 1))
+end
+
+-- ... and its icon in the bar under the stats takes it off, one stack at a
+-- time for a stacking one.
+function onClearCondition(player, value, id)
+    local _; _, id = viewerOf(id)
+    local c = CONDITIONS[idNum(id, "condBar") or 0]
+    if c then setCondition(c.key, conditionCount(c.key) - 1) end
+end
+
+-- Health segments. Left click sets wounds to that segment; clicking the
+-- segment that is currently the last full one knocks another wound off, so
+-- damage and healing both work with a single mouse button.
+function onClickHpSegment(player, value, id)
+    local _; _, id = viewerOf(id)
+    local i = idNum(id, "hpSeg")
+    if not i then return end
+    local cur = clamp(fighter.wounds.current, 0, fighter.wounds.max)
+    setWounds(i == cur and i - 1 or i)
+end
+
+-- Hovering a segment lights every segment up to it, previewing where a click
+-- would leave the bar, rather than just the one under the cursor.
+function onHpEnter(player, value, id)
+    local key; key, id = viewerOf(id)
+    if not idNum(id, "hpSeg") then return end
+    view(key).hpHover = id
+    drawHp(key)
+end
+
+-- Sliding between neighbouring segments can deliver the new one's enter
+-- before the old one's exit, so only the segment lit last may clear the bar.
+function onHpExit(player, value, id)
+    local key; key, id = viewerOf(id)
+    local v = view(key)
+    if v.hpHover ~= id then return end
+    v.hpHover = nil
+    drawHp(key)
+end
+
+-- The two buttons beside a weapon profile (see PROFILE_MODES). TTS passes
+-- the mouse button as `value`: "-1" left, "-2" right, "-3" middle.
+function onProfileButton(player, value, id)
+    local _; _, id = viewerOf(id)
+    local tag, i, pi = tostring(id or ""):match("^(%a+)_(%d+)_(%d+)$")
+    i, pi = tonumber(i), tonumber(pi)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and w.profiles[pi]
+    if not p then return end
+    local right = tostring(value) == "-2"
+    local middle = tostring(value) == "-3"
+    local at    = { weapon = i, profile = pi }
+    if tag == "patk" then
+        if middle then
+            -- Aimed Shot on / off (not on once the activation's shot is made);
+            -- taken off by hand, an Aimed Shot taken from A's panel is over
+            -- too (fighter.aimedShot, see openedFlyout)
+            if TRAIT_RULES.aiming[w] then
+                TRAIT_RULES.setAim(i, false)
+                fighter.aimedShot = nil
+            elseif TRAIT_RULES.mayAim(w, p) then TRAIT_RULES.setAim(i, true) end
+        elseif right then
+            if hasRapidFire(p) then           -- ATK <-> RF
+                at.mode = PROFILE_MODES[profileMode(p) % #PROFILE_MODES + 1].key
+                setProfileState(at)
+            end
+        else
+            rollAttack(at, player)          -- ATK / RF: the hit roll and the rest (see rollAttack)
+        end
+    elseif tag == "pammo" then
+        if middle then
+            reloadWeapon(at, player)          -- only does something while OUT
+        else
+            at.ammo = TRAIT_RULES.ammoNext(w, p, right)
+            setProfileState(at)
+        end
+    elseif tag == "pcnt" then
+        at.attacks = meleeStep(p, not right) or "A+1"
+        setProfileState(at)
+    end
+end
+
+-- The models behind an Assist or Interference, highlighted while a
+-- player's cursor is on the Hit of a melee profile that has one (view
+-- hitHover: that weapon's slot): the assisting friends in the green of a
+-- value made better, the interfering enemies in the orange of one made
+-- worse -- the models TRAIT_RULES.supportNear found as the popup opened.
+-- Called whenever a hovered Hit changes; what was lit and no longer is
+-- goes out, and an open check's own highlights are put back.
+function TRAIT_RULES.lightSupport()
+    local R, want = TRAIT_RULES, {}
+    for _, key in ipairs(ui.viewers) do
+        local w = weaponAt(tonumber(view(key).hitHover) or 0)
+        local n = w and R.support[w]
+        for _, obj in ipairs(n and R.supportBy[w] or {}) do
+            want[obj] = rgbOf(n > 0 and COL.valueUp or COL.valueMod)
+        end
+    end
+    local was = R.lit or {}
+    for obj in pairs(was) do
+        if not want[obj] then pcall(function() obj.highlightOff() end) end
+    end
+    for obj, rgb in pairs(want) do
+        if not was[obj] then pcall(function() obj.highlightOn(rgb) end) end
+    end
+    R.lit = next(want) and want or nil
+    if next(was) and not R.lit then ACTIVATION.nerveLight(true) end
+end
+
+-- The cursor onto a profile's Hit, and off it again: only a melee
+-- profile's lights anything (see TRAIT_RULES.lightSupport).
+function onHitEnter(player, value, id)
+    local key; key, id = viewerOf(id)
+    local i, pi = tostring(id or ""):match("^phit_(%d+)_(%d+)$")
+    local w = weaponAt(tonumber(i) or 0)
+    local p = w and w.profiles and w.profiles[tonumber(pi)]
+    view(key).hitHover = p and isMelee(p) and tonumber(i) or nil
+    TRAIT_RULES.lightSupport()
+end
+function onHitExit(player, value, id)
+    local key = viewerOf(id)
+    view(key).hitHover = nil
+    TRAIT_RULES.lightSupport()
+end
+
+-- The Hit value in a profile's row: left click one up, right click one
+-- down -- the weapon's, so every profile of it shows the change (see
+-- setWeaponHit). A middle click steps its re-rolls to hit: none, 1s,
+-- every miss, none again (see TRAIT_RULES.setReroll).
+function onHitClick(player, value, id)
+    local _; _, id = viewerOf(id)
+    local i = tonumber(tostring(id or ""):match("^phit_(%d+)_%d+$"))
+    local w = i and weaponAt(i)
+    if not w then return end
+    if tostring(value) == "-3" then
+        return TRAIT_RULES.setReroll(i, TRAIT_RULES.REROLL_NEXT[TRAIT_RULES.reroll[w] or "none"])
+    end
+    setWeaponHit({ weapon = i, value = TRAIT_RULES.hit(w) + (tostring(value) == "-2" and -1 or 1) })
+end
+
+-- Any other value in a profile's row (padj_<weapon>_<profile>_<column>,
+-- see TRAIT_RULES.ADJ): left click one better, right click one worse --
+-- that profile's own (see setProfileStat).
+function onProfileStatClick(player, value, id)
+    local _; _, id = viewerOf(id)
+    local i, pi, ci = tostring(id or ""):match("^padj_(%d+)_(%d+)_(%d+)$")
+    local col = PROFILE_COLS[tonumber(ci) or 0]
+    local w = tonumber(i) and weaponAt(tonumber(i))
+    local p = w and w.profiles and w.profiles[tonumber(pi)]
+    if not (p and col) then return end
+    setProfileStat({ weapon = tonumber(i), profile = tonumber(pi), key = col.key,
+                     value = TRAIT_RULES.adjSteps(p, col.key) + (tostring(value) == "-2" and -1 or 1) })
+end
+
+-- The Reliable trait in a profile's traits line (see TRAIT_RULES.segments):
+-- a left click makes it used (red) or ready again (green), by hand.
+function onReliableClick(player, value, id)
+    if tostring(value) == "-2" then return end
+    local _; _, id = viewerOf(id)
+    local i, pi = tostring(id or ""):match("^prelBtn_(%d+)_(%d+)$")
+    local w = tonumber(i) and weaponAt(tonumber(i))
+    local p = w and w.profiles and w.profiles[tonumber(pi)]
+    if not p then return end
+    setReliable({ weapon = tonumber(i), profile = tonumber(pi), value = p.reliableUsed == true })
+end
+
+-- The cursor on a profile's row and off it, per viewer. On a Combi row
+-- (its box or buttons) it is remembered (view.profHover), so that viewer's
+-- BS shows orange while the profile is on Combi (see weaponContext). On an
+-- ATK / RF cell (any profile, melee too) view.costHover makes A / C show
+-- the actions that attack would spend darker -- on a ranged profile's AM,
+-- what its Reload would (see drawReady; it goes a
+-- moment after the cursor does, ACTIVATION.hoverLeave). Leaving only
+-- clears what it set, as moving between a row's parts may enter before
+-- it leaves.
+function onProfileEnter(player, value, id)
+    local key; key, id = viewerOf(id)
+    local v, row = view(key), tostring(id or ""):match("(%d+_%d+)")
+    if tostring(id):match("^patk_") then ACTIVATION.hoverEnter(key, "costHover", row) end
+    if tostring(id):match("^pammo_") then ACTIVATION.hoverEnter(key, "costHover", "r" .. row) end
+    local i, pi = tostring(row):match("^(%d+)_(%d+)$")
+    local p = weaponAt(tonumber(i) or 0) and weaponAt(tonumber(i)).profiles[tonumber(pi)]
+    if p and TRAIT_RULES.combi(p) then
+        v.profHover = row
+        redrawStats(key)
+    end
+end
+function onProfileExit(player, value, id)
+    local key; key, id = viewerOf(id)
+    local v, row = view(key), tostring(id or ""):match("(%d+_%d+)")
+    if tostring(id):match("^patk_") then ACTIVATION.hoverLeave(key, "costHover", row) end
+    if tostring(id):match("^pammo_") then ACTIVATION.hoverLeave(key, "costHover", "r" .. row) end
+    if v.profHover ~= row then return end
+    v.profHover = nil
+    redrawStats(key)
+end
+
+-- Leaving the stats and leaving a value's column both wait a moment
+-- (CFG.popupLinger) before they happen, so the cursor can move from a value
+-- onto its Set plate -- which lies outside the block -- and back: entering
+-- anything of the stats calls a waiting leave off (each has its own token,
+-- like requestHide's).
+local function statsLater(key, token, fn)
+    local v = view(key)
+    v[token] = (v[token] or 0) + 1
+    local mine = v[token]
+    Wait.time(function() if v[token] == mine then fn(v) end end, CFG.popupLinger)
+end
+local function statsHold(key, token)
+    local v = view(key)
+    v[token] = (v[token] or 0) + 1
+end
+
+-- The cursor has left the stats (block and Set plates): the header view
+-- swaps back, the plates hide and the numbers that player changed and
+-- didn't keep go back to what they were.
+local function leaveStats(key)
+    statsLater(key, "leaveToken", function(v)
+        v.statsHover, v.statCol, v.headHeld = false, nil, nil
+        for stat, p in pairs(pendingStats) do
+            if p.by == key then pendingStats[stat] = nil end
+        end
+        drawStats()
+    end)
+end
+
+-- The cursor has left column `i`'s value (or its Set plate): the plate
+-- hides, and so do the lit sources (see SKILL.drawSources).
+local function leaveColumn(key, i)
+    statsLater(key, "colToken", function(v)
+        if v.statCol ~= i then return end
+        v.statCol = nil
+        drawStats(key)
+    end)
+end
+
+-- Entering the stat block's header row swaps BS / WS / S / A for Ld / Wil /
+-- Int / Cl on that player's copy; leaving the whole block swaps them back.
+-- Not while `headHeld`: a Set plate (over the header row) was just clicked
+-- and vanished, so the cursor "entered" the row without moving -- the
+-- swap waits until it leaves the row and comes back.
+function onStatsEnter(player, value, id)
+    local key = viewerOf(id)
+    statsHold(key, "leaveToken")
+    local v = view(key)
+    if v.headHeld then return end
+    v.statsHover = true
+    drawStats(key)
+end
+
+-- The cursor off the header row: the next entry swaps again.
+function onStatsHeadExit(player, value, id)
+    view((viewerOf(id))).headHeld = nil
+end
+
+function onStatsExit(player, value, id)
+    leaveStats(viewerOf(id))
+end
+
+-- The column of a stat element's id (statCol_3, statSetBtn_3, ...), and the
+-- stat that column shows to that player right now.
+local function statColumnOf(id)
+    local key, rest = viewerOf(id)
+    local i = tonumber(tostring(rest or ""):match("^stat%a+_(%d+)$"))
+    return key, i, i and (view(key).statsHover and STAT.hoverOrder() or CFG.statOrder)[i]
+end
+
+-- The cursor onto / off a value or its Set plate: that column's plate and the
+-- sources of what changes the stat show on that player's copy, or hide a
+-- moment later. A plate is outside the block, so leaving a plate is leaving
+-- the stats too -- unless the cursor comes back in.
+local function enterColumn(id)
+    local key, i = statColumnOf(id)
+    if not i then return end
+    statsHold(key, "leaveToken")
+    statsHold(key, "colToken")
+    view(key).statCol = i
+    drawStats(key)
+end
+
+function onStatColEnter(player, value, id) enterColumn(id) end
+function onStatPlateEnter(player, value, id) enterColumn(id) end
+
+function onStatColExit(player, value, id)
+    local key, i = statColumnOf(id)
+    if i then leaveColumn(key, i) end
+end
+
+function onStatPlateExit(player, value, id)
+    local key, i = statColumnOf(id)
+    if not i then return end
+    leaveColumn(key, i)
+    leaveStats(key)
+end
+
+-- A click on a stat's value: a left click tests it (rollStat) with the
+-- number as it shows, set or not; a right click raises it by one, round
+-- from its highest to its lowest (see nudgeStat) -- not kept until its Set
+-- plate is clicked.
+function onStatClick(player, value, id)
+    local key, _, stat = statColumnOf(id)
+    if not stat then return end
+    if tostring(value) == "-2" then nudgeStat(stat, 1, key) else rollStat(stat, player) end
+end
+
+-- The Set plate over a changed value: the number becomes the stat's base.
+-- The plate hides under the cursor, which then lies on the header row: it
+-- mustn't swap the stats until the cursor leaves the row (see onStatsEnter).
+function onStatSet(player, value, id)
+    local key, _, stat = statColumnOf(id)
+    if not stat then return end
+    view(key).headHeld = true
+    keepStat(stat)
+end
+
+--============================================================================
+-- 10b. BASES AND ENGAGEMENT -- the base's size (every range in Necromunda is
+--      measured base to base) and the automatic Engaged status. The public
+--      side (getBase, setBase, baseToBase, checkEngagement) is in section 11.
+--============================================================================
+
+local MM_PER_INCH = 25.4
+
+-- A base: diameter in inches (what ranges use), mm (what people read),
+-- where it came from ("measured", "manual", "description", "default"),
+-- and for a measured one the raw size (mm), how it was measured and
+-- whether it was too far from every standard size to snap (`guess`).
+local function baseRecord(mm, source, raw, how, guess)
+    return { diameter = mm / MM_PER_INCH, mm = mm, source = source,
+             raw = raw, how = how, guess = guess or nil }
+end
+
+-- A base table from a save or an importer, completed (nil if unusable).
+local function validBase(t)
+    if type(t) ~= "table" then return nil end
+    local d = tonumber(t.diameter)
+    if not d or d <= 0 then return nil end
+    t.diameter, t.mm = d, tonumber(t.mm) or d * MM_PER_INCH
+    return t
+end
+
+-- Engagement state: `token` makes a newer drop cancel the wait of an older
+-- one; `spot` is where the model stood when last checked (or picked up) --
+-- its enemies there may be left behind; `pending` is a drop not checked yet
+-- (picked up again before it settled), whose spot must not be lost.
+local engage = { token = 0, spot = nil, pending = false }
+
+-- An object's position as a plain { x, y, z } (nil if it can't be read).
+local function positionOf(obj)
+    local ok, p = pcall(function() return obj.getPosition() end)
+    if not ok or p == nil then return nil end
+    local x, y, z = tonumber(p.x or p[1]), tonumber(p.y or p[2]), tonumber(p.z or p[3])
+    return (x and y and z) and { x = x, y = y, z = z } or nil
+end
+
+-- Whether `obj` is this card's own model (by reference, else by GUID).
+local function isSelf(obj)
+    if obj == self then return true end
+    local ok, same = pcall(function() return obj.getGUID() == self.getGUID() end)
+    return ok and same == true
+end
+
+-- Base to base on the table plane (x / z): the distance between the centres
+-- less both radii, in inches (negative: overlapping). a, b: { x, z, r }.
+local function baseGap(a, b)
+    return math.sqrt((a.x - b.x) ^ 2 + (a.z - b.z) ^ 2) - a.r - b.r
+end
+
+-- The rest of the machinery is private to this block (the main chunk is
+-- near Lua's 200-local limit); these are what the rest of the card uses.
+local measureBase, currentBase, runEngagement
+
+do
+    -- The smaller of the x and z sizes (world units ~ inches) of a bounds value
+    -- as TTS hands it back: a table / Vector with `size`, or Unity's Bounds with
+    -- `size` or `extents` (half the size); nil for anything else. A round base
+    -- is as wide in x as in z whichever way it faces, so the smaller side is
+    -- the one a miniature overhanging to one side has not widened.
+    local function footprint(b)
+        if b == nil then return nil end
+        local s, k = b.size, 1
+        if s == nil then s, k = b.extents, 2 end
+        if s == nil then return nil end
+        local x, z = tonumber(s.x or s[1]), tonumber(s.z or s[3])
+        if not (x and z) or x <= 0 or z <= 0 then return nil end
+        return math.min(x, z) * k
+    end
+
+    -- The diameter of `obj`'s base in inches as measured, and how it was found
+    -- (nil when nothing worked). getBounds takes in the miniature attached on
+    -- top, so the model's own parts are tried first -- every call wrapped, as
+    -- what TTS's Component API hands back is not documented:
+    --   1. the root's own MeshRenderer: the base's mesh alone (an attached
+    --      miniature is a child object with renderers of its own)
+    --   2. the root's own colliders
+    --   3. getBoundsNormalized, then getBounds -- the whole model, of which the
+    --      smaller side (see footprint)
+    local function measureRaw(obj)
+        local function try(fn)
+            local ok, v = pcall(fn)
+            return ok and tonumber(v) or nil
+        end
+        local d = try(function() return footprint(obj.getComponent("MeshRenderer").get("bounds")) end)
+        if d then return d, "renderer" end
+        d = try(function()
+            local widest
+            for _, c in ipairs(obj.getComponents()) do
+                if tostring(c.name):find("Collider", 1, true) then
+                    local ok, w = pcall(function() return footprint(c.get("bounds")) end)
+                    if ok and w and w > (widest or 0) then widest = w end
+                end
+            end
+            return widest
+        end)
+        if d then return d, "collider" end
+        d = try(function() return footprint(obj.getBoundsNormalized()) end)
+            or try(function() return footprint(obj.getBounds()) end)
+        if d then return d, "bounds" end
+    end
+
+    -- The standard base size (mm) for a measurement: the nearest of
+    -- CFG.baseSizes if within CFG.baseSnap; otherwise the largest one below it
+    -- (an overhang only ever adds), flagged as a guess.
+    local function snapBase(mm)
+        local near, under
+        for _, s in ipairs(CFG.baseSizes) do
+            if not near or math.abs(s - mm) < math.abs(near - mm) then near = s end
+            if s <= mm and (not under or s > under) then under = s end
+        end
+        if not near or math.abs(near - mm) <= CFG.baseSnap then return near or mm, false end
+        return under or near, true
+    end
+
+    -- `obj`'s base, measured and snapped (nil when it can't be measured).
+    function measureBase(obj)
+        local d, how = measureRaw(obj)
+        if not d then return nil end
+        local raw = d * MM_PER_INCH
+        local mm, guess = snapBase(raw)
+        return baseRecord(mm, "measured", math.floor(raw * 10 + 0.5) / 10, how, guess)
+    end
+
+    -- The model's height -- its top, miniature and all, above its origin --
+    -- in its own local units (so it follows a rescale), or nil. Taken with
+    -- the model standing (on import, or on the first load of a card that has
+    -- none). A model is often a base with the miniature attached to it in
+    -- several parts, and no one measure sees every part of every model: a
+    -- part's collider can be a small stand-in (the colliders' bounds then
+    -- stop at the base), a part's renderer can be left out of the merged
+    -- ones. So every measure is taken -- the merged renderers
+    -- (getVisualBoundsNormalized), the colliders (getBoundsNormalized,
+    -- getBounds) and each renderer of the model and of every part attached
+    -- to it (Component API) -- and the highest top wins: a measure that
+    -- misses a part only ever comes out lower. Every call is wrapped, as
+    -- what TTS's Component API hands back is not documented.
+    function modelHeight(obj)
+        local okP, p = pcall(function() return obj.getPosition() end)
+        local y = okP and p and tonumber(p.y or p[2])
+        if not y then return nil end
+        local okS, s = pcall(function() return obj.getScale() end)
+        local sy = math.max(0.01, math.abs(okS and s and tonumber(s.y or s[2]) or 1))
+        -- the y of a Vector (nil when it has none)
+        local function up(v)
+            local ok, n = pcall(function() return tonumber(v.y or v[2]) end)
+            return ok and n or nil
+        end
+        -- the top (world y) of a bounds value: a table with `center` and
+        -- `size`, or Unity's Bounds with `max`, or `center` and `extents`
+        local function topOf(b)
+            local ok, t = pcall(function()
+                local c, z, e = up(b.center), up(b.size), up(b.extents)
+                return up(b.max) or (c and z and c + z / 2) or (c and e and c + e)
+            end)
+            return ok and tonumber(t) or nil
+        end
+        local best
+        local function take(b)
+            local t = topOf(b)
+            if t and t > y and (not best or t > best) then best = t end
+        end
+        for _, get in ipairs({ "getVisualBoundsNormalized", "getBoundsNormalized", "getBounds" }) do
+            local ok, b = pcall(function() return obj[get]() end)
+            if ok then take(b) end
+        end
+        for _, kind in ipairs({ "MeshRenderer", "SkinnedMeshRenderer" }) do
+            local ok, list = pcall(function() return obj.getComponentsInChildren(kind) end)
+            if ok and type(list) == "table" then
+                for _, c in ipairs(list) do
+                    local okE, on = pcall(function() return c.get("enabled") end)
+                    if not (okE and on == false) then
+                        local okB, b = pcall(function() return c.get("bounds") end)
+                        if okB then take(b) end
+                    end
+                end
+            end
+        end
+        return best and (best - y) / sy
+    end
+
+    -- The size in a "Base: 32mm" line of a description (BBCode tags ignored;
+    -- "mm" optional), or nil. Short lines only, so no long pattern runs.
+    local function baseFromText(desc)
+        for line in (tostring(desc or "") .. "\n"):gmatch("([^\n]*)\n") do
+            local bare = line:gsub("%[/?[%w%-]*%]", "")
+            local n = tonumber(bare:match("^%s*[Bb][Aa][Ss][Ee]%s*:%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
+            if n and n > 0 then return n end
+        end
+    end
+
+    -- This fighter's base: a "Base:" line in the model's description wins (it
+    -- is what players see); then the fighter's own (set by hand, passed in by
+    -- the importer, or measured once and kept); else CFG.baseDefault.
+    function currentBase()
+        local ok, desc = pcall(function() return self.getDescription() end)
+        local mm = ok and baseFromText(desc)
+        if mm then return baseRecord(mm, "description") end
+        if not validBase(fighter.base) then fighter.base = measureBase(self) end
+        return fighter.base or baseRecord(CFG.baseDefault, "default")
+    end
+
+    -- A model's gang, by its tags (see ui.gangOf).
+    local gangOf = ui.gangOf
+
+    -- Whether two bases are within engaging reach: CFG.engageRange base to base
+    -- (the limit included), on the same level (CFG.engageLevel).
+    local function inReach(a, b)
+        return baseGap(a, b) <= CFG.engageRange + CFG.engageSlack
+           and math.abs(a.y - b.y) <= CFG.engageLevel + CFG.engageSlack
+    end
+
+    -- The statuses that engage an enemy (Seriously Injured does not), and those
+    -- the card turns to Engaged.
+    local ENGAGING   = { active = true, suppressed = true, engaged = true }
+    local ENGAGEABLE = { active = true, suppressed = true }
+
+    -- One fighter on the table as the check sees it -- object, gang, name,
+    -- status, base radius, position, rank and Cl (for Nerve Checks) -- or
+    -- nil for a model without a gang tag or a card, or one Out of Action
+    -- (out of the game). Other cards are asked through engageInfo; one too
+    -- old to have it through getFighter, its base then measured from here.
+    local function tableEntry(obj)
+        local gang = gangOf(obj)
+        local pos  = gang and positionOf(obj)
+        if not pos then return nil end
+        local me, info = isSelf(obj), nil
+        if me then
+            info = engageInfo()
+        else
+            local ok, v = ACTIVATION.ask(obj, "engageInfo")
+            info = ok and type(v) == "table" and v or nil
+            if not info then
+                local okF, f = ACTIVATION.ask(obj, "getFighter")
+                if okF and type(f) == "table" and f.status then
+                    local b = validBase(f.base) or measureBase(obj) or baseRecord(CFG.baseDefault, "default")
+                    info = { name = f.name, status = f.status, diameter = b.diameter, rank = f.rank, old = true }
+                end
+            end
+        end
+        if not (info and info.status) or info.out then return nil end
+        local d = tonumber(info.diameter) or CFG.baseDefault / MM_PER_INCH
+        return { obj = obj, self = me, old = info.old == true, gang = gang, name = tostring(info.name or "?"),
+                 status = info.status, r = d / 2, x = pos.x, y = pos.y, z = pos.z,
+                 rank = info.rank, cl = tonumber(info.cl), t = tonumber(info.t), s = tonumber(info.s),
+                 activation = info.activation, master = info.master == true,
+                 fearsome = info.fearsome == true, ironJaw = tonumber(info.ironJaw),
+                 lieLow = info.lieLow == true, assist = tonumber(info.assist),
+                 assistWith = info.assistWith and tostring(info.assistWith) or nil,
+                 wyrd = info.wyrd == true, wil = tonumber(info.wil),
+                 auras = type(info.auras) == "table" and info.auras or nil,
+                 cacophony = info.cacophony and tostring(info.cacophony) or nil, void = tonumber(info.void),
+                 visions = type(info.visions) == "table" and info.visions or nil,
+                 immune = type(info.immune) == "table" and info.immune or nil }
+    end
+
+    -- The other fighters (importTag) among the objects `player` has
+    -- selected: what an attack, Treat Ally and Group Activation are aimed
+    -- at. Objects; none for a player with nothing selected.
+    function ACTIVATION.picked(player)
+        -- TTS hands handlers a Player (userdata, not a table); a colour works too
+        local p = player
+        if type(player) == "string" then p = Player and Player[player] end
+        local ok, sel = pcall(function() return p.getSelectedObjects() end)
+        local out = {}
+        for _, obj in ipairs(ok and type(sel) == "table" and sel or {}) do
+            local okT, tags = pcall(function() return obj.getTags() end)
+            local tagged = false
+            for _, t in ipairs(okT and type(tags) == "table" and tags or {}) do tagged = tagged or t == CFG.importTag end
+            if tagged and not isSelf(obj) then out[#out + 1] = obj end
+        end
+        return out
+    end
+
+    -- The enemies `player` has selected: of the fighters that player has
+    -- selected (see ACTIVATION.picked), those of another gang than this
+    -- one's -- none when this model has no gang -- in the order selected.
+    -- With `any`, every fighter selected but this one, whatever its gang
+    -- (a weapon's attack: anyone can be shot or struck), each marked `foe`
+    -- when of another gang. Each one's Toughness and Strength (`t`, `s`) as
+    -- its card shows them -- an older card's read from its statline. Table
+    -- entries (see tableEntry): a Template weapon hits every one (see
+    -- ACTIVATION.strike).
+    function ACTIVATION.targets(player, any)
+        local mine, out = gangOf(self), {}
+        if not (mine or any) then return out end
+        for _, obj in ipairs(ACTIVATION.picked(player)) do
+            local gang = gangOf(obj)
+            if any or (gang and gang ~= mine) then
+                local e = tableEntry(obj)
+                if e then
+                    if not (e.t and e.s) then
+                        local okF, f = ACTIVATION.ask(obj, "getFighter")
+                        local stats = okF and type(f) == "table" and type(f.stats) == "table" and f.stats or {}
+                        e.t = e.t or tonumber(tostring(stats.T or ""):match("%d+"))
+                        e.s = e.s or tonumber(tostring(stats.S or ""):match("%d+"))
+                    end
+                    e.foe = gang ~= nil and mine ~= nil and gang ~= mine
+                    out[#out + 1] = e
+                end
+            end
+        end
+        return out
+    end
+
+    -- The enemy `player` has selected, an attack's target (see
+    -- rollAttack): the one of ACTIVATION.targets -- none when there are two
+    -- or more (whose?). With `any`, the one fighter selected of any gang (a
+    -- weapon's attack). A table entry, or nil.
+    function ACTIVATION.target(player, any)
+        local all = ACTIVATION.targets(player, any)
+        return #all == 1 and all[1] or nil
+    end
+
+    -- How far the fighter `player` has selected (see ACTIVATION.target;
+    -- any gang's, as a weapon's attack takes) is from this fighter, base to
+    -- base, in inches -- nil with none selected -- and its table entry. For
+    -- Marksman (see TRAIT_RULES.measure).
+    function TRAIT_RULES.gapTo(player)
+        local aim = ACTIVATION.target(player, true)
+        local me = aim and tableEntry(self)
+        if not me then return nil end
+        return baseGap(me, aim), aim
+    end
+
+    -- What cover adds to the save of `aim` (a table entry, see
+    -- ACTIVATION.target) against an attack with profile p of weapon w,
+    -- should it be in cover (see takeSaves): CFG.coverShort when it is
+    -- within the Short Range (as shown) base to base, CFG.coverLong when
+    -- beyond it; a weapon with only one range in inches ("T", "-") always
+    -- gives that one's. Within an enemy's A Perfect Void (`void`) it is
+    -- at Long range. nil for a melee attack, or one with neither range in
+    -- inches (a Template's "T" / "-"): no cover then.
+    function ACTIVATION.coverFor(w, p, aim)
+        if not (w and p and aim) or isMelee(p) then return nil end
+        local R = TRAIT_RULES
+        local function inches(key)
+            local t = R.parts(R.value(w, p, key))
+            if not t or t.dash or t.token then return nil end
+            return t.num
+        end
+        local sr, lr = inches("SR"), inches("LR")
+        if not (sr or lr) then return nil end
+        if not lr then return CFG.coverShort end
+        if not sr then return CFG.coverLong end
+        local me = tableEntry(self)
+        local gap = me and aim.x and aim.z and baseGap(me, aim)   -- (no position: unknown)
+        if not gap then return CFG.coverShort end
+        local slack = CFG.engageSlack or 0
+        if aim.void and gap <= aim.void + slack then return CFG.coverLong end
+        return gap > sr + slack and CFG.coverLong or CFG.coverShort
+    end
+
+    -- Every fighter on the table (importTag, see tableEntry), and this
+    -- one's entry among them -- nil for a card without the import tag,
+    -- which the callers then read on its own.
+    function ACTIVATION.everyone()
+        local ok, objs = pcall(function() return getObjectsWithTag(CFG.importTag) end)
+        local all, me = {}, nil
+        for _, obj in ipairs(ok and type(objs) == "table" and objs or {}) do
+            local e = tableEntry(obj)
+            if e then
+                all[#all + 1] = e
+                if e.self then me = e end
+            end
+        end
+        return all, me
+    end
+
+    -- The enemies `f` is engaged with: fighters of other gangs, not Seriously
+    -- Injured, within reach. None for a Seriously Injured fighter.
+    local function foesOf(f, all)
+        local out = {}
+        if not ENGAGING[f.status] then return out end
+        for _, o in ipairs(all) do
+            if o ~= f and o.gang ~= f.gang and ENGAGING[o.status] and inReach(f, o) then out[#out + 1] = o end
+        end
+        return out
+    end
+
+    -- Backstab (see TRAIT_RULES): whether the enemy this fighter attacks is
+    -- engaged with another friend (same gang tag) as well -- within reach
+    -- of it, the same test as engaging; a Seriously Injured fighter engages
+    -- nobody and is engaged by nobody. The enemy is the one `player` (a
+    -- Player or a colour) has selected; with none selected, the one enemy
+    -- this fighter is engaged with (none when it is engaged with several:
+    -- whose back?). Looked up when a weapon with the trait opens its popup,
+    -- never while moving.
+    function TRAIT_RULES.backstabNear(player)
+        local all, me = ACTIVATION.everyone()
+        if not me then                      -- a gang's card without the import tag
+            me = tableEntry(self)
+            if not me then return false end
+            all[#all + 1] = me
+        end
+        local foe = ACTIVATION.target(player)
+        if not foe then
+            local foes = foesOf(me, all)
+            foe = #foes == 1 and foes[1] or nil
+        end
+        if not (foe and ENGAGING[foe.status]) then return false end
+        for _, o in ipairs(all) do
+            if o ~= me and o.gang == me.gang and ENGAGING[o.status] and inReach(o, foe) then return true end
+        end
+        return false
+    end
+
+    -- Assist and Interference (see TRAIT_RULES.shownHit): what close
+    -- combat does to this fighter's melee hit rolls where it stands.
+    --   Interference, -1: two or more enemies are engaged with it, and one
+    --     of them -- not the one attacked, where `player` (a Player or a
+    --     colour) has one of them selected -- fights nobody else.
+    --   Assist, 1: just one enemy is engaged with it, and a friend is
+    --     engaged with that enemy too and fights nobody else.
+    -- "Nobody else": a fighter engaged with two or more enemies has its
+    -- hands full and neither assists nor interferes -- unless it is a
+    -- Combat Master (the skill, see engageInfo), which always does.
+    -- Engaged as the engagement check has it: within reach, base to base,
+    -- Seriously Injured fighters left out. Returns 1, -1 or nil, and who
+    -- gives it: every model that does (a list of objects), though the hit
+    -- roll only ever changes by one. Looked up when a melee weapon's popup
+    -- opens, never while moving.
+    function TRAIT_RULES.supportNear(player)
+        local all, me = ACTIVATION.everyone()
+        if not me then                      -- a gang's card without the import tag
+            me = tableEntry(self)
+            if not me then return nil end
+            all[#all + 1] = me
+        end
+        local foes = foesOf(me, all)
+        local function counts(o) return o.master or #foesOf(o, all) == 1 end
+        if #foes >= 2 then
+            local aim = ACTIVATION.target(player)
+            local function aimedAt(o)
+                if not aim then return false end
+                local ok, same = pcall(function() return aim.obj == o.obj or aim.obj.getGUID() == o.obj.getGUID() end)
+                return ok and same == true
+            end
+            local by = {}
+            for _, o in ipairs(foes) do
+                if not aimedAt(o) and counts(o) then by[#by + 1] = o.obj end
+            end
+            if #by > 0 then return -1, by end
+        elseif #foes == 1 then
+            local by = {}
+            for _, o in ipairs(all) do
+                if o ~= me and o.gang == me.gang and ENGAGING[o.status] and inReach(o, foes[1]) and counts(o) then
+                    by[#by + 1] = o.obj
+                end
+            end
+            if #by > 0 then return 1, by end
+        end
+        return nil
+    end
+
+    -- What surrounds this fighter when it makes a Recovery test: the
+    -- enemies within reach that aren't Seriously Injured (any one takes it
+    -- Out of Action), and a friend who can assist -- within reach, not
+    -- Seriously Injured, and with no such enemy in its own reach (not
+    -- Engaged) -- or nil. Of several, the one whose wargear adds most to
+    -- the test (`assist`: a Medicae Kit's extra Injury dice, as its card's
+    -- engageInfo says). Reach is the engagement check's: 1" base to base.
+    function ACTIVATION.surroundings()
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        local foes, helper = {}, nil
+        if not me then return { foes = foes } end
+        local function threat(a, b) return b.gang ~= a.gang and ENGAGING[b.status] and inReach(a, b) end
+        for _, o in ipairs(all) do
+            if not o.self and threat(me, o) then foes[#foes + 1] = o end
+        end
+        for _, o in ipairs(all) do
+            if not o.self and o.gang == me.gang and ENGAGING[o.status] and inReach(me, o)
+               and (not helper or (o.assist or 0) > (helper.assist or 0)) then
+                local free = true
+                for _, e in ipairs(all) do if threat(o, e) then free = false break end end
+                if free then helper = o end
+            end
+        end
+        return { foes = foes, helper = helper }
+    end
+
+    -- Treat Ally: the Seriously Injured friend `player` has selected within
+    -- reach (1" base to base, as for assisting a Recovery test; of several
+    -- the nearest) rolls one more Injury dice in its next Recovery test --
+    -- its own card keeps that (see setTreated). Said in `rgb` and flashed
+    -- on the friend. Returns the friend's table entry, or nil with nobody
+    -- to treat.
+    function ACTIVATION.treat(player, rgb)
+        local me = tableEntry(self)
+        local best
+        for _, obj in ipairs(me and ACTIVATION.picked(player) or {}) do
+            local o = tableEntry(obj)
+            if o and o.gang == me.gang and o.status == "seriously_injured" and inReach(me, o)
+               and (not best or baseGap(me, o) < baseGap(me, best)) then
+                best = o
+            end
+        end
+        if not best then return nil end
+        local ok, dice = ACTIVATION.ask(best.obj, "setTreated", { value = true, by = fighter.name })
+        if not (ok and dice) then return nil end
+        chat(string.format("%s treats %s -- 1 more Injury dice in their next Recovery Test", fighter.name, best.name), rgb)
+        flash(best.obj, ACTIVATION.actionGlow("treat_ally"))
+        return best
+    end
+
+    -- Group Activation: of the fighters `objs` (the ones its player has
+    -- selected, see ACTIVATION.picked), the friends (same gang) that are
+    -- Ready -- those within CFG.groupRange, base to base, which a passed
+    -- check takes along, and those further away, which it doesn't (they
+    -- count for the check all the same: the player judged the distance).
+    -- Both lists of table entries.
+    function ACTIVATION.groupOf(objs)
+        local me = tableEntry(self)
+        local near, far = {}, {}
+        for _, obj in ipairs(me and objs or {}) do
+            local o = tableEntry(obj)
+            if o and o.gang == me.gang and o.activation == "ready" then
+                local list = baseGap(me, o) <= (CFG.groupRange or 3) + CFG.engageSlack and near or far
+                list[#list + 1] = o
+            end
+        end
+        return near, far
+    end
+
+    -- This fighter's friends (its gang's other fighters on the table) within
+    -- `range` inches of it, base to base: a list of table entries.
+    function ACTIVATION.friendsWithin(range)
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        local out = {}
+        for _, o in ipairs(me and all or {}) do
+            if not o.self and o.gang == me.gang and baseGap(me, o) <= range + CFG.engageSlack then
+                out[#out + 1] = o
+            end
+        end
+        return out
+    end
+
+    -- The enemy Wyrd that may try to disrupt a cast by this fighter: of the
+    -- Wyrds of other gangs (a table entry that says `wyrd`, with its `wil`)
+    -- within CFG.disruptRange, base to base, that have sight of this model
+    -- (ACTIVATION.seenBy) -- the one with the highest Willpower (of equals
+    -- the nearest). nil when there is none.
+    function ACTIVATION.disrupter()
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        if not me then return nil end
+        local near = {}
+        for _, o in ipairs(all) do
+            if not o.self and o.gang ~= me.gang and o.wyrd and o.wil
+               and baseGap(me, o) <= (tonumber(CFG.disruptRange) or 18) + CFG.engageSlack then
+                near[#near + 1] = o
+            end
+        end
+        table.sort(near, function(a, b)
+            if a.wil ~= b.wil then return a.wil > b.wil end
+            return baseGap(me, a) < baseGap(me, b)
+        end)
+        for _, o in ipairs(near) do
+            if ACTIVATION.seenBy(o.obj) then return o end
+        end
+        return nil
+    end
+
+    -- What the Wyrd powers do to other fighters (see ACTIVATION.manifest).
+    -- Whether fighter `o` is of `side` as the Wyrd `me` sees it (both table
+    -- entries): "friends" its own gang, "enemies" another, "all" either --
+    -- never the Wyrd itself.
+    function ACTIVATION.sideOf(me, o, side)
+        if o.obj == me.obj or (o.self and me.self) then return false end
+        if side == "friends" then return o.gang == me.gang end
+        if side == "enemies" then return o.gang ~= me.gang end
+        return true
+    end
+    -- Whether `o` is within `range` inches of `me`, base to base (no range:
+    -- anywhere).
+    function ACTIVATION.within(me, o, range)
+        range = tonumber(range)
+        return not range or baseGap(me, o) <= range + CFG.engageSlack
+    end
+
+    -- The enemy a Wyrd power with a `target` is aimed at as it is cast (item
+    -- `it`, see SKILL.owned): the one `player` has selected (see
+    -- ACTIVATION.target) within the power's range, base to base -- its table
+    -- entry, with `gap` its distance -- or nil and why not ("no enemy
+    -- selected", 'Bob is 14" away -- out of range (12")').
+    function ACTIVATION.aimFor(it, player)
+        local aim = ACTIVATION.target(player)
+        if not aim then return nil, "no enemy selected" end
+        local me = tableEntry(self)
+        aim.gap = me and baseGap(me, aim) or nil
+        local range = tonumber(it.target and it.target.range)
+        if range and aim.gap and aim.gap > range + CFG.engageSlack then
+            return nil, string.format('%s is %s" away -- out of range (%s")', aim.name,
+                string.format("%g", math.floor(aim.gap * 10 + 0.5) / 10), string.format("%g", range))
+        end
+        return aim
+    end
+
+    -- A power that works on an area at once (item `it`, its `area`: Freeze
+    -- Time, Warp Shield): every fighter of the area's side within its
+    -- range -- and this one, with `self` -- is given the effect until the
+    -- end of the turn (wyrdHex, `turn`), flashed purple. Returns the names
+    -- of those given it.
+    function ACTIVATION.areaHex(it)
+        local a, names = it.area, {}
+        local h = { label = it.name, by = fighter.name, mods = a.mods, oneAction = a.oneAction, turn = true }
+        local id = ACTIVATION.hexId(it.key)
+        if a.self and wyrdHex({ id = id, value = h }) then names[#names + 1] = { name = fighter.name } end
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        for _, o in ipairs(me and all or {}) do
+            if ACTIVATION.sideOf(me, o, a.side or "all") and ACTIVATION.within(me, o, a.range) then
+                local ok, took = ACTIVATION.ask(o.obj, "wyrdHex", { id = id, value = h })
+                if ok and took then
+                    names[#names + 1] = { name = o.name }
+                    flash(o.obj, rgbOf(COL.wyrdInk))
+                end
+            end
+        end
+        return names
+    end
+
+    -- The aura of this fighter's power in effect (ACTIVATION.auraOf) laid on
+    -- every fighter of its side within its range -- and taken off those
+    -- that have it and no longer are (fighter.wyrd.hexed: whom it was laid
+    -- on). Run as it is manifested and whenever this model is put down.
+    -- Returns the names of those that have it.
+    function ACTIVATION.auraPush()
+        local w = fighter.wyrd
+        if type(w) ~= "table" then return {} end
+        local auras = ACTIVATION.auraOf()
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        local had, got, names = w.hexed or {}, {}, {}
+        for _, a in ipairs((me and auras) or {}) do
+            for _, o in ipairs(all) do
+                local okG, guid = pcall(function() return o.obj.getGUID() end)
+                if okG and guid and ACTIVATION.sideOf(me, o, a.side) and ACTIVATION.within(me, o, a.range) then
+                    local ok, took = ACTIVATION.ask(o.obj, "wyrdHex", { id = a.id, value = { label = a.label,
+                        by = fighter.name, mods = a.mods, lend = a.lend, aura = true } })
+                    if ok and took then got[guid], names[#names + 1] = a.id, { name = o.name } end
+                end
+            end
+        end
+        for guid, id in pairs(had) do
+            if got[guid] ~= id then
+                local ok, obj = pcall(function() return getObjectFromGUID(guid) end)
+                if ok and obj then ACTIVATION.ask(obj, "wyrdHex", { id = id, value = false }) end
+            end
+        end
+        w.hexed = next(got) and got or nil
+        return names
+    end
+
+    -- The other side of that: the auras of the Wyrds around this fighter
+    -- (their `auras`, see engageInfo) that reach it now -- given to it, and
+    -- those that don't any more taken off (fighter.hexes, `aura`). Run
+    -- whenever this model is put down. Returns whether anything changed.
+    function ACTIVATION.auraPull()
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        if not me then return false end
+        local want = {}
+        for _, o in ipairs(all) do
+            for _, a in ipairs((not o.self and o.auras) or {}) do
+                if type(a) == "table" and a.id and ACTIVATION.sideOf(o, me, a.side)
+                   and ACTIVATION.within(o, me, a.range) then
+                    want[a.id] = { label = a.label, by = o.name, mods = a.mods, lend = a.lend, aura = true }
+                end
+            end
+        end
+        local changed = false
+        for id, h in pairs(fighter.hexes or {}) do
+            if h.aura and not want[id] then fighter.hexes[id], changed = nil, true end
+        end
+        for id, h in pairs(want) do
+            if not RULES.same((fighter.hexes or {})[id], h) then
+                fighter.hexes = fighter.hexes or {}
+                fighter.hexes[id], changed = h, true
+            end
+        end
+        if fighter.hexes and next(fighter.hexes) == nil then fighter.hexes = nil end
+        if changed then drawStats() end
+        return changed
+    end
+
+    -- Cacophony Of Silence: an enemy of this fighter with such a power in
+    -- effect (its table entry; `cacophony`, the power's name) -- nil when
+    -- there is none. Looked up as a ranged attack is made.
+    function ACTIVATION.cacophony()
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        for _, o in ipairs(me and all or {}) do
+            if o.cacophony and o.gang ~= me.gang then return o end
+        end
+        return nil
+    end
+
+    -- Maddening Visions: this fighter's activation is over -- an enemy Wyrd
+    -- whose visions (see engageInfo) reach it gives it their condition
+    -- (Insanity), said in purple. Returns the condition's key, or nil.
+    function ACTIVATION.visionsCheck()
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        for _, o in ipairs(me and all or {}) do
+            local v = o.visions
+            if type(v) == "table" and o.gang ~= me.gang and ACTIVATION.within(o, me, tonumber(v.range) or 0) then
+                local key = tostring(v.condition or "insanity")
+                local i = indexOf(CONDITIONS, key)
+                if i and conditionCount(key) == 0 then
+                    setCondition(key, true)
+                    ACTIVATION.purple(string.format('%s ends their activation within %s" of %s -- %s (%s)', fighter.name,
+                        tostring(v.range), o.name, CONDITIONS[i].label, tostring(v.label or "Maddening Visions")))
+                    flash(self, rgbOf(COL.wyrdInk))
+                    return key
+                end
+            end
+        end
+        return nil
+    end
+
+    -- Pre-measuring (CFG.preMeasure, a rule the table can allow): while a
+    -- player's cursor is on an action with a range in A's panel, every
+    -- friend within that range, base to base, is highlighted in the
+    -- action's colour -- Group Activation (CFG.groupRange) and a skill's
+    -- action that hands out ammo (its `distribute`: Distribute Ammo). They
+    -- are looked up as the cursor arrives and stay lit (ACTIVATION.reach,
+    -- with the action's key) until no copy's cursor is on it any more; an
+    -- open check's own highlights are put back then. Called whenever a
+    -- hovered action changes (drawReady).
+    function ACTIVATION.drawReach()
+        local want
+        if CFG.preMeasure and not fighter.outOfAction then
+            for _, key in ipairs(ui.viewers) do
+                local prefix, n = tostring(view(key).actHover or ""):match("^(act_.+)_(%d+)$")
+                local P = PANELS[prefix or ""]
+                local a = P and P.list[tonumber(n)]
+                if not want and a and (a.key == "group_activation" or tonumber(a.distribute)) then want = a end
+            end
+        end
+        local was = ACTIVATION.reach
+        if (want and want.key) == (was and was.key) then return end
+        if was then
+            for _, obj in ipairs(was) do pcall(function() obj.highlightOff() end) end
+            ACTIVATION.reach = nil
+            ACTIVATION.nerveLight(true)
+        end
+        if not want then return end
+        local lit, rgb = { key = want.key }, ACTIVATION.actionGlow(want.key, want.type)
+        for _, o in ipairs(ACTIVATION.friendsWithin(tonumber(want.distribute) or CFG.groupRange or 3)) do
+            lit[#lit + 1] = o.obj
+            pcall(function() o.obj.highlightOn(rgb) end)
+        end
+        ACTIVATION.reach = lit
+    end
+
+    -- Whether this model can see `obj`, for a Nerve Check (see
+    -- CFG.nerveRays): rays from high on this model to high on the other --
+    -- its middle, then either side -- any one of them clear. Physics.cast
+    -- reports every collider along a ray (not the one it starts inside);
+    -- the two models and every fighter (importTag) are passed through, so
+    -- only scenery blocks. Outside TTS (no Physics), or when either model
+    -- can't be measured, it is seen.
+    function ACTIVATION.sees(obj)
+        if not (Physics and Physics.cast) then return true end
+        local function box(o)
+            local ok, b = pcall(function() return o.getBounds() end)
+            if not (ok and type(b) == "table" and b.center and b.size) then return nil end
+            local c, sz = b.center, b.size
+            local x, y, z = tonumber(c.x or c[1]), tonumber(c.y or c[2]), tonumber(c.z or c[3])
+            local w, h, dd = tonumber(sz.x or sz[1]), tonumber(sz.y or sz[2]), tonumber(sz.z or sz[3])
+            if not (x and y and z and w and h and dd) then return nil end
+            return { x = x, y = y + h / 4, z = z, w = math.min(w, dd) }
+        end
+        local from, to = box(self), box(obj)
+        if not (from and to) then return true end
+        local function passes(o)
+            if o == nil or o == obj or isSelf(o) then return true end
+            local okG, same = pcall(function() return o.getGUID() == obj.getGUID() end)
+            if okG and same then return true end
+            local okT, tagged = pcall(function() return o.hasTag(CFG.importTag) end)
+            return okT and tagged == true
+        end
+        local dx, dz = to.x - from.x, to.z - from.z
+        local flat = math.sqrt(dx * dx + dz * dz)
+        local px, pz = 1, 0                                  -- across the line between them
+        if flat > 0 then px, pz = -dz / flat, dx / flat end
+        for k = 1, math.max(1, math.floor(CFG.nerveRays or 3)) do
+            local side = (k % 2 == 0 and 1 or -1) * math.floor(k / 2) * (CFG.nerveSpread or 0.35) * to.w
+            local ex, ey, ez = to.x + px * side - from.x, to.y - from.y, to.z + pz * side - from.z
+            local len = math.sqrt(ex * ex + ey * ey + ez * ez)
+            if len <= 0 then return true end
+            local ok, hits = pcall(function()
+                return Physics.cast({ origin = { x = from.x, y = from.y, z = from.z },
+                    direction = { x = ex / len, y = ey / len, z = ez / len },
+                    type = 1, max_distance = len, debug = false })
+            end)
+            local clear = true
+            for _, h in ipairs(ok and type(hits) == "table" and hits or {}) do
+                if not passes(h.hit_object) then clear = false break end
+            end
+            if clear then return true end
+        end
+        return false
+    end
+
+    -- Whether the model `obj` -- an enemy Wyrd about to disrupt a cast --
+    -- has sight of this one (see CFG.wyrdSight): this model taken as a
+    -- cylinder round its base's centre, as wide as its base and as tall as
+    -- its bounding box (neither model has a collider worth going by), rays
+    -- from the disrupter's head -- `from` of its bounding box's height,
+    -- above its base's centre -- to points on that cylinder: at each `to`
+    -- height, its middle and the `across` points to either side, square to
+    -- the line between them. Any one ray clear is sight, so a thin post
+    -- doesn't hide a whole model. Only scenery blocks them: the two models
+    -- and every fighter (importTag) are passed through. Outside TTS (no
+    -- Physics), or when either model can't be measured, it has sight.
+    function ACTIVATION.seenBy(obj)
+        if not (Physics and Physics.cast) then return true end
+        local function box(o)
+            local ok, b = pcall(function() return o.getBounds() end)
+            if not (ok and type(b) == "table" and b.center and b.size) then return nil end
+            local c, sz = b.center, b.size
+            local x, y, z = tonumber(c.x or c[1]), tonumber(c.y or c[2]), tonumber(c.z or c[3])
+            local w, h, dd = tonumber(sz.x or sz[1]), tonumber(sz.y or sz[2]), tonumber(sz.z or sz[3])
+            if not (x and y and z and w and h and dd) then return nil end
+            local p = positionOf(o)                 -- the base's centre, where there is one
+            return { x = p and p.x or x, z = p and p.z or z, bottom = y - h / 2, h = h }
+        end
+        local from, to = box(obj), box(self)
+        if not (from and to) then return true end
+        local sight = CFG.wyrdSight or {}
+        local r = currentBase().diameter / 2
+        local ox, oy, oz = from.x, from.bottom + from.h * (sight.from or 0.85), from.z
+        local dx, dz = to.x - ox, to.z - oz
+        local flat = math.sqrt(dx * dx + dz * dz)
+        local px, pz = 1, 0                                  -- across the line between them
+        if flat > 0 then px, pz = -dz / flat, dx / flat end
+        local function passes(o)
+            if o == nil or o == obj or isSelf(o) then return true end
+            local okG, same = pcall(function() return o.getGUID() == obj.getGUID() end)
+            if okG and same then return true end
+            local okT, tagged = pcall(function() return o.hasTag(CFG.importTag) end)
+            return okT and tagged == true
+        end
+        for _, f in ipairs(sight.to or { 0.85, 0.35 }) do
+            for _, a in ipairs(sight.across or { 0 }) do
+                local ex, ey, ez = to.x + px * a * r - ox, to.bottom + to.h * f - oy, to.z + pz * a * r - oz
+                local len = math.sqrt(ex * ex + ey * ey + ez * ez)
+                if len <= 0 then return true end
+                local ok, hits = pcall(function()
+                    return Physics.cast({ origin = { x = ox, y = oy, z = oz },
+                        direction = { x = ex / len, y = ey / len, z = ez / len },
+                        type = 1, max_distance = len, debug = false })
+                end)
+                local clear = true
+                for _, h in ipairs(ok and type(hits) == "table" and hits or {}) do
+                    if not passes(h.hit_object) then clear = false break end
+                end
+                if clear then return true end
+            end
+        end
+        return false
+    end
+
+    -- The Cl a Nerve Check is taken against: this fighter's own (as shown,
+    -- changes and all), or -- higher -- the best of the friends whose rank
+    -- lends it (CFG.nerveRanges: a Leader within 12", a Champion within
+    -- 6", base to base) that this model can see (ACTIVATION.sees; only the
+    -- ones that would help are looked at). { value, own, from = the
+    -- friend's table entry, or nil }.
+    function ACTIVATION.nerveSource()
+        local own = statNumber("Cl")
+        local best = { value = own, own = own }
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        if not me then return best end
+        local lend = {}
+        for _, o in ipairs(all) do
+            local range = (CFG.nerveRanges or {})[tostring(o.rank or ""):lower()]
+            if not o.self and o.gang == me.gang and range and o.cl and (not own or o.cl > own)
+               and baseGap(me, o) <= range + CFG.engageSlack then
+                lend[#lend + 1] = o
+            end
+        end
+        table.sort(lend, function(a, b) return a.cl > b.cl end)
+        for _, o in ipairs(lend) do
+            if ACTIVATION.sees(o.obj) then
+                best.value, best.from = o.cl, o
+                break
+            end
+        end
+        return best
+    end
+
+    -- Who must take a Nerve Check as this fighter goes Out of Action -- asked
+    -- just before, while it still stands on the table: its friends (with
+    -- CFG.nerveOutFoes anyone) within CFG.nerveOutRange, base to base, sight
+    -- or not; only the Prospects among them when it is a Prospect itself;
+    -- nobody when it is tagged with one of CFG.nerveOutNone (a Pet). Table
+    -- entries (see tableEntry), fighters Out of Action left out.
+    function ACTIVATION.shaken()
+        local list, tags = {}, ACTIVATION.tags()
+        if not CFG.nerveOutRange then return list end
+        for _, t in ipairs(CFG.nerveOutNone or {}) do if tags[t] then return list end end
+        local prospect = tostring(fighter.rank or ""):lower() == "prospect"
+        local all, me = ACTIVATION.everyone()
+        me = me or tableEntry(self)
+        if not me then return list end
+        for _, o in ipairs(all) do
+            if not o.self and (CFG.nerveOutFoes or o.gang == me.gang)
+               and (not prospect or tostring(o.rank or ""):lower() == "prospect")
+               and baseGap(me, o) <= CFG.nerveOutRange + CFG.engageSlack then
+                list[#list + 1] = o
+            end
+        end
+        return list
+    end
+
+    -- Finishes the activation of every other fighter on the table (any
+    -- gang) that is still active -- as a left click on its S would, so its
+    -- Recovery test follows too (its own completeActivation). Called as
+    -- this one activates: one fighter activates at a time. A card too old
+    -- to say (no activation in its engageInfo, or no engageInfo at all) and
+    -- a tagged model with no card are left alone (see ACTIVATION.ask).
+    function ACTIVATION.finishOthers()
+        local ok, objs = pcall(function() return getObjectsWithTag(CFG.importTag) end)
+        for _, obj in ipairs(ok and type(objs) == "table" and objs or {}) do
+            if not isSelf(obj) then
+                local okI, info = ACTIVATION.ask(obj, "engageInfo")
+                if okI and type(info) == "table" and info.activation == "active" then
+                    ACTIVATION.ask(obj, "completeActivation")
+                end
+            end
+        end
+    end
+
+    -- "A", "A and B", "A, B and C".
+    local function nameList(list)
+        local n = {}
+        for _, f in ipairs(list) do n[#n + 1] = f.name end
+        if #n <= 1 then return n[1] or "" end
+        return table.concat(n, ", ", 1, #n - 1) .. " and " .. n[#n]
+    end
+    ACTIVATION.nameList = nameList
+
+    -- Sets a status on a table entry, quietly (the check announces it and
+    -- flashes the models): this card's own directly, another's through its
+    -- public setStatus -- an older card's with the bare key, all it
+    -- understands. Only the dropped model's card ever calls this, and
+    -- setStatus never starts a check, so cards can't fight or loop.
+    local function setStatusOf(f, key)
+        f.status = key
+        local arg = f.old and key or { key = key, quiet = true }
+        if f.self then setStatus(arg)
+        else ACTIVATION.ask(f.obj, "setStatus", arg) end
+    end
+
+    -- The check itself (see checkEngagement): this fighter and every enemy
+    -- whose engagement its move can have changed -- those within reach of
+    -- where it stands now or stood before -- are set Engaged (Active or
+    -- Suppressed with an enemy in reach) or back to Active (Engaged with none).
+    -- Announced in chat and flashed on the models. Returns how many changed.
+    function runEngagement()
+        local all, me = ACTIVATION.everyone()
+        if not me then                      -- a gang's card without the import tag
+            me = tableEntry(self)
+            if not me then                  -- no gang: nothing to engage
+                engage.spot, engage.pending = positionOf(self), false
+                return 0
+            end
+            all[#all + 1] = me
+        end
+
+        local was = engage.spot and { x = engage.spot.x, y = engage.spot.y, z = engage.spot.z, r = me.r }
+        local affected = { me }
+        for _, f in ipairs(all) do
+            if f ~= me and f.gang ~= me.gang and (inReach(me, f) or (was and inReach(was, f))) then
+                affected[#affected + 1] = f
+            end
+        end
+        engage.spot, engage.pending = { x = me.x, y = me.y, z = me.z }, false
+
+        -- Statuses only move between Active / Suppressed and Engaged, which
+        -- all engage, so the order the fighters are settled in doesn't matter.
+        local changed, engaged, freed, n = {}, {}, {}, 0
+        for _, f in ipairs(affected) do
+            local foes = #foesOf(f, all)
+            if foes > 0 and ENGAGEABLE[f.status] then
+                setStatusOf(f, "engaged"); changed[f] = true; engaged[#engaged + 1] = f; n = n + 1
+            elseif foes == 0 and f.status == "engaged" then
+                setStatusOf(f, "active"); changed[f] = true; freed[#freed + 1] = f; n = n + 1
+            end
+        end
+        if n == 0 then return 0 end
+
+        -- One line per engagement, in Engaged's colour: this fighter's first,
+        -- naming every enemy it is engaged with, then any other that turned
+        -- Engaged without being one of those; then, in Active's colour, who
+        -- is no longer engaged. Every model named flashes in its line's
+        -- colour (these lines stand in for setStatus's own, see setStatusOf).
+        local ENG, ACT = rgbOf(statusDef("engaged").color), rgbOf(statusDef("active").color)
+        local lines, lit, named = {}, {}, {}
+        local function say(f, foes)
+            lines[#lines + 1] = { string.format("%s is now engaged with %s", f.name, nameList(foes)), ENG }
+            named[f], lit[#lit + 1] = true, { f, ENG }
+            for _, o in ipairs(foes) do
+                if not named[o] then named[o], lit[#lit + 1] = true, { o, ENG } end
+            end
+        end
+        local myFoes = foesOf(me, all)
+        local news = changed[me]
+        for _, o in ipairs(myFoes) do news = news or changed[o] end
+        if #myFoes > 0 and news then say(me, myFoes) end
+        for _, f in ipairs(engaged) do
+            if not named[f] then say(f, foesOf(f, all)) end
+        end
+        if #freed > 0 then
+            lines[#lines + 1] = { nameList(freed) .. (#freed > 1 and " are" or " is") .. " no longer engaged", ACT }
+            for _, f in ipairs(freed) do lit[#lit + 1] = { f, ACT } end
+        end
+        for _, l in ipairs(lines) do chat(l[1], l[2]) end
+        for _, l in ipairs(lit) do flash(l[1].obj, l[2]) end
+        return n
+    end
+end
+
+--============================================================================
+-- 11. PUBLIC API -- what an importer and other scripts call. obj.call passes
+--     one argument, so the two-argument setters also take { key =, value = }:
+--         obj.call("setCondition", { key = "concussion", value = 2 })
+--============================================================================
+
+-- The weapon slots W1-W3, by type: primaries first, then secondaries, then
+-- melee weapons and grenades -- in the order given within each. Weapons past
+-- the three slots go to `moreWeapons`: W4 and on, whose diamonds show below
+-- W1 while a weapon popup is open (see weaponAt).
+local WEAPON_ORDER = { primary = 1, secondary = 2, melee = 3, grenade = 3 }
+local function sortWeapons(weapons, more)
+    local all = {}
+    for _, list in ipairs({ weapons or {}, more or {} }) do
+        local idx = {}
+        for k in pairs(list) do if type(k) == "number" then idx[#idx + 1] = k end end
+        table.sort(idx)
+        for _, k in ipairs(idx) do
+            if type(list[k]) == "table" then all[#all + 1] = list[k] end
+        end
+    end
+    local keyed = {}
+    for n, w in ipairs(all) do keyed[n] = { w = w, n = n, r = WEAPON_ORDER[weaponType(w)] or 3 } end
+    table.sort(keyed, function(a, b)
+        if a.r ~= b.r then return a.r < b.r end
+        return a.n < b.n
+    end)
+    local slots, rest = {}, {}
+    for n, k in ipairs(keyed) do
+        if n <= #LAY.weaponSpots then slots[#slots + 1] = k.w else rest[#rest + 1] = k.w end
+    end
+    return slots, rest
+end
+
+-- The weapons skills and wargear give (their entry's `weapon`: the
+-- Headbutt skill's Headbutt), kept in step with what fighter `f` has: one
+-- it has no more goes, one missing is added -- a copy of the entry's, marked
+-- with where it is from (`from`, the skill's key, and `fromKind`) -- unless
+-- the roster already lists a weapon of that name: it keeps its own then,
+-- and all the skill does is tie that weapon to itself (`needs`, the
+-- skill's key), so it is no use while the skills are disabled (see
+-- TRAIT_RULES.usable) -- wargear's never is. A Continuous Wyrd power's
+-- weapon (Force Blast) is there only while the power is in effect
+-- (f.wyrd.power), marked `fromWyrd`. Then the weapons are
+-- sorted onto their slots again. Returns whether anything changed.
+function SKILL.arm(f)
+    local want, order = {}, {}
+    for _, k in ipairs(SKILL.KINDS) do
+        for _, name in ipairs(f[k.field] or {}) do
+            local d = SKILL.def(name, k.kind)
+            local wyrd = d and d.type == "wyrd" and ACTIVATION.continuous({ cost = d.action })
+            if wyrd and not (type(f.wyrd) == "table" and f.wyrd.power == SKILL.key(name)) then
+                -- a power not in effect: no weapon
+            elseif d and type(d.weapon) == "table" and not want[SKILL.key(name)] then
+                want[SKILL.key(name)] = { weapon = d.weapon, kind = k.kind }
+                order[#order + 1] = SKILL.key(name)
+            end
+        end
+    end
+    local changed, all, have, named = false, {}, {}, {}
+    for _, list in ipairs({ sortWeapons(f.weapons, f.moreWeapons) }) do
+        for _, w in ipairs(list) do
+            if w.from and not want[w.from] then
+                changed = true                    -- its skill is gone
+            else
+                all[#all + 1] = w
+                if w.from then have[w.from] = true end
+                named[SKILL.key(w.name or "")] = named[SKILL.key(w.name or "")] or w
+                w.needs = nil
+            end
+        end
+    end
+    for _, key in ipairs(order) do
+        local give = want[key].weapon
+        local own = named[SKILL.key(give.name or "")]
+        if have[key] then
+            -- armed with it already
+        elseif own then
+            if want[key].kind == "skill" and not own.from then own.needs = key end
+        else
+            local w = RULES.copy(give)
+            w.from, w.fromKind = key, want[key].kind
+            local d = SKILL.def(key, want[key].kind)
+            w.fromWyrd = (d and d.type == "wyrd") or nil
+            all[#all + 1], changed = w, true
+        end
+    end
+    if changed then f.weapons, f.moreWeapons = sortWeapons(all) end
+    return changed
+end
+
+-- Replace the whole fighter. Missing fields fall back to the defaults, and
+-- the health bar is sized from stats.W unless `wounds` is given explicitly.
+function setFighter(data)
+    data = type(data) == "table" and data or {}
+    if ACTIVATION.nerve then ACTIVATION.nerveLight(false); ACTIVATION.nerve = nil end   -- another fighter's check
+    ACTIVATION.roll = nil                                                                -- ... and dice
+
+    local base = defaultFighter()
+    local f    = {}
+    for k, v in pairs(base) do f[k] = v end
+    for k, v in pairs(data) do f[k] = v end
+
+    -- merge the statline over the defaults so a partial one still renders
+    local stats = base.stats
+    if type(data.stats) == "table" then
+        for k, v in pairs(data.stats) do stats[k] = v end
+    end
+    f.stats = stats
+
+    -- An explicit wounds table wins; otherwise the bar is sized from the W
+    -- stat. `data.wounds`, not `f.wounds`: f still holds the default bar at
+    -- this point, which must not beat a supplied statline.
+    local given = type(data.wounds) == "table" and data.wounds or nil
+    local maxW  = math.max(1, math.floor(
+        tonumber(given and given.max) or tonumber(f.stats.W) or 1))
+    f.wounds     = { max = maxW, current = clamp(given and given.current or maxW, 0, maxW) }
+    f.status     = statusDef(f.status).key   -- a status that no longer exists -> Active
+    f.conditions = type(f.conditions) == "table" and f.conditions or {}
+    f.statEdits  = type(f.statEdits) == "table" and f.statEdits or {}
+    f.actionsLeft = clamp(math.floor(tonumber(f.actionsLeft) or 0), 0, 2)
+    f.usedActions = type(f.usedActions) == "table" and f.usedActions or {}
+    -- the round (see ACTIVATION); an older save without it had actions
+    -- left only during an activation
+    if f.activation ~= "ready" and f.activation ~= "active" then
+        f.activation = f.actionsLeft > 0 and "active" or nil
+    end
+    f.outOfAction = f.outOfAction == true
+    f.startedSI   = f.startedSI == true and f.activation == "active"
+    if type(f.recovery) == "table" then
+        f.recovery.dice = clamp(math.floor(tonumber(f.recovery.dice) or 1), 1, ACTIVATION.MAX_DICE)
+        local foes = f.recovery.foes
+        f.recovery.foes = type(foes) == "string" and foes ~= "" and foes or nil
+    else
+        f.recovery = nil
+    end
+    -- Treat Ally's dice wait for a Seriously Injured fighter's Recovery
+    -- test, a group activation for a Ready one to activate
+    f.treated = f.status == "seriously_injured" and not f.outOfAction and (tonumber(f.treated) or 0) >= 1
+                and math.floor(tonumber(f.treated)) or nil
+    f.grouped = f.grouped == true and f.activation == "ready" and not f.outOfAction or nil
+    -- blinded by a Flash weapon with no Ready marker: none at the next turn
+    -- (see setReady)
+    f.noReady = f.noReady == true and not f.outOfAction or nil
+    -- the shots of an activation under way (see TRAIT_RULES.shot)
+    f.shots     = f.activation == "active" and type(f.shots) == "table" and f.shots or nil
+    f.assaulted = f.activation == "active" and f.assaulted == true or nil
+    f.shotsPaid = f.activation == "active" and math.floor(tonumber(f.shotsPaid) or 0) > 0
+                  and math.floor(tonumber(f.shotsPaid)) or nil
+    f.aimedShot = f.activation == "active" and f.aimedShot == true or nil
+    -- what was taken this game that can be taken once, and what still
+    -- boosts the stats (see useAction, ACTIVATION.boost)
+    f.usedOnce  = type(f.usedOnce) == "table" and next(f.usedOnce) ~= nil and f.usedOnce or nil
+    f.boosted   = type(f.boosted) == "table" and next(f.boosted) ~= nil and f.boosted or nil
+    -- wargear burnt out for the battle (see setBurnt), conditions for a
+    -- while (see ACTIVATION.timedCondition)
+    f.timed     = type(f.timed) == "table" and next(f.timed) ~= nil and f.timed or nil
+    f.burnt     = type(f.burnt) == "table" and next(f.burnt) ~= nil and f.burnt or nil
+    -- other fighters' Wyrd powers on this one (see wyrdHex)
+    f.hexes     = type(f.hexes) == "table" and next(f.hexes) ~= nil and f.hexes or nil
+    -- the Wyrd power in effect and what goes with an activation (see
+    -- ACTIVATION.cast): only an activation under way has cast / concentrate / locked
+    if type(f.wyrd) == "table" then
+        f.wyrd.kept = nil                       -- (an older save's)
+        if f.activation ~= "active" then f.wyrd.cast, f.wyrd.held, f.wyrd.concentrate, f.wyrd.locked = nil, nil, nil, nil end
+        f.wyrd.power = type(f.wyrd.power) == "string" and f.wyrd.power or nil
+        if next(f.wyrd) == nil then f.wyrd = nil end
+    else
+        f.wyrd = nil
+    end
+    f.skills     = SKILL.parse(f.skills)   -- the importer's "A, B" string too
+    f.wargear    = SKILL.parse(f.wargear)  -- likewise
+    f.base       = validBase(f.base)   -- none (or unusable): measured once loaded
+    f.height     = tonumber(f.height) or modelHeight(self)   -- see placement
+    f.lift       = tonumber(f.lift) and tonumber(f.lift) ~= 0
+                   and clamp(tonumber(f.lift), -CFG.liftMax, CFG.liftMax) or nil
+    f.toughness  = nil   -- older saves tracked Toughness as pips; it is stats.T now
+    f.weapons, f.moreWeapons = sortWeapons(f.weapons, f.moreWeapons)
+    SKILL.arm(f)                                   -- the weapons its skills give (Headbutt)
+    for _, w in pairs(f.weapons) do                -- older saves: ammoOut / jammed
+        for _, p in ipairs((type(w) == "table" and w.profiles) or {}) do
+            if p.jammed then p.ammo = "jam" elseif p.ammoOut then p.ammo = "out" end
+            p.jammed, p.ammoOut = nil, nil
+        end
+    end
+
+    fighter = f
+    ACTIVATION.fireShown = ACTIVATION.fireOf()     -- the weapon Flaming Weapon set alight, as built
+    refresh()
+    return true
+end
+
+function getFighter() return fighter end
+
+-- The fighter's skills have just been disabled, or work again (SKILL.off:
+-- 0 wounds, Seriously Injured, Out of Action), and everything they give
+-- goes or comes back with them, in place: the stats they change and their
+-- names under them, the weapons (a skill's own can't be used, Heavy Blows'
+-- Strength), what the actions cost (Inspiring) and -- for anyone looking at
+-- A's Special tab -- its panel, swapped for the one with or without the
+-- skills' actions. Called after whatever can change it; does nothing
+-- unless it has.
+function SKILL.switched()
+    local off, shape = SKILL.off(), SKILL.shape()
+    if off == SKILL.wasOff and shape == SKILL.wasShape then return end
+    -- with a Wyrd power (which keeps working at 0 wounds) the names listed
+    -- under the stats can be other than the ones laid out when the card was
+    -- built: built again -- never for a list that is empty, the wargear's
+    -- state shows then
+    local rebuild = shape ~= "" and shape ~= SKILL.builtShape and SKILL.hasWyrd() and ui.built
+    SKILL.wasOff, SKILL.wasShape = off, shape
+    if rebuild then return refresh() end
+    drawStats()
+    SKILL.drawBar()
+    TRAIT_RULES.drawWeapons()
+    drawActions()
+    ui.swapActions()
+end
+
+-- The actions panel a viewer is looking at is no longer the fighter's (its
+-- status changed, or its skills went): it is swapped for the one that is
+-- now, on the same tab, and then asked to close -- the old one vanished
+-- under the cursor, so TTS may never report the cursor leaving; if it is
+-- on the new one, entering it keeps it open.
+function ui.swapActions()
+    for _, k in ipairs(ui.viewers) do
+        local v = view(k)
+        local now = flyoutOf("btnActions", k)
+        if IS_ACTIONS[v.open or ""] and v.open ~= now then
+            showFlyout(now, k, true)
+            requestHide(k)
+        end
+    end
+end
+
+-- Wounds left, drawn in place (a hover preview stays lit).
+function setWounds(n)
+    fighter.wounds.current = clamp(n, 0, fighter.wounds.max)
+    drawHp()
+    drawStats()
+    SKILL.switched()              -- at 0 wounds the skills are disabled
+    onWoundsChanged(fighter.wounds.current, fighter.wounds.max)
+    return fighter.wounds.current
+end
+
+function applyDamage(n)  return setWounds(fighter.wounds.current - (tonumber(n) or 1)) end
+function healWounds(n)   return setWounds(fighter.wounds.current + (tonumber(n) or 1)) end
+
+-- The status, drawn in place: S's icon, the picker's options and the
+-- weapons (Engaged leaves only Light and Melee usable). Anyone
+-- looking at the actions panel sees the new status's one (see
+-- ui.swapActions). Seriously Injured disables the skills (SKILL.switched).
+-- A change is said in chat and flashed on the model in the status's colour
+-- -- unless called { key =, quiet = true }: then the caller announces it
+-- (the engagement check, whose one line covers every fighter it changed).
+function setStatus(key)
+    local quiet = false
+    if type(key) == "table" then key, quiet = key.key or key.value, key.quiet == true end
+    local def = statusDef(key)
+    local before = fighter.status
+    fighter.status = def.key
+    if def.key ~= "seriously_injured" then fighter.treated = nil end   -- no Recovery test to come
+    if def.key == "seriously_injured" then ACTIVATION.wyrdDrop() end   -- no casting, no power kept
+    drawStatus()
+    TRAIT_RULES.drawWeapons()     -- Engaged: a weapon it can't use turns red
+    drawStats()                   -- ... and Shield / Parry: the save
+    SKILL.switched()
+    ui.swapActions()
+    if def.key ~= before and not quiet then
+        chat(string.format("%s is now %s", fighter.name, def.label), rgbOf(def.color))
+        flash(self, rgbOf(def.color))
+    end
+    onStatusChanged(def.key, def.label)
+    return def.key
+end
+
+-- Flashes the model for CFG.statusFlash seconds, as a status change does:
+-- in a status's colour (its key; none: the current status's), a "#RRGGBB"
+-- colour or { r, g, b } -- for any rule that wants to point a model out.
+function highlight(v)
+    if type(v) ~= "table" then
+        v = rgbOf(v == nil and statusDef(fighter.status).color
+                  or indexOf(STATUSES, v) and statusDef(v).color or v)
+    end
+    flash(self, v)
+    return true
+end
+
+-- The fighter's round (see ACTIVATION). Readies it -- S green, waiting to
+-- be activated; an activation under way ends, with no Recovery test, and
+-- nothing is used any more -- or, with false, takes that back (neither
+-- ready nor active). A fighter Out of Action is never readied. The
+-- Mundane Controller's turn calls it for every fighter. A group activation
+-- (see setGroupActivated) ends with the round it was for, and so does
+-- what Wyrd powers did until the end of the turn (see
+-- ACTIVATION.turnOver). Returns whether the fighter is ready.
+--   A fighter blinded by a Flash weapon while it had no Ready marker
+-- (fighter.noReady, see traitHit) gets none at the next turn: the first
+-- readying after it leaves it unready, said in chat -- unless it is
+-- readied by hand ({ value = true, hand = true }: a right click on S),
+-- which readies it and forgets the Flash.
+function setReady(on)
+    local hand = false
+    if type(on) == "table" then on, hand = on.value, on.hand == true end
+    if on then ACTIVATION.turnOver() end
+    if on and fighter.outOfAction then return false end
+    if on and fighter.noReady then
+        fighter.noReady = nil
+        if not hand then
+            on = false
+            chat(string.format("%s gets no Ready marker this turn (Flash)", fighter.name), rgbOf(COL.valueMod))
+        end
+    end
+    if fighter.activation == "active" then ACTIVATION.wyrdEnd() end   -- an activation cut short
+    fighter.activation = on and "ready" or nil
+    fighter.actionsLeft, fighter.usedActions, fighter.startedSI, fighter.lostAction = 0, {}, false, nil
+    setGroupActivated(false)
+    TRAIT_RULES.endVolleys()
+    TRAIT_RULES.endFight()
+    TRAIT_RULES.endShots()
+    ACTIVATION.endQuestion()
+    ACTIVATION.endFear()
+    drawReady()
+    drawActions()
+    onActionsChanged(fighter.actionsLeft)
+    return fighter.activation == "ready"
+end
+
+-- Activates the fighter (a left click on a ready S): two actions to take,
+-- A and C green, none used yet. Any other fighter still active finishes
+-- its activation first -- Recovery test and all (see
+-- ACTIVATION.finishOthers). A Suppressed fighter loses Suppressed and
+-- gets one action only (C green) -- one with Spring Up (a skill that says
+-- `springUp`) then makes an Agility test at once: passed, it has both
+-- actions after all (see ACTIVATION.spring).
+-- A group activated fighter loses the sign after its name (see
+-- setGroupActivated). One with Unstoppable (a skill that says
+-- `unstoppable`) and a wound lost makes a Willpower check at once, thrown
+-- for `player`: passed, it regains a wound (see ACTIVATION.unstoppable).
+-- What boosted its stats since its last activation wears off first (the
+-- Stimm-Slug, with the die for a bad reaction: see ACTIVATION.comedown);
+-- those two tests then wait for that die.
+-- A fighter caught in an enemy's Freeze Time (see ACTIVATION.frozen) gets
+-- one action only, Suppressed or not -- and no second with Spring Up.
+-- An Insane one (the condition) has a D6 thrown for it after that (see
+-- ACTIVATION.insane), before those two tests.
+-- Said in chat. Returns the actions left (0 for a fighter Out of Action,
+-- which can't be activated).
+function activate(player)
+    if fighter.outOfAction then return 0 end
+    ACTIVATION.finishOthers()
+    setGroupActivated(false)
+    ACTIVATION.wyrdStart()                      -- a power kept from the last activation ends
+    local suppressed, frozen = fighter.status == "suppressed", ACTIVATION.frozen()
+    if suppressed then setStatus({ key = "active", quiet = true }) end
+    fighter.activation, fighter.startedSI = "active", fighter.status == "seriously_injured"
+    fighter.actionsLeft, fighter.usedActions = (suppressed or frozen) and 1 or 2, {}
+    fighter.lostAction = suppressed or nil      -- A shows it lost, dimmed (see drawReady)
+    TRAIT_RULES.endVolleys()
+    TRAIT_RULES.endFight()
+    TRAIT_RULES.endShots()
+    drawReady()
+    drawActions()
+    local col = rgbOf(statusDef("active").color)
+    chat(suppressed and string.format("%s activates -- no longer Suppressed, 1 action", fighter.name)
+         or string.format("%s activates", fighter.name), col)
+    if suppressed then flash(self, col) end
+    if frozen then ACTIVATION.purple(string.format("%s is caught in %s -- 1 action", fighter.name, frozen)) end
+    onActionsChanged(fighter.actionsLeft)
+    ACTIVATION.comedown(player, function()
+        if fighter.activation ~= "active" then return end   -- over already, or Out of Action
+        ACTIVATION.insane(player, function()
+            if fighter.activation ~= "active" then return end
+            if suppressed and not frozen and #SKILL.with("springUp") > 0 then ACTIVATION.spring(player) end
+            if #SKILL.with("unstoppable") > 0 then ACTIVATION.unstoppable(player) end
+        end)
+    end)
+    return fighter.actionsLeft
+end
+
+-- Unstoppable (see activate): a fighter that has lost a wound makes a
+-- Willpower check -- a normal stat check said "Check: Wil (7,
+-- Unstoppable)" -- and regains one wound when it passes.
+function ACTIVATION.unstoppable(player)
+    local max = tonumber(fighter.wounds.max) or 0
+    if (tonumber(fighter.wounds.current) or 0) >= max or not statNumber("Wil") then return end
+    ACTIVATION.rollTest("Wil", player, { why = "Unstoppable", done = function(test)
+        local now = tonumber(fighter.wounds.current) or 0
+        if not test.passed or fighter.outOfAction or now >= max then return end
+        setWounds(now + 1)
+        chat(string.format("%s is Unstoppable -- regains 1 wound (%d/%d)", fighter.name, now + 1, max),
+            rgbOf(COL.valueUp))
+    end })
+end
+
+-- Finishes the activation (a left click on S once no action is left; any
+-- actions still left are given up). A fighter that started it Seriously
+-- Injured, and still is, then makes a Recovery test: with an enemy that
+-- isn't Seriously Injured within 1" (base to base) it goes Out of Action
+-- at once; otherwise the Recovery Test panel opens (see recoveryTest).
+-- An enemy's Maddening Visions reaching it give it Insanity first (see
+-- ACTIVATION.visionsCheck).
+-- Returns "out", "recovery" or "done" -- or nil when it wasn't active.
+function completeActivation()
+    if fighter.activation ~= "active" then return nil end
+    local recover = fighter.startedSI and fighter.status == "seriously_injured"
+    ACTIVATION.wyrdEnd()                        -- a power not maintained ends
+    fighter.activation, fighter.actionsLeft, fighter.startedSI, fighter.lostAction = nil, 0, false, nil
+    TRAIT_RULES.endVolleys()
+    TRAIT_RULES.endFight()
+    TRAIT_RULES.endShots()
+    ACTIVATION.endQuestion()
+    ACTIVATION.endFear()
+    drawReady()
+    drawActions()
+    onActionsChanged(0)
+    chat(string.format("%s has completed their activation", fighter.name))
+    ACTIVATION.visionsCheck()
+    ACTIVATION.timedEnd()                       -- Concussion wears off, a Webbed check
+    if not recover then return "done" end
+    local near = ACTIVATION.surroundings()
+    if #near.foes > 0 then
+        setOutOfAction({ value = true, why = 'within 1" of ' .. ACTIVATION.nameList(near.foes) })
+        return "out"
+    end
+    recoveryTest(near)
+    return "recovery"
+end
+
+-- Where the fighter is in its round: "ready", "active" or nil, the actions
+-- left, whether it is Out of Action, and whether it is group activated.
+function getActivation()
+    return { activation = fighter.activation, actionsLeft = fighter.actionsLeft,
+             outOfAction = fighter.outOfAction == true, grouped = fighter.grouped == true }
+end
+
+-- Group activated (true): a friend's passed Group Activation takes this
+-- fighter along -- it may activate once that friend has finished -- shown
+-- by CFG.groupMark after its name until it activates (or the round ends,
+-- or with false). Only a Ready fighter can be. From other scripts:
+-- obj.call("setGroupActivated", { value = true }). Returns whether it is.
+function setGroupActivated(on)
+    if type(on) == "table" then on = on.value end
+    on = on == true and fighter.activation == "ready" and not fighter.outOfAction
+    if on == (fighter.grouped == true) then return on end
+    fighter.grouped = on or nil
+    ui.drawName()
+    return on
+end
+
+-- Out of Action (true), or back from it (false: Revive -- still Seriously
+-- Injured). Out of Action shows its panel over the stats, closes the
+-- Recovery Test and ends the fighter's round; the engagement check and
+-- Recovery tests leave it out, as if it had left the table. Said in chat
+-- (with `why`, from { value =, why = }) and flashed in Seriously
+-- Injured's red. Going Out of Action also opens the Nerve Check of the
+-- friends it shakes (ACTIVATION.shaken) and tells the Mundane Controller
+-- (ACTIVATION.tellController: its gang's Bottle Check). Returns whether
+-- it is Out of Action.
+function setOutOfAction(on)
+    local why
+    if type(on) == "table" then on, why = on.value, on.why end
+    on = on == true
+    if on == (fighter.outOfAction == true) then return on end
+    local shaken = on and ACTIVATION.shaken() or {}
+    fighter.outOfAction = on
+    if on then
+        fighter.recovery, fighter.activation, fighter.actionsLeft, fighter.startedSI = nil, nil, 0, false
+        fighter.treated = nil
+        ACTIVATION.wyrdDrop()
+        setGroupActivated(false)
+        TRAIT_RULES.endShots()
+        if ACTIVATION.nerve then                  -- the check that is open, and any waiting under it
+            ACTIVATION.nerveLight(false)
+            ACTIVATION.nerve = nil
+        end
+        drawReady()
+        drawActions()
+    end
+    ACTIVATION.draw()
+    drawStats()                   -- skills disabled while Out of Action: no mods ...
+    SKILL.drawBar()               -- ... and none under the stats
+    SKILL.switched()              -- ... nor anything else they give
+    local col = rgbOf(statusDef("seriously_injured").color)
+    chat(on and string.format("%s goes Out of Action%s", fighter.name, why and (" -- " .. why) or "")
+         or string.format("%s is revived -- no longer Out of Action", fighter.name), col)
+    flash(self, col)
+    if on then
+        if #shaken > 0 then
+            chat(string.format("%s must take a Nerve Check", ACTIVATION.nameList(shaken)),
+                rgbOf(statusDef("suppressed").color))
+        end
+        for _, o in ipairs(shaken) do ACTIVATION.ask(o.obj, "nerveCheck") end
+    end
+    ACTIVATION.tellController(not on)
+    return on
+end
+
+-- Tells every Mundane Controller on the table (CFG.controllerTag) that this
+-- fighter has gone Out of Action -- its gang must take a Bottle Check -- or,
+-- `back`, is revived: either way the gang's Ld there is looked at again.
+function ACTIVATION.tellController(back)
+    local ok, objs = pcall(function() return getObjectsWithTag(CFG.controllerTag) end)
+    local gang = ui.gangOf(self)
+    if not gang or gang == "" then gang = trimText(fighter.gang or "") end
+    for _, obj in ipairs(ok and type(objs) == "table" and objs or {}) do
+        ACTIVATION.ask(obj, "onFighterOut", { gang = gang, name = fighter.name, back = back or nil })
+    end
+end
+
+-- Takes action `key` (from ACTIONS). During an activation (actions left) a
+-- simple one (S) spends one action, a double one (D) both, a free one (F)
+-- none, and it is marked used (dimmed until the activation is complete). It
+-- is always taken -- a dimmed action or one without enough actions left too,
+-- since special skills can allow it -- spending what is left. Outside an
+-- activation it spends and marks nothing. Returns true (then the
+-- onActionChosen stub hears of it), false for an unknown action. The
+-- fighter's skills and wargear that are actions (A's Special tab) are taken
+-- the same way, by their key ("medicate"). Every action taken is said in
+-- chat -- "Kage: Shoot (S), 1 action left" -- in a light shade of its type's
+-- colour. Three do more, for the fighters `player` has selected: Treat Ally
+-- gives a Seriously Injured friend within 1" one more Injury dice in its next
+-- Recovery test (see ACTIVATION.treat), Group Activation opens its Leadership
+-- check (see groupActivation), Coup de Grace rolls off against the enemy (see
+-- ACTIVATION.coup). And one that says how far it moves its fighter
+-- (`distance`: Sprint) has that worked out and said too (see
+-- ACTIVATION.sayDistance); one that hands out ammo (`distribute`:
+-- Munitioneer's Distribute Ammo) has the friends within its range that are
+-- out of ammo check for a reload (see ACTIVATION.distribute); one that boosts
+-- the fighter's stats (`boost`: the Stimm-Slug) does so until its next
+-- activation (see ACTIVATION.boost). After a Dash the ranged weapons turn
+-- red -- it leaves no action to shoot with -- but for those with Assault (see
+-- TRAIT_RULES.shot).
+--   Reload is not taken here at all: it is the reload of the one profile
+-- that is out of ammo, and nothing otherwise (see ACTIVATION.reload). Nor
+-- is one that can be taken once a game (`once`) a second time: nothing is
+-- spent, only said why -- false back (see setUsedOnce).
+function useAction(key, player)
+    key, player = keyValue(key, player)
+    local a = ACTIONS[indexOf(ACTIONS, key) or 0] or SKILL.action(key)
+    if not a then return false end
+    if a.key == "reload" then return ACTIVATION.reload(player) end
+    if a.once and (fighter.usedOnce or {})[a.key] then
+        chat(string.format("%s has used %s already -- once a game", fighter.name, a.label), rgbOf(COL.valueMod))
+        return false
+    end
+    local refused = a.type == "wyrd" and ACTIVATION.wyrdRefuses(a)
+    if refused then
+        ACTIVATION.purple(refused)
+        return false
+    end
+    if a.key == "recovery_test" then recoveryTest() end
+    local spending = fighter.actionsLeft > 0 and not a.always
+    if spending then
+        fighter.actionsLeft = math.max(0, fighter.actionsLeft - SKILL.cost(a))
+        fighter.usedActions[a.key] = true
+        -- a Shoot taken here pays for the shot after it (ACTIVATION.attackCost)
+        if a.key == "shoot" or a.key == "braced_shot" or a.key == "aimed_shot" then
+            fighter.shotsPaid = (tonumber(fighter.shotsPaid) or 0) + 1
+        end
+    end
+    -- an Aimed Shot taken here: every weapon that can be aimed opens aimed
+    -- until the shot is made, the aim is taken off by hand or the
+    -- activation ends (see openedFlyout)
+    if a.key == "aimed_shot" and fighter.activation == "active" then fighter.aimedShot = true end
+    local left = not spending and ""
+        or fighter.actionsLeft == 0 and ", no actions left"
+        or string.format(", %d action%s left", fighter.actionsLeft, fighter.actionsLeft == 1 and "" or "s")
+    local rgb = a.type == "wyrd" and rgbOf(COL.wyrdInk)
+        or rgbOf(mixColor(ACTION_TYPES[a.type or ""] or "#E6E6E6ff", "#FFFFFFff", 0.55))
+    chat(string.format("%s: %s (%s)%s", fighter.name, a.label, SKILL.costOf(a) or "", left), rgb)
+    if a.key == "treat_ally" then ACTIVATION.treat(player, rgb)
+    elseif a.key == "group_activation" then groupActivation(player)
+    elseif a.key == "coup_de_grace" then ACTIVATION.coup(player)
+    elseif a.key == "concentrate" and a.type == "wyrd" then ACTIVATION.concentrate()
+    elseif (a.key == "maintain_control_s" or a.key == "maintain_control_f") and a.type == "wyrd" then
+        ACTIVATION.maintain(a, player)
+    elseif a.type == "wyrd" and a.kind == "skill" then ACTIVATION.cast(a, player) end
+    if a.distance then ACTIVATION.sayDistance(a, rgb) end
+    if a.distribute then ACTIVATION.distribute(a, player) end
+    ACTIVATION.pulseWeapons(a.key)    -- Fight / Shoot: the weapons it is for
+    if a.once then
+        fighter.usedOnce = fighter.usedOnce or {}
+        fighter.usedOnce[a.key] = true
+    end
+    if a.boost then ACTIVATION.boost(a, rgb) end
+    TRAIT_RULES.dropAims()            -- what the action leaves to shoot with
+    TRAIT_RULES.drawGlows()
+    drawReady()
+    drawActions()
+    onActionsChanged(fighter.actionsLeft)
+    onActionChosen(player, a.key)
+    return true
+end
+
+-- Steps to the next status in STATUSES, wrapping round.
+function cycleStatus()
+    local i = indexOf(STATUSES, fighter.status) or 1
+    return setStatus(STATUSES[i % #STATUSES + 1].key)
+end
+
+-- The base: { diameter = inches, mm =, source = } (see currentBase) -- a
+-- "Base: 32mm" line in the description first, then one set by setBase or
+-- passed in by the importer, else the model measured (once, then saved).
+function getBase() return currentBase() end
+
+-- Sets the base by hand, taken as given: a size in mm (32, "32mm",
+-- { mm = 32 }, { value = 32 }) or { diameter = inches }. nil or "auto"
+-- measures the model again. Returns the base now in use (a description
+-- line still wins).
+function setBase(v)
+    if type(v) == "table" then
+        if v.mm == nil and v.value == nil and tonumber(v.diameter) then
+            v = tonumber(v.diameter) * MM_PER_INCH
+        else
+            v = v.mm or v.value
+        end
+    end
+    local mm = tonumber(v) or tonumber(tostring(v or ""):match("^%s*(%d+%.?%d*)%s*[Mm]?[Mm]?%s*$"))
+    fighter.base = (mm and mm > 0) and baseRecord(mm, "manual") or measureBase(self)
+    return currentBase()
+end
+
+-- The model's height, which the card floats over: { height = inches above
+-- the model's origin at its current scale, units = the same in its local
+-- units (what is saved) }, or nil while unknown.
+function getHeight()
+    local h = tonumber(fighter.height)
+    if not h then return nil end
+    local ok, s = pcall(function() return self.getScale() end)
+    local sy = math.abs(ok and s and tonumber(s.y or s[2]) or 1)
+    return { height = h * sy, units = h }
+end
+
+-- Sets the height by hand, in inches above the model's origin at its
+-- current scale; nil or "auto" measures the model again, as it stands.
+-- The card moves at once. Returns getHeight().
+function setHeight(v)
+    if type(v) == "table" then v = v.height or v.value end
+    local ok, s = pcall(function() return self.getScale() end)
+    local sy = math.max(0.01, math.abs(ok and s and tonumber(s.y or s[2]) or 1))
+    fighter.height = tonumber(v) and tonumber(v) / sy or modelHeight(self)
+    refresh()
+    return getHeight()
+end
+
+-- How far the card was raised by hand, in inches (lowered: negative) --
+-- on top of where its height and CFG.headGap put it (see placement).
+function getLift() return tonumber(fighter.lift) or 0 end
+
+-- Raises the card `v` inches above where it would sit (negative: lowers
+-- it; 0 or nil: back there), at most CFG.liftMax either way. It moves at
+-- once, and the fighter keeps it. Returns getLift().
+function setLift(v)
+    if type(v) == "table" then v = v.value or v.lift end
+    local max = tonumber(CFG.liftMax) or 5
+    local n = math.floor(clamp(tonumber(v) or 0, -max, max) * 1000 + 0.5) / 1000
+    fighter.lift = n ~= 0 and n or nil
+    if ui.built then ui.place() end
+    return getLift()
+end
+
+-- The card `steps` steps of CFG.liftStep higher (lower: negative) -- what
+-- the arrows beside the name do. Returns getLift().
+function nudgeLift(steps)
+    if type(steps) == "table" then steps = steps.value end
+    return setLift(getLift() + (tonumber(steps) or 1) * (tonumber(CFG.liftStep) or 0.1))
+end
+
+-- Base to base, in inches, from this fighter to `other` (an object or its
+-- GUID) on the table plane: the centres' distance less both radii (see
+-- baseGap; negative when they overlap). nil when either can't be placed.
+-- For range rules.
+function baseToBase(other)
+    if type(other) == "string" then
+        local ok, o = pcall(function() return getObjectFromGUID(other) end)
+        other = ok and o or nil
+    end
+    local a, b = positionOf(self), other and positionOf(other)
+    if not (a and b) then return nil end
+    local ob
+    if isSelf(other) then ob = currentBase() else
+        local ok, v = ACTIVATION.ask(other, "getBase")
+        ob = (ok and validBase(v)) or measureBase(other) or baseRecord(CFG.baseDefault, "default")
+    end
+    a.r, b.r = currentBase().diameter / 2, ob.diameter / 2
+    return baseGap(a, b)
+end
+
+-- What another card's engagement check needs from this one (see
+-- tableEntry). `master`: a Combat Master, which assists and interferes in
+-- close combat whatever else it is fighting (see TRAIT_RULES.supportNear).
+-- `fearsome`, `ironJaw` (the Toughness it adds) and `lieLow`: what
+-- attackers must know of the fighter they attack (see rollAttack,
+-- ACTIVATION.woundPlan); `s`, its Strength, is what a Coup de Grace on it
+-- rolls against (see ACTIVATION.coup). `ironWill`: what its Iron Will adds
+-- to the number its gang's Bottle Checks are taken against (the Mundane
+-- Controller's; nil for none, or while its skills are disabled).
+-- `assist`: the Injury dice its wargear adds to a friend's Recovery test
+-- it assists, and `assistWith`, what that is called (a Medicae Kit; see
+-- recoveryTest). `wyrd` and `wil`: a Wyrd that could try to disrupt an
+-- enemy's cast, and the Willpower it would check against (see
+-- ACTIVATION.disrupter). What its Wyrd powers do to others: `auras` (the
+-- auras in effect, see ACTIVATION.auraOf), `cacophony` (the name of a
+-- power making its enemies re-roll ranged hits), `void` (the inches within
+-- which it is at Long range) and `visions` (Maddening Visions: { range,
+-- condition, label }). `immune`: the weapon traits that do nothing to it and
+-- the conditions it never gets (a Hazard Suit's Blaze and Radphage: see
+-- ACTIVATION.immunity), each giving the item's name.
+function engageInfo()
+    local will = 0
+    for _, it in ipairs(SKILL.with("ironWill")) do will = will + math.max(0, math.floor(tonumber(it.ironWill) or 0)) end
+    local assist, kits = 0, {}
+    for _, it in ipairs(SKILL.with("assist")) do
+        local n = math.max(0, math.floor(tonumber(it.assist) or 0))
+        if n > 0 then assist, kits[#kits + 1] = assist + n, it.name end
+    end
+    local wil = ACTIVATION.wyrdCan() and statNumber("Wil") or nil
+    local cacophony, void = ACTIVATION.liveField("rerollHits"), ACTIVATION.liveField("void")
+    return { name = fighter.name, status = fighter.status, diameter = currentBase().diameter,
+             ironWill = will > 0 and will or nil, wyrd = wil and true or nil, wil = wil,
+             assist = assist > 0 and assist or nil, assistWith = assist > 0 and table.concat(kits, ", ") or nil,
+             out = fighter.outOfAction == true or nil, activation = fighter.activation,
+             rank = fighter.rank, cl = statNumber("Cl"), ld = statNumber("Ld"),
+             t = statNumber("T"), s = statNumber("S"), loner = ACTIVATION.tags().loner or nil,
+             master = #SKILL.with("master") > 0 or nil,
+             fearsome = #SKILL.with("fearsome") > 0 or nil, ironJaw = ACTIVATION.jaw(),
+             lieLow = #SKILL.with("lieLow") > 0 or nil,
+             auras = ACTIVATION.auraOf(), cacophony = cacophony and cacophony.name or nil,
+             void = void and tonumber(void.void) or nil,
+             visions = ACTIVATION.wyrdCan() and type(fighter.wyrd) == "table" and fighter.wyrd.visions or nil,
+             immune = next(ACTIVATION.immunity()) and ACTIVATION.immunity() or nil }
+end
+
+-- What the fighter's skills and wargear make it immune to (`immune`: a
+-- Hazard Suit's "blaze" and "radphage") -- weapon traits (RULES.traits
+-- keys) and conditions (keys), lower case -- each giving the item's name.
+function ACTIVATION.immunity()
+    local out = {}
+    for _, it in ipairs(SKILL.with("immune")) do
+        for _, k in ipairs(type(it.immune) == "table" and it.immune or { it.immune }) do
+            local key = tostring(k):lower()
+            out[key] = out[key] or it.name
+        end
+    end
+    return out
+end
+
+-- Automatic Engaged, run when the model is put down and has settled (see
+-- onDrop) from the dropped model's side only: it and each enemy within
+-- CFG.engageRange base to base become Engaged, and those left with no
+-- enemy in reach -- it, or the enemies it moved away from -- go back to
+-- Active (see runEngagement). Returns how many statuses changed.
+function checkEngagement()
+    if not CFG.autoEngage then return 0 end
+    return runEngagement()
+end
+
+-- The fighter's skills, as a list of names (the ones that are actions
+-- too).
+function getSkills()
+    local out = {}
+    for i, name in ipairs(fighter.skills or {}) do out[i] = name end
+    return out
+end
+
+-- New skills: a list of names or one string, "Inspiring, Medicate" (see
+-- SKILL.parse). The names under the stats and A's panels are rebuilt, and
+-- the weapons: one a skill gives comes and goes with it (see SKILL.arm).
+-- Returns getSkills().
+function setSkills(v)
+    fighter.skills = SKILL.parse(v)
+    SKILL.arm(fighter)
+    refresh()
+    return getSkills()
+end
+
+-- One more skill (a fighter learns one between games), or one less, by
+-- name in any case. Both rebuild; they return getSkills().
+function addSkill(name)
+    local list = getSkills()
+    list[#list + 1] = type(name) == "table" and name.value or name
+    return setSkills(list)
+end
+function removeSkill(name)
+    local key, list = SKILL.key(type(name) == "table" and name.value or name), {}
+    for _, s in ipairs(getSkills()) do
+        if SKILL.key(s) ~= key then list[#list + 1] = s end
+    end
+    return setSkills(list)
+end
+
+-- The fighter's wargear, just like its skills: as a list of names; new
+-- wargear (a list or one string, "Mesh armour, Photo-goggles"), and one
+-- piece more or less by name in any case. The setters rebuild and return
+-- getWargear().
+function getWargear()
+    local out = {}
+    for i, name in ipairs(fighter.wargear or {}) do out[i] = name end
+    return out
+end
+function setWargear(v)
+    fighter.wargear = SKILL.parse(v)
+    SKILL.arm(fighter)
+    refresh()
+    return getWargear()
+end
+function addWargear(name)
+    local list = getWargear()
+    list[#list + 1] = type(name) == "table" and name.value or name
+    return setWargear(list)
+end
+function removeWargear(name)
+    local key, list = SKILL.key(type(name) == "table" and name.value or name), {}
+    for _, s in ipairs(getWargear()) do
+        if SKILL.key(s) ~= key then list[#list + 1] = s end
+    end
+    return setWargear(list)
+end
+
+-- Takes every condition off, in place (the Mundane Controller's "Clear All
+-- Conditions"). Returns how many were on.
+function clearConditions()
+    local n = 0
+    for _, c in ipairs(CONDITIONS) do
+        local keeps = c.key == "maintaining_power" and type(fighter.wyrd) == "table" and fighter.wyrd.power
+        if conditionCount(c.key) > 0 and not keeps then      -- a power in effect keeps its own
+            n = n + 1
+            setCondition(c.key, 0)
+        end
+    end
+    return n
+end
+
+-- Sets a condition (C's panel): true / false, or for a stacking one
+-- (Concussion) a number of stacks. The panel, the bar under the stats and
+-- every stat the condition changes all update in place. Returns the new
+-- number of stacks (0 = off), or nil for an unknown condition. One the
+-- fighter is immune to (a Hazard Suit's Radphage, see ACTIVATION.immunity)
+-- is never put on: an orange line says why.
+function setCondition(key, n)
+    key, n = keyValue(key, n)
+    local i = indexOf(CONDITIONS, key)
+    if not i then return nil end
+    if n == true then n = 1 elseif n == false or n == nil then n = 0 end
+    n = math.max(0, math.floor(tonumber(n) or 0))
+    if not CONDITIONS[i].stacks then n = math.min(n, 1) end
+    local proof = n > 0 and ACTIVATION.immunity()[tostring(key):lower()]
+    if proof then
+        chat(string.format("%s has a %s -- never %s", fighter.name, proof, CONDITIONS[i].label), rgbOf(COL.valueMod))
+        drawToggle("cond", i)                    -- C's panel as it was
+        return conditionCount(key)
+    end
+
+    local before = conditionCount(key)
+    fighter.conditions[key] = n > 0 and n or nil
+    drawToggle("cond", i)
+    drawConditionBar()
+    drawStats()
+    -- Maintaining Power taken off by hand: the power in effect ends with it
+    if key == "maintaining_power" and n == 0 and before > 0 and type(fighter.wyrd) == "table" and fighter.wyrd.power then
+        ACTIVATION.wyrdExpire(" -- Maintaining Power taken off")
+        ACTIVATION.wyrdDraw()
+    end
+    if n ~= before then onConditionChanged(key, n, before) end
+    return n
+end
+
+-- A weapon slot (1-3): its diamond and popup are rebuilt.
+function setWeapon(index, weapon)
+    index, weapon = keyValue(index, weapon)
+    index = tonumber(index)
+    if not index or not LAY.weaponSpots[index] then return false end
+    fighter.weapons[index] = weapon
+    refresh()
+    return true
+end
+
+-- A weapon profile's in-play state, drawn in place:
+--   { weapon = 1-3, profile = n, mode = "attack" | "rapid_fire",
+--     ammo = "fine" | "out" | "jam" | "spent" | "combi" | "extra" (AA(N)),
+--     attacks = n (melee; min 1), "A+1", or with the traits for them
+--               "A+N" (Paired) / "xN" (Additional Attacks) }
+-- Fields left out stay as they are. Returns the profile, or nil. Combi is
+-- the whole weapon's: a profile put on Combi puts every Combi profile of
+-- the weapon that can fire on it, and one taken off Combi (to AM, OUT,
+-- JAM ...) takes them all off -- except during a Combi volley (see
+-- TRAIT_RULES.held), where one going OUT, JAM or SPENT leaves the rest on
+-- it, and one taken back to AM ends the volley. The weapon's other
+-- profiles are redrawn too: one going down can end Combi.
+function setProfileState(t)
+    if type(t) ~= "table" then return nil end
+    local i, pi = tonumber(t.weapon), tonumber(t.profile)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and pi and w.profiles[pi]
+    if not p then return nil end
+    if t.mode ~= nil and indexOf(PROFILE_MODES, t.mode) then p.mode = t.mode end
+    if t.ammo ~= nil then
+        local was, volley = TRAIT_RULES.ammoState(w, p), TRAIT_RULES.volley[w]
+        p.ammo = AMMO_LOOK[t.ammo] and t.ammo ~= "fine" and t.ammo or nil
+        for _, q in ipairs(w.profiles) do
+            if q ~= p and p.ammo == "combi" and TRAIT_RULES.combi(q) and not profileDown(q) then
+                q.ammo = "combi"
+            elseif q ~= p and p.ammo ~= "combi" and was == "combi" and q.ammo == "combi"
+                   and not (volley and profileDown(p)) then
+                q.ammo = nil
+            end
+        end
+        if volley and was == "combi" and p.ammo == nil then TRAIT_RULES.volley[w] = nil end
+    end
+    if t.attacks ~= nil then
+        local step = TRAIT_RULES.step(p, t.attacks)
+        p.attacks = step ~= "charge" and step or nil             -- anything else: "A + 1"
+    end
+    for k = 1, #w.profiles do drawProfile(i, k) end
+    TRAIT_RULES.drawGlows()       -- a Combi volley's yellow may be over
+    drawStats()                   -- an open melee weapon's attacks can change I
+    onProfileChanged(i, pi, p)
+    return p
+end
+
+-- A weapon's modifier to hit ({ weapon = n, value = n }), shown in the
+-- Hit column of each of its profiles, in place. Returns the number kept
+-- (within TRAIT_RULES.hitMax), or nil for no such weapon.
+function setWeaponHit(t)
+    if type(t) ~= "table" then return nil end
+    local i = tonumber(t.weapon)
+    local w = i and weaponAt(i)
+    if not w then return nil end
+    w.hit = TRAIT_RULES.hit({ hit = t.value })
+    if w.hit == 0 then w.hit = nil end
+    for k = 1, #(w.profiles or {}) do drawProfile(i, k) end
+    return TRAIT_RULES.hit(w)
+end
+
+-- How far a profile's value is adjusted ({ weapon =, profile =, key =
+-- "S" / "AP" / ... (PROFILE_COLS, not Hit), value = steps better, + or -;
+-- 0 back to the profile's own }), shown in place: green better, orange
+-- worse. A step that wouldn't change the value (past its limits, see
+-- TRAIT_RULES.ADJ) isn't taken. Attacks use what is shown -- S for the
+-- Wound roll, Am for the Ammo check. Returns the steps kept, or nil for a
+-- value that can't be adjusted.
+function setProfileStat(t)
+    if type(t) ~= "table" then return nil end
+    local i, pi = tonumber(t.weapon), tonumber(t.profile)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and pi and w.profiles[pi]
+    if not (p and TRAIT_RULES.adjustable(p, t.key)) then return nil end
+    local R, key = TRAIT_RULES, t.key
+    local want, now = math.floor(tonumber(t.value) or 0), R.adjSteps(p, key)
+    -- one step at a time towards it, while each still changes the value
+    while want ~= now do
+        local nxt = now + (want > now and 1 or -1)
+        if R.adjust(key, p[key], nxt) == R.adjust(key, p[key], now) then break end
+        now = nxt
+    end
+    p.adj = p.adj or {}
+    p.adj[key] = now ~= 0 and now or nil
+    if next(p.adj) == nil then p.adj = nil end
+    for k = 1, #w.profiles do drawProfile(i, k) end
+    onProfileChanged(i, pi, p)
+    return now
+end
+
+-- A profile's Reliable, in place ({ weapon =, profile =, value = true:
+-- ready (green) | false: used (red) }). Returns whether it is ready, nil
+-- for a profile without the trait.
+function setReliable(t)
+    if type(t) ~= "table" then return nil end
+    local i, pi = tonumber(t.weapon), tonumber(t.profile)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and pi and w.profiles[pi]
+    if not (p and TRAIT_RULES.reliable(p)) then return nil end
+    p.reliableUsed = t.value == false or nil
+    drawProfile(i, pi)
+    onProfileChanged(i, pi, p)
+    return not p.reliableUsed
+end
+
+-- A new game -- the Mundane Controller's Start Game calls it for every
+-- fighter: every Reliable ready again, and with them whatever can be used
+-- once a game (setUsedOnce: the Stimm-Slug; a boost still lasting from the
+-- last game just ends), wargear burnt out works again (setBurnt) -- and no
+-- Wyrd power is in effect, its own or another fighter's on it. Returns how
+-- many Reliables were used.
+function resetReliable()
+    local n = 0
+    for i = 1, weaponCount() do
+        local w = weaponAt(i)
+        for pi, p in ipairs((w and w.profiles) or {}) do
+            if p.reliableUsed then
+                n, p.reliableUsed = n + 1, nil
+                drawProfile(i, pi)
+            end
+        end
+    end
+    setUsedOnce(nil, false)
+    if fighter.burnt then
+        fighter.burnt = nil
+        SKILL.drawBurnt()
+        drawStats()
+    end
+    if fighter.wyrd then
+        ACTIVATION.unhex(fighter.wyrd)         -- what it did to the others goes with it
+        fighter.wyrd = nil                     -- no power kept from the last game
+        ACTIVATION.wyrdDraw()
+    end
+    if fighter.hexes then                      -- nor anyone else's on this fighter
+        fighter.hexes = nil
+        drawStats()
+    end
+    return n
+end
+
+-- What can be taken once a game (an action that says `once`: the
+-- Stimm-Slug), by hand: action `key` used (true: dimmed in A's panel, not
+-- to be taken again) or to take again (false; with no key, every one) --
+-- and what it still boosts the stats by ends there and then, no die
+-- rolled. From other scripts: obj.call("setUsedOnce", { key =
+-- "stimm_slug_stash", value = false }). Returns whether it is used.
+function setUsedOnce(key, used)
+    key, used = keyValue(key, used)
+    used = used == true
+    local boosted = fighter.boosted
+    if key == nil then
+        fighter.usedOnce = nil
+        if not used then fighter.boosted = nil end
+    else
+        fighter.usedOnce = fighter.usedOnce or {}
+        fighter.usedOnce[tostring(key)] = used or nil
+        if not used and boosted then boosted[tostring(key)] = nil end
+    end
+    if boosted and not used then drawStats() end
+    drawActions()
+    return used
+end
+
+-- Wargear that burns out (`burns`: the Refractor Shield, whose
+-- invulnerable save is gone for the battle after its first natural 1, see
+-- ACTIVATION.rollSaves), by hand: `key` its name or key, `burnt` true /
+-- false (nil: the other way round). Its name under the stats is grey
+-- while it is, and its save isn't there (the hover view shows Sv again).
+-- From other scripts: obj.call("setBurnt", { key = "Refractor Shield",
+-- value = false }). Returns whether it is burnt out; nil for a fighter
+-- without it.
+function setBurnt(key, burnt)
+    key, burnt = keyValue(key, burnt)
+    local it, k = nil, SKILL.key(tostring(key or ""))
+    for _, o in ipairs(SKILL.owned()) do
+        if o.burns and o.key == k then it = o end
+    end
+    if not it then return nil end
+    local was = (fighter.burnt or {})[it.key] == true
+    if burnt == nil then burnt = not was end
+    burnt = burnt == true
+    if burnt ~= was then
+        fighter.burnt = fighter.burnt or {}
+        fighter.burnt[it.key] = burnt or nil
+        if next(fighter.burnt) == nil then fighter.burnt = nil end
+        SKILL.drawBurnt()
+        drawStats()
+        chat(string.format(burnt and "%s's %s is burnt out (set by hand)" or "%s's %s works again (set by hand)",
+            fighter.name, it.name), rgbOf(burnt and COL.valueMod or COL.valueUp))
+    end
+    return burnt
+end
+
+-- Attacks with a weapon profile ({ weapon =, profile = }): hands the
+-- attack -- the mode shown, or a melee profile's number of attacks; `combi`
+-- when fired as Combi, `backstab` when its S is raised, `aimed` on Aimed
+-- Shot, `support` "assist" / "interference" when close combat changed its
+-- Hit, `marksman` when Marksman's +1 is in it, `action` the ACTIONS key it is
+-- (fight / shoot / braced_shot / aimed_shot; `cost` 0 with Additional Attacks
+-- and for a free shot, `free` then "gunfighter" / "assault", see
+-- TRAIT_RULES.shot) -- to the onWeaponAttack stub. A profile out of ammo,
+-- jammed or spent can't, nor one an Engaged fighter can't use (neither Light
+-- nor Melee), nor a ranged one once the activation's shot is made, nor a
+-- skill's weapon while the skills are disabled; returns nil. It rolls
+-- nothing: the ATK / RF button's rollAttack does, through it.
+function attackWith(t, player)
+    if type(t) ~= "table" then return nil end
+    local i, pi = tonumber(t.weapon), tonumber(t.profile)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and pi and w.profiles[pi]
+    if not p or profileDown(p) or not TRAIT_RULES.usable(p, w) then return nil end
+    local melee = isMelee(p)
+    local hit, _, support = TRAIT_RULES.shownHit(w, p)
+    local attack = {
+        weapon = i, profile = pi, name = TRAIT_RULES.name(w), stats = p, melee = melee,
+        mode = melee and PROFILE_MODES[1].key or PROFILE_MODES[profileMode(p)].key,
+        attacks = melee and meleeAttacks(p) or nil,
+        combi = TRAIT_RULES.ammoState(w, p) == "combi" or nil,
+        additional = TRAIT_RULES.ammoState(w, p) == "extra" and TRAIT_RULES.extraShots(p) or nil,   -- AA(N)
+        backstab = (TRAIT_RULES.stabbing[w] and TRAIT_RULES.backstab(p)) or nil,
+        -- the weapon's modifier to hit, as shown (Combi: -1, aimed: +1, an
+        -- Assist: +1, Interference: -1, Marksman: +1)
+        hit = hit,
+        support = support == 1 and "assist" or support == -1 and "interference" or nil,
+        marksman = (TRAIT_RULES.longShot[p] and TRAIT_RULES.marksman(p)) and true or nil,
+        aimed = (TRAIT_RULES.aiming[w] and TRAIT_RULES.canAim(p)) or nil,
+        stat = TRAIT_RULES.hitStat(p),                  -- WS or BS (a Light shot while Engaged: WS)
+        reroll = TRAIT_RULES.reroll[w],                 -- "ones" / "all": re-rolls to hit, set by hand
+    }
+    attack.action, attack.cost, attack.free = TRAIT_RULES.attackAction(w, p)   -- "fight", "shoot", ...
+    onWeaponAttack(player, attack)
+    return attack
+end
+
+-- One stat's base value; the stat block may reflow, so this rebuilds.
+-- It also drops any hand-set number for the stat.
+function setStat(key, value)
+    key, value = keyValue(key, value)
+    fighter.stats[key] = value
+    fighter.statEdits[key] = nil
+    pendingStats[key] = nil
+    refresh()
+    return true
+end
+
+-- A stat's own number one up (`dir` 1) or down (-1) from what it is now,
+-- within STAT.LIMITS: round from its highest to its lowest and back.
+local function steppedStat(key, dir)
+    local base = statBase(key)
+    if not base then return nil end
+    local lo, hi = STAT.range(key)
+    local n = STAT.clamp(key, base) + dir
+    if n > hi then n = lo elseif n < lo then n = hi end
+    return n
+end
+
+-- A right click on a value, in place: one up (or, `dir` -1, down), for
+-- viewer `by` -- changed but not kept (violet) until keepStat; back at the
+-- kept number it is no longer changed. Returns the new number, or nil for
+-- a stat with none ("-").
+function nudgeStat(key, dir, by)
+    local n = steppedStat(key, dir)
+    if not n then return nil end
+    pendingStats[key] = n ~= statKept(key) and { n = n, by = by } or nil
+    drawStats()
+    return n
+end
+
+-- Keeps the number a stat shows as its base (its Set plate): set by hand
+-- (light blue), or plain again when it is the statline's own. Returns the
+-- number.
+function keepStat(key)
+    local n = statBase(key)
+    pendingStats[key] = nil
+    if n then
+        n = STAT.clamp(key, n)
+        fighter.statEdits[key] = n ~= statOriginal(key) and n or nil
+    end
+    drawStats()
+    return n
+end
+
+-- From other scripts: raises a stat by hand and keeps it at once -- one up
+-- from what it is now, up to its highest (STAT.LIMITS), then round to its
+-- lowest. Returns the new number, or nil for a stat with none ("-").
+function stepStat(key)
+    local n = steppedStat(key, 1)
+    if not n then return nil end
+    pendingStats[key] = nil
+    fighter.statEdits[key] = n ~= statOriginal(key) and n or nil
+    drawStats()
+    return n
+end
+
+-- The colour name of whoever clicked: handlers get a Player, other scripts
+-- may pass a colour string or nothing.
+local function colorOf(player)
+    if type(player) == "string" then return player ~= "" and player or nil end
+    if player == nil then return nil end
+    local ok, c = pcall(function() return player.color end)   -- a Player (userdata) or a table
+    return ok and type(c) == "string" and c ~= "" and c or nil
+end
+
+-- Says something to everyone (see chat), in the roller's colour when
+-- there is one.
+local function announce(msg, color)
+    chat(msg, color and stringColorToRGB and stringColorToRGB(color) or nil)
+end
+
+-- Whether a Physics.cast hit is something the dice must not touch: any
+-- loose object -- a model, other dice -- but not the table, this model
+-- itself or locked scenery.
+local function blocksDice(o)
+    if o == nil or o == self then return false end
+    if o.type == "Surface" or o.tag == "Surface" then return false end
+    local ok, locked = pcall(function() return o.getLock() end)
+    return not (ok and locked)
+end
+
+-- A clear spot beside the model to drop dice on: a square CFG.diceArea
+-- across, CFG.diceGap beyond the model's base, tried every 30 degrees round
+-- it -- starting on the side facing `color`'s seat. Returns the spot's
+-- centre and the table height there, or nil when every one is taken (or
+-- there is no physics to ask).
+local function diceSpot(color)
+    if not (Physics and Physics.cast) then return nil end
+    local ok, b = pcall(function() return self.getBounds() end)
+    if not ok or not b then return nil end
+    local c, sz = b.center, b.size
+    local floor = c.y - sz.y / 2
+    local r = math.max(sz.x, sz.z) / 2 + CFG.diceGap + CFG.diceArea / 2
+    local start = 0
+    local p = color and Player[color]
+    local okH, hand = pcall(function() return p.getHandTransform() end)
+    if okH and hand and hand.position then
+        start = math.deg((math.atan2 or math.atan)(hand.position.z - c.z, hand.position.x - c.x))
+    end
+    local h = 3                                   -- how high above the table must be clear
+    for k = 0, 11 do
+        local step = math.floor((k + 1) / 2) * (k % 2 == 1 and 1 or -1)   -- 0, +30, -30, +60 ...
+        local a = math.rad(start + step * 30)
+        local x, z = c.x + r * math.cos(a), c.z + r * math.sin(a)
+        local hits = Physics.cast({ origin = { x, floor + 0.2 + h / 2, z }, direction = { 0, 1, 0 },
+            type = 3, size = { CFG.diceArea, h, CFG.diceArea }, max_distance = 0 }) or {}
+        local clear = true
+        for _, hit in ipairs(hits) do
+            if blocksDice(hit.hit_object) then clear = false break end
+        end
+        if clear then return { x = x, z = z }, floor end
+    end
+    return nil
+end
+
+-- Sets a freshly spawned die `o` tumbling: turning about every axis at
+-- between half of `spin` and `spin` (radians a second, either way round --
+-- never next to still about one, so no die just drops flat) and pushed
+-- `push` (world units a second, at most) sideways in a random direction.
+-- Enough for a fair roll; little enough that the dice settle quickly.
+-- (The Mundane Controller's dice do the same, DICE.SPIN / PUSH.)
+--   It is set at once and again two frames on: TTS may still be
+-- finishing the spawn when the callback runs, and a velocity set then can
+-- be lost -- the die just drops, showing the face it spawned with. The
+-- second time keeps the die's fall (its current up / down speed).
+-- Returns the kick itself, to give again to a die that hangs where it
+-- spawned (see ACTIVATION.fallen).
+function ACTIVATION.tumble(o, spin, push)
+    local function turn() return (math.random() * 0.5 + 0.5) * (spin or 12) * (math.random() < 0.5 and -1 or 1) end
+    local av = { turn(), turn(), turn() }
+    local a, v = math.random() * 2 * math.pi, (math.random() * 0.5 + 0.5) * (push or 0)
+    local function go()
+        pcall(function()
+            if o.isDestroyed and o.isDestroyed() then return end
+            o.setAngularVelocity(av)
+            if v > 0 then
+                local ok, now = pcall(function() return o.getVelocity() end)
+                local fall = ok and type(now) == "table" and tonumber(now.y or now[2]) or 0
+                o.setVelocity({ v * math.cos(a), fall, v * math.sin(a) })
+            end
+        end)
+    end
+    go()
+    if Wait and Wait.frames then Wait.frames(go, 2) end
+    return go
+end
+
+-- Whether a thrown die can be read -- d = { obj, from = where it
+-- spawned, kick = its ACTIVATION.tumble }, checked every frame until the
+-- roll has settled. TTS can hold a fresh die still in mid-air for a
+-- moment, calling it "resting" all the while, and the spin given meanwhile
+-- is lost: read then, it would give the face it spawned with at once. So
+-- a die counts only once it has fallen (moved FALL world units from its
+-- spawn point) and come to rest again; until it falls it is kicked again
+-- every KICK frames, and once more as it starts to fall, so it tumbles.
+ACTIVATION.FALL, ACTIVATION.KICK = 0.3, 10
+function ACTIVATION.fallen(d)
+    local o = d.obj
+    if o == nil or (o.isDestroyed and o.isDestroyed()) then return true end
+    if o.spawning or not d.kick then return false end
+    if not d.fell then
+        local ok, p = pcall(function() return o.getPosition() end)
+        local x, y, z = ok and p and tonumber(p.x or p[1]), ok and p and tonumber(p.y or p[2]),
+                        ok and p and tonumber(p.z or p[3])
+        local f = d.from
+        if not (x and y and z and f) then
+            d.fell = true                        -- can't tell: go by resting alone
+        elseif (x - f.x) ^ 2 + (y - f.y) ^ 2 + (z - f.z) ^ 2 >= ACTIVATION.FALL ^ 2 then
+            d.fell = true
+            d.kick()
+            return false
+        else
+            d.waited = (d.waited or 0) + 1
+            if d.waited % ACTIVATION.KICK == 0 then d.kick() end
+            return false
+        end
+    end
+    return o.resting == true
+end
+
+-- `n` faces rolled digitally, in the order rolled (never sorted: the
+-- roll's order shows on the card and in chat).
+function ACTIVATION.digitalFaces(n)
+    local faces = {}
+    for i = 1, n do faces[i] = math.random(1, 6) end
+    return faces
+end
+
+-- The rolls the Mundane Controller is throwing for this card: [token] =
+-- the function its faces go to (see onDiceThrown); n counts the tokens.
+ACTIVATION.throws = { n = 0 }
+
+-- Asks the Mundane Controller on the table (CFG.controllerTag) to throw
+-- `n` dice of `kind` for this card -- or, `kind` a list, one of each
+-- ({ "d6", "firepower", ... }: an attack's mixed dice, see rollAttack) --
+-- in `color`'s name, for `label` (what is rolled): they fall in a line
+-- under its panel, and once they have settled it hands the faces -- in
+-- the order thrown -- to onDiceThrown, which passes them to done(faces,
+-- digital). Returns whether a Controller took the roll (a card with none
+-- throws its own). One that never answers (taken off the table
+-- meanwhile): after CFG.diceWait seconds the roll is made digitally.
+function ACTIVATION.viaController(n, color, done, kind, label)
+    local ok, objs = pcall(function() return getObjectsWithTag(CFG.controllerTag) end)
+    local okG, guid = pcall(function() return self.getGUID() end)
+    if not (ok and type(objs) == "table" and okG and guid) then return false end
+    local T = ACTIVATION.throws
+    local kinds = type(kind) == "table" and kind or nil
+    for _, obj in ipairs(objs) do
+        T.n = T.n + 1
+        local token = T.n
+        T[token] = done
+        local okC, took = ACTIVATION.ask(obj, "throwDice", { n = n, kind = kinds and kinds[1] or kind or "d6",
+            kinds = kinds, color = color, label = label, from = guid, token = token })
+        if okC and took == true then
+            Wait.time(function()
+                local fn = T[token]
+                if fn then T[token] = nil; fn(ACTIVATION.digitalFaces(n), true) end
+            end, CFG.diceWait)
+            return true
+        end
+        T[token] = nil
+    end
+    return false
+end
+
+-- The Mundane Controller's answer to ACTIVATION.viaController: t = {
+-- token, faces, digital }. Returns whether the roll was still waited for.
+function onDiceThrown(t)
+    local T = ACTIVATION.throws
+    local fn = type(t) == "table" and T[t.token]
+    if not fn then return false end
+    T[t.token] = nil
+    local faces = {}
+    for i, f in ipairs(t.faces or {}) do faces[i] = clamp(math.floor(tonumber(f) or 1), 1, 6) end
+    fn(faces, t.digital == true)
+    return true
+end
+
+-- Throws `n` dice of `kind` ("d6" unless given; "firepower" and "injury"
+-- are read from their faces 1-6, see ACTIVATION.FIREPOWER / INJURY_DICE;
+-- a list of kinds: one die of each, n being its length) and calls
+-- done(faces, digital) once they have settled. The Mundane
+-- Controller throws them when there is one on the table (see
+-- ACTIVATION.viaController; `label`: what they are for). Without one:
+-- real D6, in `color`'s colour, dropped from low with a spin on a clear
+-- spot beside the model (see diceSpot), so they neither travel far nor
+-- touch another model; they vanish after CFG.diceKeep seconds, their faces
+-- handed on in the order thrown. With no clear spot -- or if the dice never
+-- settle -- the faces are rolled digitally (done's second argument is
+-- then true).
+local function throwDice(n, color, done, kind, label)
+    if ACTIVATION.viaController(n, color, done, kind, label) then return end
+    local function digital() done(ACTIVATION.digitalFaces(n), true) end
+    local spot, floor = diceSpot(color)
+    if not (spot and spawnObject and Wait and Wait.condition) then return digital() end
+    local dice = {}                                -- { obj, from, kick } each (see ACTIVATION.fallen)
+    for i = 1, n do
+        local dx = (i - (n + 1) / 2) * 1.2          -- side by side
+        local d = { from = { x = spot.x + dx, y = floor + 1.5, z = spot.z } }
+        dice[i] = d
+        d.obj = spawnObject({
+            type = "Die_6", position = { d.from.x, d.from.y, d.from.z },
+            rotation = { math.random(0, 359), math.random(0, 359), math.random(0, 359) },
+            callback_function = function(o)
+                if color and stringColorToRGB then o.setColorTint(stringColorToRGB(color)) end
+                d.kick = ACTIVATION.tumble(o, CFG.diceSpin, CFG.dicePush)
+            end,
+        })
+    end
+    local function settled()
+        local all = true                           -- every die looked at: each is kicked as needed
+        for _, d in ipairs(dice) do
+            local ok, down = pcall(ACTIVATION.fallen, d)
+            if not (ok and down) then all = false end
+        end
+        return all
+    end
+    local function clear()
+        Wait.time(function()
+            for _, d in ipairs(dice) do
+                local o = d.obj
+                if o and not (o.isDestroyed and o.isDestroyed()) then o.destruct() end
+            end
+        end, CFG.diceKeep)
+    end
+    Wait.condition(function()
+        local faces = {}                           -- in the order thrown, never sorted
+        for i, d in ipairs(dice) do
+            local ok, v = pcall(function() return d.obj.getValue() end)
+            faces[i] = ok and tonumber(v) or math.random(1, 6)
+        end
+        clear()
+        done(faces, false)
+    end, settled, 10, function() clear() digital() end)
+end
+
+-- A stat check's dice colour (see ACTIVATION.showDice): green (a stat
+-- raised) when it passed, orange (a stat lowered) when not; nil for a roll
+-- with nothing to pass (M, A).
+function ACTIVATION.checkInk(test)
+    if test.target == nil then return nil end
+    return test.passed and COL.valueUp or COL.valueMod
+end
+
+-- A roll's line in chat: "<name> - <what>: 1 + 4 = 5" -- each die's
+-- reading (`each`) added up to `total` (only the total for one die),
+-- `unit` after it (" Hits"), `more` after that (the Ammo checks), and
+-- "(rolled digitally)" when no dice fell. A check is said in its dice'
+-- colour (`ink`: passed / failed, see ACTIVATION.checkInk), any other
+-- roll in the roller's (`color`).
+function ACTIVATION.say(what, each, total, o)
+    o = o or {}
+    local body = tostring(total) .. (o.unit or "")
+    if #each > 1 then body = table.concat(each, " + ") .. " = " .. body end
+    local msg = string.format("%s - %s: %s%s%s", fighter.name, what, body, o.more or "",
+        o.digital and " (rolled digitally)" or "")
+    if o.ink then chat(msg, rgbOf(o.ink)) else announce(msg, o.color) end
+end
+
+-- Sets up a test against one stat (see STAT_ROLLS): how many D6, the target
+-- (after conditions) and which way the roll has to go -- or, for a stat
+-- that is never tested (M, A), just a D6 -- then throws the dice (see
+-- throwDice), tells everyone the result, shows the dice over the stats
+-- (ACTIVATION.showDice) and passes it to the onStatRoll stub. Returns the
+-- test (its result comes later), or nil for a stat with no number. From
+-- other scripts: obj.call("rollStat", "Cl").
+function rollStat(key, player)
+    key, player = keyValue(key, player)
+    return ACTIVATION.rollTest(key, player)
+end
+
+-- rollStat's roll (see there) for the rules that test a stat themselves:
+-- `o.why` is said with the check ("Check: Wil (7, Fearsome)") and `o.done`
+-- is called with the test (passed or failed) -- and the roll as it shows
+-- over the stats, which whatever follows waits for (ACTIVATION.later) --
+-- once the result is said and shown. `o.mods` -- a list of numbers (the
+-- Wyrd powers' +1, +3, -2) -- is added to the number the check is taken
+-- against (it may go past the stat's limits, as that is what a modifier to
+-- a test is); the bar's title then shows the stat's own number and each
+-- modifier after it, "Manifesting: Willpower (7) - 2 + 1". `o.label`: the
+-- word the title and the chat line begin with, instead of "Check".
+-- `o.natural`: a natural 2 (both dice 1) always passes and a natural 12
+-- never does, whatever the number (`test.natural` says which it was) --
+-- and the bar's title then reads "Perils of the Warp!". `o.ink`: the
+-- colour the chat line is said in, instead of the check's green / orange.
+function ACTIVATION.rollTest(key, player, o)
+    o = o or {}
+    local roll   = key == "Inv" and STAT_ROLLS.Sv or STAT_ROLLS[key]   -- Inv: rolled as a save
+    local target = key == "Inv" and STAT.inv() or statNumber(key, key == "Sv" and TRAIT_RULES.saveContext() or nil)
+    if not target then return nil end
+    local own, suffix = target, ""
+    for _, m in ipairs(roll and o.mods or {}) do
+        target = target + m
+        suffix = suffix .. string.format(" %s %d", m < 0 and "-" or "+", math.abs(m))
+    end
+    local test = {
+        stat = key, dice = roll and roll.dice or 1, target = roll and target or nil,
+        under = roll and roll.under or nil,
+    }
+    test.text = roll and string.format("%s test: %dD6, %d or %s", key, roll.dice, target,
+        roll.under and "under" or "over") or string.format("%s roll: 1D6", key)
+    -- the bar's title: the stat's full name and the number to reach --
+    -- "Check: Cool (7)" rolled under, "Check: Ballistic Skill (4+)" over
+    local label = o.label or "Check"
+    local title = test.target and string.format("%s: %s (%d%s)%s", label, STAT.NAMES[key] or key, own,
+                                                test.under and "" or "+", suffix)
+                  or key .. " Roll"
+    local color = colorOf(player)
+    ACTIVATION.rolling(title)
+    throwDice(test.dice, color, function(faces, digital)
+        local total = 0
+        for _, f in ipairs(faces) do total = total + f end
+        test.faces, test.total, test.digital = faces, total, digital
+        if test.target then test.passed = statTestPasses(test, total) end
+        if o.natural and test.target and #faces == 2 then
+            test.natural = total == 2 and 2 or total == 12 and 12 or nil
+            if test.natural then test.passed = test.natural == 2 end
+        end
+        -- chat: "Check: Wil (7): 1 + 4 = 5" in the check's colour, "M Roll: 4"
+        ACTIVATION.say(test.target and string.format("%s: %s (%d%s%s)", label, key, test.target, test.under and "" or "+",
+                                                     o.why and ", " .. o.why or "")
+                       or key .. " Roll", faces, total,
+                       { ink = o.ink or ACTIVATION.checkInk(test), color = color, digital = digital })
+        ACTIVATION.showDice{ title = test.natural and "Perils of the Warp!" or title, kind = "d6", faces = faces,
+                             hl = ACTIVATION.checkInk(test), sum = not test.target and ("∑" .. total) or nil }
+        onStatRoll(player, test)
+        if o.done then o.done(test, ACTIVATION.roll) end
+    end, "d6", title)
+    return test
+end
+
+-- What a roll of `n` dice of `kind` is called, in the bar under the stats
+-- and for the Controller: "Roll D6" / "Roll 3D6", "Firepower Dice" / "2
+-- Firepower Dice", "Injury Dice" / "2 Injury Dice".
+function ACTIVATION.rollName(kind, n)
+    if kind == "firepower" or kind == "injury" then
+        local name = kind == "firepower" and "Firepower Dice" or "Injury Dice"
+        return n > 1 and string.format("%d %s", n, name) or name
+    end
+    return n > 1 and string.format("Roll %dD6", n) or "Roll D6"
+end
+
+-- A click on the Special tab's Roll Dice / Roll Firepower / Roll Injuries:
+-- one more die of `kind` for the roll being gathered (ACTIVATION.stacking)
+-- -- "Rolling Dice..." shows at once, the bar counting the dice -- which is
+-- thrown once no click has come for CFG.diceJoin seconds (at most
+-- MAX_DICE dice). A click on another kind throws the one gathered first.
+function ACTIVATION.stack(kind, player)
+    local s = ACTIVATION.stacking
+    if s and s.kind ~= kind then
+        ACTIVATION.stacking = nil
+        ACTIVATION.throwStack(s)
+        s = nil
+    end
+    if s then
+        s.n, s.player = math.min(ACTIVATION.MAX_DICE, s.n + 1), player
+    else
+        s = { kind = kind, n = 1, player = player, token = 0 }
+        ACTIVATION.stacking = s
+    end
+    s.token = s.token + 1
+    local t = s.token
+    ACTIVATION.rolling(ACTIVATION.rollName(kind, s.n))
+    Wait.time(function()
+        if ACTIVATION.stacking == s and s.token == t then
+            ACTIVATION.stacking = nil
+            ACTIVATION.throwStack(s)
+        end
+    end, CFG.diceJoin)
+end
+function ACTIVATION.throwStack(s)
+    if s.kind == "firepower" then rollFirepower(s.n, s.player)
+    elseif s.kind == "injury" then rollInjuries(s.n, s.player)
+    else rollDice(s.n, s.player) end
+end
+
+-- How many dice a roll function was asked for: `n` (1 unless given, at
+-- most MAX_DICE), and who by -- obj.call hands over one argument, so a
+-- table { value = n } or a Player (the old rollFirepower(player)) too.
+function ACTIVATION.count(n, player)
+    if type(n) == "table" then
+        if n.color and player == nil then return 1, n end
+        n = n.value or n.n
+    end
+    return math.max(1, math.min(ACTIVATION.MAX_DICE, math.floor(tonumber(n) or 1))), player
+end
+
+-- `n` D6 (1 unless given), thrown as a stat test's are (see throwDice),
+-- the result said in chat and shown over the stats: A's Special tab's
+-- Roll Dice (see ACTIVATION.stack). From other scripts:
+-- obj.call("rollDice", 2). The dice settle later, so this returns only
+-- whether it threw.
+function rollDice(n, player)
+    n, player = ACTIVATION.count(n, player)
+    local color = colorOf(player)
+    local title = ACTIVATION.rollName("d6", n)
+    ACTIVATION.rolling(title)
+    throwDice(n, color, function(faces, digital)
+        local total = 0
+        for _, f in ipairs(faces) do total = total + f end
+        ACTIVATION.say(string.format("Roll %dD6", n), faces, total, { color = color, digital = digital })
+        ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, sum = "∑" .. total }
+    end, "d6", title)
+    return true
+end
+
+-- `n` Firepower dice (A's Special tab's "Roll Firepower"), thrown as the
+-- other dice are (see throwDice) and read through ACTIVATION.FIREPOWER: their
+-- hits, and -- on any 1 -- an Ammo check. Said in chat ("Roll 3x Firepower:
+-- 1 + 2 + 3 = 6 Hits", each die's hits, then the Ammo checks), shown over the
+-- stats ("∑6"; OUT for one Ammo check, JAM for more, at the panel's left
+-- end), then the onFirepowerRolled stub hears of it. From other scripts:
+-- obj.call("rollFirepower", 2). Returns whether it threw.
+function rollFirepower(n, player)
+    n, player = ACTIVATION.count(n, player)
+    local color = colorOf(player)
+    local title = ACTIVATION.rollName("firepower", n)
+    ACTIVATION.rolling(title)
+    throwDice(n, color, function(faces, digital)
+        local hits, ammo, each, checks = 0, false, {}, 0
+        for i, f in ipairs(faces) do
+            local fp = ACTIVATION.FIREPOWER[f] or ACTIVATION.FIREPOWER[1]
+            hits, ammo = hits + fp.hits, ammo or fp.ammo == true
+            if fp.ammo then checks = checks + 1 end
+            each[i] = tostring(fp.hits)
+        end
+        ACTIVATION.say(string.format("Roll %dx Firepower", n), each, hits,
+            { unit = hits == 1 and " Hit" or " Hits", color = color, digital = digital,
+              more = checks > 0 and string.format(", %d Ammo check%s", checks, checks == 1 and "" or "s") or nil })
+        ACTIVATION.showDice{ title = title, kind = "firepower", faces = faces, sumInk = COL.diceFireInk,
+                             sum = "∑" .. hits, ammoState = ACTIVATION.ammoState(checks) }
+        onFirepowerRolled(player, { face = faces[1], faces = faces, hits = hits, ammo = ammo })
+    end, "firepower", title)
+    return true
+end
+
+-- `n` Injury dice (A's Special tab's "Roll Injuries"), thrown as the other
+-- dice are and read through ACTIVATION.INJURY_DICE: said in chat, the worst
+-- result alone ("Roll Injuries: OOA") and shown over
+-- the stats -- the worst result's icon at the panel's right end (Out of
+-- Action, then Serious Injury, then Injury), the best one's at its left end.
+-- Only when every die is Out of Action is the fighter taken Out of Action
+-- (see setOutOfAction); nothing else is applied. The faces keep the order
+-- they were thrown in, on the card and in chat. Then the onInjuriesRolled
+-- stub hears of them. From other scripts: obj.call("rollInjuries", 2).
+function rollInjuries(n, player)
+    n, player = ACTIVATION.count(n, player)
+    local color = colorOf(player)
+    local title = ACTIVATION.rollName("injury", n)
+    ACTIVATION.rolling(title)
+    throwDice(n, color, function(faces, digital)
+        local R, results, count = ACTIVATION.INJURY, {}, {}
+        for i, f in ipairs(faces) do
+            local k = ACTIVATION.INJURY_DICE[f] or "serious"
+            results[i], count[k] = k, (count[k] or 0) + 1
+        end
+        local worst, best                        -- Out of Action the worst, then Serious Injury
+        for _, k in ipairs({ "out", "serious", "injured" }) do worst = worst or (count[k] and k) end
+        for _, k in ipairs({ "injured", "serious", "out" }) do best = best or (count[k] and k) end
+        ACTIVATION.say("Roll Injuries", {}, R[worst].short,
+            { color = color, digital = digital })
+        ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = worst, best = best }
+        if count.out == #faces and not fighter.outOfAction then
+            setOutOfAction{ value = true, why = "every Injury dice Out of Action" }
+        end
+        onInjuriesRolled(player, results, faces)
+    end, "injury", title)
+    return true
+end
+
+-- An attack's line in chat, in its hit dice's colour (`ink`: green hit,
+-- orange missed): "<name> - <VERB> - <what>: <body>" -- "Kage - SHOOT -
+-- Autogun (RF1): ...". The only line an attack says.
+function ACTIVATION.sayAttack(verb, what, body, ink, digital)
+    chat(string.format("%s - %s - %s: %s%s", fighter.name, verb, what, body,
+        digital and " (rolled digitally)" or ""), rgbOf(ink))
+end
+
+-- What attack `a` (see attackWith) is called in chat: its action's name
+-- in capitals (see TRAIT_RULES.attackAction) -- FIGHT, SHOOT, BRACED SHOT,
+-- AIMED SHOT -- but FIGHTING BACK for a melee attack by a fighter that
+-- isn't activated. A free shot says why: "SHOOT (Gunfighter)", "SHOOT
+-- (Assault)".
+function ACTIVATION.attackVerb(a)
+    if a.melee and fighter.activation ~= "active" then return "FIGHTING BACK" end
+    local e = ACTIONS[indexOf(ACTIONS, a.action) or 0]
+    return (e and e.label or "Attack"):upper()
+        .. (a.free == "gunfighter" and " (Gunfighter)" or a.free == "assault" and " (Assault)" or "")
+end
+
+-- What attack `a` (see attackWith) costs the fighter: during an
+-- activation its action's actions (Fight 2, Shoot 1, Braced / Aimed Shot
+-- 2, none with Additional Attacks), as many as are left -- with none left
+-- it is free (special rules may allow it). Paid for already, it is free:
+-- a melee attack after the activation's Fight, a ranged one using up a
+-- Shoot taken from A's panel (see ACTIVATION.attackCost). One that pays
+-- is that action taken (dimmed in A's panel). Said nowhere: the attack's
+-- line is enough. Returns the actions spent.
+function ACTIVATION.spendAttack(a)
+    if not a.melee and a.cost == nil and fighter.activation == "active"
+       and (tonumber(fighter.shotsPaid) or 0) > 0 then
+        fighter.shotsPaid = fighter.shotsPaid > 1 and fighter.shotsPaid - 1 or nil
+        return 0
+    end
+    local cost = ACTIVATION.attackCost(a.weapon, a.profile)
+    if cost <= 0 then return 0 end
+    fighter.actionsLeft = math.max(0, fighter.actionsLeft - cost)
+    fighter.usedActions[a.action] = true
+    drawReady()
+    drawActions()
+    onActionsChanged(fighter.actionsLeft)
+    return cost
+end
+
+-- A weapon profile's attack (its ATK / RF button, see onProfileButton;
+-- t = { weapon =, profile = }): attackWith first (the onWeaponAttack
+-- stub; nothing happens when the profile can't attack), then the dice,
+-- thrown as every roll here (see throwDice) and kept in the order thrown:
+--   ranged: one hit die against BS bettered by the weapon's Hit (BS 4+ with
+--     +2: 2+; with -2: 6+) -- a natural 1 always misses, a natural 6 always
+--     hits; at RF, Rapid Fire (N)'s N Firepower dice after it (their hits
+--     count only when the hit die hits: "∑N" at the panel's right end, else
+--     "Miss"; at ATK "Hit" or "Miss" there); with Ammo (N+), a D6 last that
+--     must reach N -- one that doesn't counts as an Ammo check rolled. A
+--     ready Reliable ignores the first (shown light blue) and turns red
+--     (used); the rest put the profile OUT (one) or JAM it (two or more; a
+--     Limited / Single Shot one SPENT), said at the panel's left end.
+--   melee: as many hit dice as its attacks button says ("A + 1": the
+--     fighter's A + 1 ...), each against WS bettered by Hit (an Assist or
+--     Interference in it, see TRAIT_RULES.shownHit), "∑N" -- the hits --
+--     after them. During an activation the first melee weapon to attack
+--     is the one the fighter fights with (TRAIT_RULES.fought).
+-- Hit dice green where they hit, orange where they miss. The weapon's name
+-- ("Autogun (RF1)") shows in the bar under the stats; the result is said in
+-- chat ("Kage - SHOOT - Autogun (RF1): ...") and handed to the onAttackRolled
+-- stub. The attack is an action: see ACTIVATION.spendAttack -- on Combi, one
+-- for the whole weapon (TRAIT_RULES.fire); a melee one after the activation's
+-- Fight, or a ranged one after a Shoot taken from A's panel, spends nothing
+-- more. A ranged one is the activation's Shoot action: the ranged weapons
+-- turn red after it, but for what the fighter's skills still allow
+-- (TRAIT_RULES.shot). Returns the attack (its dice come later), or nil.
+--   A Marksman's shot measures to the selected enemy first: beyond the
+-- profile's Short Range and within its Long Range it is +1 to hit
+-- (TRAIT_RULES.measure), said "(3+, Marksman)".
+--   The enemy the player has selected (ACTIVATION.target) is the attack's
+-- target. A melee attack an activated fighter starts on a Fearsome one
+-- makes a Willpower check first, and its dice wait for it (see
+-- ACTIVATION.fearFirst); a ranged hit on the target Suppresses it, unless
+-- the weapon is Smoke or Melee (see ACTIVATION.hitTarget). A ranged attack
+-- on one lying low is asked about first, and nothing happens -- nil back
+-- -- until its player says Continue (see ACTIVATION.lyingLow).
+--   The weapon's traits change what the dice do (see
+-- ACTIVATION.attackDice): Template -- no hit die, every enemy selected is
+-- hit (at RF the one selected, as often as the Firepower dice say; with
+-- more selected it isn't fired, see ACTIVATION.templateRefuses); Shock
+-- (N+) -- a hit die reaching N makes its Wound roll an automatic 6;
+-- Blaze (N+) -- Wound roll dice reaching N make more hits, rolled after
+-- them (see ACTIVATION.woundRoll); Flash and Graviton Pulse -- no Wound
+-- roll; Cursed and Flash -- the enemy hit hears of it (see traitHit). A
+-- Blind fighter's melee dice hit on a natural 6 only (ACTIVATION.hitRead).
+function rollAttack(t, player)
+    if ACTIVATION.lyingLow(t, player) then return nil end
+    if ACTIVATION.templateRefuses(t, player) then return nil end
+    return ACTIVATION.strike(t, player)
+end
+
+-- Lie Low: a Suppressed fighter with the skill (`lieLow`, told by its card's
+-- engageInfo) can't be the target of a ranged attack. When the enemy `player`
+-- has selected is one, a ranged attack with profile t = { weapon =,
+-- profile = } doesn't go off: the panel over the stats (the Nerve Check's,
+-- see ACTIVATION.nerve: `test` = "question") says "Enemy has Lie Low" over
+-- Continue -- the attack is made all the same, where the players agree it may
+-- be -- and X, which calls it off; nothing is spent until then. Said in chat
+-- too, and the enemy is highlighted orange while the panel is open. A roll
+-- still on show makes way for the question. The rest of a Combi volley
+-- (TRAIT_RULES.held) was asked about with its first shot. Returns whether it
+-- asked.
+function ACTIVATION.lyingLow(t, player)
+    local i, pi = type(t) == "table" and tonumber(t.weapon), type(t) == "table" and tonumber(t.profile)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and pi and w.profiles[pi]
+    if not p or isMelee(p) or profileDown(p) or not TRAIT_RULES.usable(p, w) or TRAIT_RULES.held(w, p) then
+        return false
+    end
+    local aim = ACTIVATION.target(player, true)
+    if not (aim and aim.lieLow and aim.status == "suppressed") then return false end
+    chat(string.format("%s is lying low -- %s can't target them with a ranged attack", aim.name, fighter.name),
+        rgbOf(COL.valueMod))
+    if ACTIVATION.roll and not ACTIVATION.roll.rolling then ACTIVATION.hideDice() end
+    ACTIVATION.openCheck({ test = "question", title = "Enemy has Lie Low", obj = aim.obj, ink = rgbOf(COL.valueMod),
+        done = function(yes, _, who)
+            if yes then ACTIVATION.strike(t, who or player) end
+        end })
+    return true
+end
+
+-- A Template weapon at Rapid Fire (profile t = { weapon =, profile = })
+-- hits one enemy, as often as its Firepower dice say: with two or more
+-- selected it isn't fired -- they are done one at a time. An orange line
+-- says so; nothing is spent. Returns whether it refused.
+function ACTIVATION.templateRefuses(t, player)
+    local i, pi = type(t) == "table" and tonumber(t.weapon), type(t) == "table" and tonumber(t.profile)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and pi and w.profiles[pi]
+    if not p or not TRAIT_RULES.template(p) or profileDown(p) or not TRAIT_RULES.usable(p, w)
+       or PROFILE_MODES[profileMode(p)].key ~= "rapid_fire" or not TRAIT_RULES.rapidFire(p) then
+        return false
+    end
+    local n = #ACTIVATION.targets(player, true)
+    if n < 2 then return false end
+    chat(string.format("%s's %s (Rapid Fire, Template) hits one enemy -- %d are selected, select one at a time",
+        fighter.name, TRAIT_RULES.name(w), n), rgbOf(COL.valueMod))
+    return true
+end
+
+-- rollAttack's attack, made (see there).
+function ACTIVATION.strike(t, player)
+    local R = TRAIT_RULES
+    -- Marksman: the range is taken as the shot is made -- and shown on the
+    -- weapon only where pre-measuring is allowed
+    local slot = type(t) == "table" and tonumber(t.weapon) or nil
+    if slot and weaponAt(slot) then R.measure(slot, player, CFG.preMeasure) end
+    local attack = attackWith(t, player)
+    if slot and weaponAt(slot) and not CFG.preMeasure then R.measure(slot, nil) end
+    if not attack then return nil end
+    local verb = ACTIVATION.attackVerb(attack)       -- before the activation can change
+    ACTIVATION.spendAttack(attack)
+    local w, p = weaponAt(attack.weapon), attack.stats
+    R.fought(w, p)                                   -- a melee weapon: the one it fights with
+    -- the fighter the player has selected, of any gang but never this one
+    -- -- a Template weapon's every one -- and what the hits would wound
+    -- each with, taken now, as the weapon stands (see ACTIVATION.woundPlan);
+    -- Flash and Graviton Pulse make no Wound roll
+    local aim = ACTIVATION.target(player, true)
+    local template = not attack.melee and R.template(p)
+    local aims = template and ACTIVATION.targets(player, true) or { aim }
+    local plans = {}
+    for k, a in ipairs(aims) do plans[k] = not R.noWound(p) and ACTIVATION.woundPlan(w, p, a) or nil end
+    attack.target = (plans[1] and plans[1].target) or (R.noWound(p) and aims[1] and aims[1].name) or nil
+    -- a ranged shot at a Seriously Injured enemy: -1 to hit (a Template
+    -- throws no hit die)
+    if not attack.melee and not template and aim and aim.status == "seriously_injured" then
+        attack.hit, attack.prone = (attack.hit or 0) - 1, true
+    end
+    if template then
+        attack.targets = {}
+        for k, a in ipairs(aims) do attack.targets[k] = a.name end
+    end
+    -- an enemy's Cacophony Of Silence: a ranged hit is re-rolled (see
+    -- ACTIVATION.attackDice)
+    local cac = not attack.melee and ACTIVATION.cacophony() or nil
+    attack.cacophony = cac and { name = cac.name, power = cac.cacophony } or nil
+    if attack.combi then                             -- a Combi volley (see TRAIT_RULES.held)
+        R.fire(w, p, true)
+        for k = 1, #w.profiles do drawProfile(attack.weapon, k) end
+    end
+    R.shotFired(w, p, attack)                        -- a ranged weapon: the activation's shot
+    ACTIVATION.fearFirst(attack.melee and aim and aim.foe and aim or nil, player, function()
+        ACTIVATION.attackDice(attack, verb, { aims = aims, plans = plans }, player)
+    end)
+    return attack
+end
+
+-- The hardest a condition on the fighter makes its hit dice of `kind`
+-- ("melee", "ranged"): the natural roll they hit on, whatever modifies
+-- them (a condition's `hitOnly`: Blind, melee 6), and the condition's
+-- name -- nil for none.
+function ACTIVATION.hitOnly(kind)
+    local n, why
+    for _, c in ipairs(CONDITIONS) do
+        local v = type(c.hitOnly) == "table" and tonumber(c.hitOnly[kind]) or nil
+        if v and conditionCount(c.key) > 0 and v > (n or 0) then n, why = v, c.label end
+    end
+    return n, why
+end
+
+-- How attack `attack`'s hit dice are read (see attackWith): `need`, the
+-- number a die must reach -- BS (ranged) or WS (melee) bettered by the shown
+-- Hit (`mod`: BS 4+ with +2 is 2+; no BS / WS: 6s only) -- and `shown`, the
+-- same within 2-6. A natural 1 always misses, a 6 always hits (hits). With a
+-- condition that says so (ACTIVATION.hitOnly: Blind) they need that natural
+-- roll, nothing modifies them (`only`, `why` its name). Shock (N+) (`shock`,
+-- see TRAIT_RULES.shock): a die that hits and with the modifiers reaches N --
+-- the die's own roll with CFG.shockNatural, and for a die nothing modifies --
+-- Shocks (shocked).
+function ACTIVATION.hitRead(attack)
+    local only, why = ACTIVATION.hitOnly(attack.melee and "melee" or "ranged")
+    local mod = only and 0 or (attack.hit or 0)
+    local h = { mod = mod, only = only, why = why, shock = TRAIT_RULES.shock(attack.stats) }
+    h.need = only or ((statNumber(attack.stat or (attack.melee and "WS" or "BS")) or 7) - mod)
+    h.shown = clamp(h.need, 2, 6)
+    function h.hits(f) return f ~= 1 and (f == 6 or f >= h.need) end
+    function h.shocked(f)
+        if not (h.shock and h.hits(f)) then return false end
+        return f + ((CFG.shockNatural or only) and 0 or mod) >= h.shock
+    end
+    return h
+end
+
+-- The dice of attack `attack` (see rollAttack), `aimed` = { aims = the
+-- enemies it is aimed at (table entries: the one selected -- none -- or a
+-- Template's every one), plans = the Wound roll planned for each (see
+-- ACTIVATION.woundPlan; none: no Wound roll) }: run once the Fearsome
+-- check, if there is one, has been made. While an enemy has Cacophony Of
+-- Silence in effect (attack.cacophony, see ACTIVATION.strike), a ranged
+-- hit die that hits is thrown again once, once the first throw has shown
+-- -- said in purple -- and the second decides ("Hit 2 (3+, re-rolled
+-- 5)").
+--   The weapon's traits: a Template weapon throws no hit die -- every
+-- enemy aimed at is hit, once, or the one as often as its Firepower dice
+-- say -- only its Firepower dice and Ammo die, if any (none at all: on to
+-- the Wound roll at once). A hit die that Shocks (see ACTIVATION.hitRead)
+-- has CFG.shockMark over it and makes the Wound roll die of its hit an
+-- automatic 6 -- at RF every hit's, or (CFG.rapidOneHit) the first's.
+-- The enemies hit hear what Cursed and Flash do to them (see
+-- ACTIVATION.traitHits); Flash and Graviton Pulse roll no Wound roll. An
+-- Unstable weapon's hit die showing a 1 explodes: "Explosion" at the
+-- panel's right end, the hit die alone shown, and the attack ends there --
+-- no hits, no Ammo checks, no Wound roll. A shot at a Seriously Injured
+-- enemy (attack.prone, see ACTIVATION.strike) is titled "Autogun (-1 to
+-- Hit)".
+function ACTIVATION.attackDice(attack, verb, aimed, player)
+    local R, w, p = TRAIT_RULES, weaponAt(attack.weapon), attack.stats
+    local UP, MOD = COL.valueUp, COL.valueMod
+    local aims, plans = aimed.aims or {}, aimed.plans or {}
+    local h = ACTIVATION.hitRead(attack)
+    local shown, hits = h.shown, h.hits
+    local template = not attack.melee and R.template(p)
+    local kinds, rf, ammoNeed = {}, nil, nil
+    if attack.melee then
+        for k = 1, clamp(math.floor(tonumber(attack.attacks) or 1), 1, ACTIVATION.MAX_SHOWN) do kinds[k] = "d6" end
+    else
+        if not template then kinds[1] = "d6" end     -- the hit die (a Template's hits need none)
+        rf = attack.mode == "rapid_fire" and R.rapidFire(p) or nil
+        for _ = 1, rf or 0 do kinds[#kinds + 1] = "firepower" end
+        ammoNeed = R.ammoNeed(p)
+        if ammoNeed then kinds[#kinds + 1] = "d6" end
+    end
+    local fp0 = template and 0 or 1                  -- the Firepower dice: after the hit die
+    local name = R.name(w)
+    local tags = {}
+    if rf then tags[#tags + 1] = "RF" .. rf end
+    if template then tags[#tags + 1] = "Template" end
+    if attack.prone then tags[#tags + 1] = "-1 to Hit" end
+    local title = attack.melee and string.format("%s (x%d)", name, #kinds)
+                  or name .. (#tags > 0 and " (" .. table.concat(tags, ", ") .. ")" or "")
+    local color = colorOf(player)
+    local function landed(faces, digital)
+        local hls, syms = {}, {}
+        local roll = { title = title, kinds = kinds, faces = faces, hls = hls }
+        local res = { attack = attack, faces = faces, need = shown, digital = digital }
+        local dice, struck = {}, {}                  -- the Wound roll's dice, one per hit; the enemies hit
+        if attack.melee then
+            -- "Chainsword (x3): 4, 1, 6 (3+) = 2 Hits" ("(3+, Assist)", "(5+, Interference)",
+            -- "(6+, Blind)", "= 2 Hits, 1 Shock")
+            local n, read, sh = 0, {}, 0
+            for i, f in ipairs(faces) do
+                local ok, s = hits(f), h.shocked(f)
+                hls[i], read[i], n = ok and UP or MOD, tostring(f), n + (ok and 1 or 0)
+                if s then syms[i], sh = ACTIVATION.signs(true), sh + 1 end
+                if ok then dice[#dice + 1] = { plan = 1, auto = s or nil } end
+            end
+            res.hits, roll.sum = n, "∑" .. n
+            res.shock = sh > 0 and sh or nil
+            if n > 0 and aims[1] then struck[1] = aims[1] end
+            local why = h.why and ", " .. h.why
+                        or attack.support == "assist" and ", Assist" or attack.support and ", Interference" or ""
+            if attack.rerolls then why = why .. string.format(", %d re-rolled", attack.rerolls) end
+            ACTIVATION.sayAttack(verb, title, string.format("%s (%d+%s) = %d Hit%s%s", table.concat(read, ", "), shown,
+                why, n, n == 1 and "" or "s", sh > 0 and string.format(", %d Shock", sh) or ""),
+                n > 0 and UP or MOD, digital)
+        else
+            -- "Autogun (RF2): Hit 5 (3+), 1 + 2 = ∑3 Hits, 1x AM, Ammo 2 (4+), Reliable, OUT"
+            -- ("Hit 5 (3+, Marksman)", "Hit 6 (3+), Shock"); a Template's: "Bob and Ann hit, ..."
+            -- / "2 + 1 = ∑3 Hits on Bob, ..."
+            local parts, hit, sh = {}, true, false
+            if not template and (faces[1] or 1) == 1 and hasTrait(p, TRAIT.unstable) then
+                -- Unstable: a 1 on the hit die -- the weapon explodes, the attack ends
+                ACTIVATION.sayAttack(verb, title, string.format("Miss 1 (%d+), Unstable: Explosion", shown), MOD, digital)
+                ACTIVATION.showDice{ title = title, kind = "d6", faces = { 1 }, hl = MOD,
+                                     sum = "Explosion", sumInk = COL.diceOut }
+                res.hit, res.hits, res.explosion = false, 0, true
+                res.target, res.targets = attack.target, attack.targets
+                onAttackRolled(player, res)
+                return
+            end
+            if not template then
+                local f1 = faces[1] or 1
+                hit, sh = hits(f1), h.shocked(f1)
+                hls[1] = hit and UP or MOD
+                if sh then syms[1] = ACTIVATION.signs(true) end
+                parts[1] = string.format("%s %d (%d+%s%s%s%s%s)%s", hit and "Hit" or "Miss", f1, shown,
+                    attack.stat == "WS" and ", WS" or "", attack.marksman and ", Marksman" or "", attack.prone and ", Seriously Injured -1" or "",
+                    h.why and ", " .. h.why or "",
+                    attack.rerolled and string.format(", re-rolled %d", attack.rerolled) or "", sh and ", Shock" or "")
+            elseif not rf then
+                parts[1] = #aims > 0 and ACTIVATION.nameList(aims) .. " hit" or "no enemy selected"
+            end
+            local checks, fpHits, each = {}, 0, {}   -- checks: the dice that rolled an Ammo check
+            for i = fp0 + 1, fp0 + (rf or 0) do
+                local fp = ACTIVATION.FIREPOWER[faces[i] or 1] or ACTIVATION.FIREPOWER[1]
+                fpHits, each[#each + 1] = fpHits + fp.hits, tostring(fp.hits)
+                if fp.ammo then checks[#checks + 1] = i end
+            end
+            if rf then
+                -- the Firepower dice's hits: "1 + 2 = ∑3 Hits" ("∑2 Hits" for one die)
+                parts[#parts + 1] = (#each > 1 and table.concat(each, " + ") .. " = " or "") .. "∑" .. fpHits
+                    .. (hit and (fpHits == 1 and " Hit" or " Hits") or " (missed)")
+                    .. (template and (aims[1] and " on " .. aims[1].name or ", no enemy selected") or "")
+                -- how many of them showed the Ammo symbol: "2x AM"
+                if #checks > 0 then parts[#parts + 1] = #checks .. "x AM" end
+                -- at the panel's right end: "∑3" -- or "Miss" when the hit die missed
+                roll.sum, roll.sumInk = hit and "∑" .. fpHits or "Miss", hit and COL.diceFireInk or MOD
+            elseif template then
+                -- every enemy hit, once: "∑2" at the right end (nothing with none)
+                if #aims > 0 then roll.sum, roll.sumInk = "∑" .. #aims, UP end
+            else
+                -- a single shot: "Hit" or "Miss" at the panel's right end
+                roll.sum, roll.sumInk = hit and "Hit" or "Miss", hit and UP or MOD
+            end
+            if ammoNeed then                         -- the Ammo trait's die, last
+                local ai = #kinds
+                roll.ammoDie = ai                    -- shown with a cartridge behind its pips
+                local f = faces[ai] or 1
+                hls[ai] = f >= ammoNeed and UP or MOD
+                parts[#parts + 1] = string.format("Ammo %d (%d+)", f, ammoNeed)
+                if f < ammoNeed then checks[#checks + 1] = ai end
+            end
+            local spare
+            if #checks > 0 and R.reliableReady(p) then   -- Reliable ignores the first
+                spare, p.reliableUsed = table.remove(checks, 1), true
+                if kinds[spare] == "firepower" then roll.spare = spare else hls[spare] = COL.ammoSpared end
+                parts[#parts + 1] = "Reliable"
+            end
+            local state = ACTIVATION.ammoState(#checks, R.limited(p))
+            if state then parts[#parts + 1] = state:upper() end
+            roll.ammoState = state                   -- OUT / JAM / SPENT at the panel's left end
+            -- the hits, each a Wound roll die: a Template's on every enemy
+            -- (at RF the one, as often as the Firepower dice say); a Shock
+            -- hit die makes every hit's an automatic 6 -- or only the first's
+            if template then
+                if rf then
+                    for _ = 1, aims[1] and fpHits or 0 do dice[#dice + 1] = { plan = 1 } end
+                else
+                    for k = 1, #aims do dice[#dice + 1] = { plan = k } end
+                end
+                for k, a in ipairs(aims) do struck[k] = a end
+                hit = #aims > 0
+            elseif hit then
+                for k = 1, rf and fpHits or 1 do
+                    local auto = sh and (k == 1 or not CFG.rapidOneHit)
+                    dice[#dice + 1] = { plan = 1, auto = auto or nil }
+                end
+                if aims[1] then struck[1] = aims[1] end
+            end
+            if hit and R.noWound(p) then
+                parts[#parts + 1] = R.flash(p) and "Flash: no Wound roll" or "Graviton Pulse: no Wound roll"
+            end
+            res.hit, res.hits = hit, #dice
+            res.shock = sh or nil
+            res.ammo, res.spared, res.state = #checks, spare ~= nil, state
+            ACTIVATION.sayAttack(verb, title, table.concat(parts, ", "), hit and UP or MOD, digital)
+            if state then setProfileState({ weapon = attack.weapon, profile = attack.profile, ammo = state })
+            elseif spare then drawProfile(attack.weapon, attack.profile) end
+        end
+        roll.syms = next(syms) and syms or nil       -- Shock over the hit dice that had it
+        if #faces > 0 then ACTIVATION.showDice(roll) else roll = nil end
+        res.target, res.targets = attack.target, attack.targets
+        onAttackRolled(player, res)
+        -- a ranged hit on a selected enemy: it is Suppressed (Nerves Of Steel
+        -- may save it), unless the weapon is Smoke; Cursed and Flash have
+        -- their say
+        if not attack.melee and not hasTrait(p, TRAIT.smoke) then
+            for _, a in ipairs(struck) do ACTIVATION.hitTarget(a, attack) end
+        end
+        ACTIVATION.traitHits(struck, attack, player)
+        -- hits on a selected enemy: the Wound roll follows, once the hit
+        -- roll has shown its full CFG.diceShow seconds
+        local wound = {}
+        for _, d in ipairs(dice) do
+            local plan = plans[d.plan]
+            if plan then
+                wound[#wound + 1] = d
+                plan.hits = (plan.hits or 0) + 1
+            end
+        end
+        if #wound > 0 then
+            ACTIVATION.woundAfter(roll, { plans = plans, dice = wound, blaze = R.blaze(p, w), weapon = name }, player)
+        end
+    end
+    if #kinds == 0 then return landed({}, false) end   -- a Template with nothing to throw
+    ACTIVATION.rolling(title)
+    local function thrown(faces, digital)
+        local cac = attack.cacophony
+        if not (cac and not attack.melee and not template and hits(faces[1] or 1)) then return landed(faces, digital) end
+        -- Cacophony Of Silence: the hit is thrown again, once
+        local first = faces[1]
+        ACTIVATION.purple(string.format("%s - %s: Hit %d (%d+) -- re-rolled for %s's %s", fighter.name, title, first, shown,
+            cac.name, cac.power))
+        local held = { title = title, kinds = kinds, faces = faces, hls = { COL.wyrdInk } }
+        ACTIVATION.showDice(held)
+        ACTIVATION.later(held, function()
+            ACTIVATION.rolling(title)
+            throwDice(1, color, function(again, digital2)
+                local all = {}
+                for i, f in ipairs(faces) do all[i] = f end
+                all[1] = again[1] or 1
+                attack.rerolled = first
+                landed(all, digital or digital2)
+            end, "d6", title)
+        end)
+    end
+    throwDice(#kinds, color, function(faces, digital)
+        ACTIVATION.rerollHits(attack, { title = title, kinds = kinds, verb = verb, shown = shown, hits = hits,
+            color = color, template = template }, faces, digital, thrown)
+    end, kinds, title)
+end
+
+-- The weapon's re-rolls to hit (attack.reroll, set by hand: see
+-- TRAIT_RULES.setReroll) on the hit dice just thrown, `faces` -- a melee
+-- attack's every die, a ranged one's hit die (a Template has none): "ones"
+-- those showing a 1, "all" those that miss. With any, they are shown in
+-- orange and said ("Kal - SHOOT - Autogun: 1 (3+) -- re-rolled, RR 1s to
+-- hit"), then, once that has shown, thrown again, once; the new faces take
+-- their places and `go(faces, digital)` reads the attack -- at once when
+-- there is nothing to re-roll. o = { title, kinds, verb, shown, hits (a
+-- face -> hits), color, template }.
+function ACTIVATION.rerollHits(attack, o, faces, digital, go)
+    local how, idx = attack.reroll, {}
+    if how and not o.template then
+        for i = 1, attack.melee and #faces or math.min(1, #faces) do
+            local f = faces[i]
+            if (how == "ones" and f == 1) or (how == "all" and not o.hits(f)) then idx[#idx + 1] = i end
+        end
+    end
+    if #idx == 0 then return go(faces, digital) end
+    local read, hls = {}, {}
+    for _, i in ipairs(idx) do read[#read + 1], hls[i] = tostring(faces[i]), COL.valueMod end
+    ACTIVATION.sayAttack(o.verb, o.title, string.format("%s (%d+) -- %s, %s", table.concat(read, ", "), o.shown,
+        #idx == 1 and "re-rolled" or #idx .. " re-rolled", TRAIT_RULES.REROLL[how]), COL.valueMod, digital)
+    local held = { title = o.title, kinds = o.kinds, faces = faces, hls = hls }
+    ACTIVATION.showDice(held)
+    ACTIVATION.later(held, function()
+        ACTIVATION.rolling(o.title)
+        throwDice(#idx, o.color, function(again, digital2)
+            local all = {}
+            for i, f in ipairs(faces) do all[i] = f end
+            for k, i in ipairs(idx) do
+                if k == 1 and not attack.melee then attack.rerolled = all[i] end
+                all[i] = again[k] or 1
+            end
+            attack.rerolls = #idx
+            go(all, digital or digital2)
+        end, "d6", o.title)
+    end)
+end
+
+-- Cursed and Flash: the enemies an attack hit (`struck`, table entries)
+-- each hear of it from their own card (traitHit) -- Cursed, a Willpower
+-- check against Insanity, once for the attack however many hits it made;
+-- Flash, Blind and the Ready marker lost. A card too old to know traitHit
+-- is only made Blind.
+function ACTIVATION.traitHits(struck, attack, player)
+    local p = attack.stats
+    local cursed, flashed = TRAIT_RULES.cursed(p), TRAIT_RULES.flash(p)
+    if not (cursed or flashed) then return end
+    for _, a in ipairs(struck) do
+        local ok = ACTIVATION.ask(a.obj, "traitHit", { by = fighter.name, weapon = attack.name, color = colorOf(player),
+            cursed = cursed or nil, flash = flashed or nil })
+        if not ok and flashed then ACTIVATION.ask(a.obj, "setCondition", { key = "blind", value = true }) end
+    end
+end
+
+-- Fearsome: `aim` (a table entry, see ACTIVATION.target) is the enemy a
+-- melee attack of this fighter is aimed at -- the one the player has
+-- selected. When that fighter is Fearsome (`fearsome`, from its skills),
+-- this one starts the fight in its own activation -- fighting back doesn't
+-- count --, isn't Fearsome itself and isn't Feared already, it makes a
+-- Willpower check first, a normal stat check said "Check: Wil (7,
+-- Fearsome)". Failing it makes the fighter Feared -- WS 6+ (the
+-- condition's `set`) until its activation is over, so before its dice are
+-- thrown. `go` (the attack's dice) runs when that is settled, CFG.diceShow
+-- seconds after the check showed; at once when there is nothing to test.
+-- The check is made once for each Fearsome enemy, for as long as the
+-- activation lasts (ACTIVATION.fear, see ACTIVATION.endFear): further
+-- attacks on it need none, and one made while the check is out waits for
+-- it -- but an attack on another Fearsome enemy makes a check of its own.
+ACTIVATION.fear = {}
+function ACTIVATION.fearFirst(aim, player, go)
+    if not (aim and aim.fearsome) or fighter.activation ~= "active" or fighter.outOfAction
+       or #SKILL.with("fearsome") > 0 or conditionCount("feared") > 0 or not statNumber("Wil") then
+        return go()
+    end
+    local ok, id = pcall(function() return aim.obj.getGUID() end)
+    id = ok and id or aim.name
+    local st = ACTIVATION.fear[id]
+    if st then
+        if st.done then return go() end
+        st.queue[#st.queue + 1] = go
+        return
+    end
+    st = { queue = { go } }
+    ACTIVATION.fear[id] = st
+    local function finish()
+        st.done = true
+        local queue = st.queue
+        st.queue = {}
+        for _, f in ipairs(queue) do f() end
+    end
+    ACTIVATION.rollTest("Wil", player, { why = "Fearsome", done = function(test, roll)
+        if test.passed then
+            chat(string.format("%s stands up to %s", fighter.name, aim.name), rgbOf(COL.valueUp))
+        else
+            setCondition("feared", true)
+            chat(string.format("%s is Feared by %s -- WS %d+ until the end of their activation", fighter.name, aim.name,
+                statNumber("WS") or 6), rgbOf(COL.valueMod))
+        end
+        ACTIVATION.later(roll, finish)
+    end })
+end
+
+-- The activation is over (or the round starts): a Fearsome check may be
+-- made again, and Feared, if the fighter is, is gone.
+function ACTIVATION.endFear()
+    ACTIVATION.fear = {}
+    if conditionCount("feared") > 0 then setCondition("feared", false) end
+end
+
+-- A ranged attack of this fighter has hit `aim` (a table entry, or nil
+-- when no enemy is selected): its own card decides what that does -- see
+-- rangedHit. A card too old to have it is simply Suppressed -- if it is
+-- Active, the only status that can be.
+function ACTIVATION.hitTarget(aim, attack)
+    if not aim then return end
+    local ok = ACTIVATION.ask(aim.obj, "rangedHit", { by = fighter.name, weapon = attack.name })
+    if not ok and aim.status == "active" then
+        ACTIVATION.ask(aim.obj, "setStatus", "suppressed")
+    end
+end
+
+-- What an attack with profile p of weapon w would wound `target` with (a
+-- table entry, see ACTIVATION.target) -- { weapon = its name, target = the
+-- target's name, t = its Toughness, s = the Strength (TRAIT_RULES.strength)
+-- or toxin = Toxin (N+)'s N } -- or nil when no Wound roll can be made: no
+-- target, no Strength ("-") and no Toxin (N+), or no Toughness to roll
+-- against. A target with Iron Jaw (`ironJaw`, see ACTIVATION.jaw) counts
+-- that much tougher (`t` is then the raised number, `jaw` what was added)
+-- against a melee attack -- or a Light weapon's from an Engaged fighter --
+-- that has no AP; Toxin doesn't look at Toughness.
+--   What the target's saves then need (see takeSaves): `guid` (its
+-- object's), `by` (this fighter's name), `from` (this model's GUID), `ap`
+-- (how much the AP as shown worsens a save: "-2" 2, "-" 0) and `cover`
+-- (what cover would add, see ACTIVATION.coverFor), and what each wound
+-- does (TRAIT_RULES.hurts: l, dmg, rend, shred, conc, gas, web, rad).
+-- `noBlaze`: the item that makes the target immune to Blaze (a Hazard
+-- Suit).
+function ACTIVATION.woundPlan(w, p, target)
+    if not (target and w and p) then return nil end
+    local plan = { weapon = TRAIT_RULES.name(w), target = target.name, t = target.t,
+                   toxin = TRAIT_RULES.toxin(p) }
+    local okG, guid = pcall(function() return target.obj.getGUID() end)
+    local okS, mine = pcall(function() return self.getGUID() end)
+    plan.guid, plan.from, plan.by = okG and guid or nil, okS and mine or nil, fighter.name
+    plan.ap, plan.cover = TRAIT_RULES.apOf(w, p), ACTIVATION.coverFor(w, p, target)
+    for k, v in pairs(TRAIT_RULES.hurts(w, p)) do plan[k] = v end
+    plan.noBlaze = target.immune and target.immune[TRAIT.blaze] or nil
+    if not plan.toxin then
+        plan.s = TRAIT_RULES.strength(w, p)
+        if not (plan.s and plan.t) then return nil end
+        local jaw = tonumber(target.ironJaw) or 0
+        if jaw > 0 and TRAIT_RULES.noAp(w, p)
+           and (isMelee(p) or (fighter.status == "engaged" and hasTrait(p, TRAIT.light))) then
+            plan.t, plan.jaw = plan.t + jaw, jaw
+        end
+    end
+    return plan
+end
+
+-- What Iron Jaw adds to this fighter's Toughness against a blow with no AP:
+-- the biggest `ironJaw` of its skills that work (2), or nil without one.
+function ACTIVATION.jaw()
+    local n = 0
+    for _, it in ipairs(SKILL.with("ironJaw")) do n = math.max(n, tonumber(it.ironJaw) or 0) end
+    return n > 0 and n or nil
+end
+
+-- A roll that follows another (`roll`, as shown): `go` throws it
+-- CFG.dicePause seconds after that one showed -- whatever the cursor does
+-- -- or, when another roll has taken the panel meanwhile, once that one
+-- has had its own time (see ACTIVATION.showDice). With no roll to wait
+-- for, at once.
+function ACTIVATION.later(roll, go)
+    if not roll then return go() end
+    Wait.time(function()
+        local function free()
+            local r = ACTIVATION.roll
+            return r == nil or r == roll or not (r.held or r.rolling)
+        end
+        if free() or not Wait.condition then return go() end
+        Wait.condition(go, free, CFG.diceWait, go)
+    end, CFG.dicePause or CFG.diceShow)
+end
+
+-- The Wound roll after an attack's hit roll (`roll`, as shown; nil: at
+-- once): seq as ACTIVATION.woundRoll takes it.
+function ACTIVATION.woundAfter(roll, seq, player)
+    ACTIVATION.later(roll, function() ACTIVATION.woundRoll(seq, player) end)
+end
+
+-- What a Wound roll needs on a D6: Strength `s` against Toughness `t` --
+-- twice T or more 2+, more than T 3+, equal 4+, half T or less 6+, else
+-- (less than T) 5+.
+function ACTIVATION.woundNeed(s, t)
+    if s >= 2 * t then return 2 end
+    if s > t then return 3 end
+    if s == t then return 4 end
+    if 2 * s <= t then return 6 end
+    return 5
+end
+
+-- What a die of the Wound roll planned as `plan` (see ACTIVATION.woundPlan)
+-- needs, 2-6: Toxin (N+)'s N, else S against T (ACTIVATION.woundNeed).
+function ACTIVATION.planNeed(plan)
+    local toxin = tonumber(plan.toxin)
+    return clamp(toxin or ACTIVATION.woundNeed(tonumber(plan.s), tonumber(plan.t)), 2, 6)
+end
+
+-- A Wound roll's title in the bar under the stats, for the plans its dice
+-- go by (a list; a Template's several): "Wound Roll vs T4", "Wound Roll vs
+-- T5 (Iron Jaw)", "Wound Roll vs Toxin (3+)" -- several enemies: each one's
+-- T, "Wound Roll vs T3, T4" -- and " (Blaze)" after it in a Blaze round.
+function ACTIVATION.woundTitle(list, blazed)
+    local t, tox, seen = {}, nil, {}
+    for _, plan in ipairs(list) do
+        tox = tox or tonumber(plan.toxin)
+        local v = tonumber(plan.t)
+        if v and not seen[v] then seen[v], t[#t + 1] = true, "T" .. v end
+    end
+    local jaw = #list == 1 and not tox and tonumber(list[1].jaw)
+    local title = tox and string.format("Wound Roll vs Toxin (%d+)", tox)
+                  or "Wound Roll vs " .. table.concat(t, ", ") .. (jaw and " (Iron Jaw)" or "")
+    return title .. (blazed and " (Blaze)" or "")
+end
+
+-- A Wound roll, thrown and read (see rollWounds; rollAttack makes one
+-- after a hit roll on a selected enemy): seq = {
+--   plans  the Wound roll planned for each enemy hit (see
+--          ACTIVATION.woundPlan: s, t, jaw, toxin, weapon, target -- a
+--          Template's several, else one),
+--   dice   one per hit: { plan = which, auto = Shock made it an automatic
+--          6 (not thrown), blazed = a Blaze hit's },
+--   blaze  Blaze (N+)'s N: each die of N or more -- an automatic 6 too --
+--          makes one more hit (CFG.blazeMark over it), which hits by
+--          itself and is rolled to wound once this has shown
+--          (ACTIVATION.blazeRound); none in a Blaze round,
+--   total  the wounds of the round before (a Blaze round's), `per` by plan,
+--   hurt   by plan, one entry per wound so far -- { rend, shred }: whether
+--          Rending / Shred raised its AP / L (a natural N+, an N+ -- Shock's
+--          automatic 6 is a 6 for both) -- and `conc`,
+--          by plan, the dice of Concussive's N+ (filled in here),
+--   weapon its name }.
+-- Each die wounds on what its plan needs (ACTIVATION.planNeed; a natural
+-- 1 never, a 6 always). The dice show over the stats in the order thrown,
+-- green where they wound, orange where not, Shock / Blaze signs over the
+-- ones they touched, "∑N" -- every round's wounds so far -- at the right
+-- end; chat gets them lowest first: "Kage - WOUND - Autogun vs Bob (S3
+-- vs T3): 1, 4, 6 (4+) = 2 Wounds" (", 1 by Shock", ", Blaze (5+): 1 more
+-- Hit"; a Template's several enemies each die by name, in the order
+-- thrown: "Flamer vs Bob and Ann (S4): Bob 5 (3+), Ann 2 (4+) = 1
+-- Wound"; a Blaze round "WOUND (Blaze)", "... -- 3 Wounds in all"; ", 1
+-- Rending", ", 1 Shred", ", 2 Concussive"). Then the onWoundsRolled stub
+-- hears of it -- and once no Blaze round follows, the enemies save
+-- (ACTIVATION.toSaves).
+function ACTIVATION.woundRoll(seq, player)
+    seq.hurt, seq.conc = seq.hurt or {}, seq.conc or {}
+    local plans, dice = seq.plans or {}, {}
+    for i, d in ipairs(seq.dice or {}) do
+        if i <= ACTIVATION.MAX_SHOWN and plans[d.plan] then dice[#dice + 1] = d end
+    end
+    if #dice == 0 then return nil end
+    local UP, MOD = COL.valueUp, COL.valueMod
+    -- the plans its dice go by, in order, and their enemies' names
+    local list, seen, aims = {}, {}, {}
+    for _, d in ipairs(dice) do
+        if not seen[d.plan] then
+            seen[d.plan], list[#list + 1] = true, plans[d.plan]
+            aims[#aims + 1] = { name = tostring(plans[d.plan].target or "?") }
+        end
+    end
+    -- every enemy of the attack (a Template's several), for the wounds in all
+    local keys = {}
+    for k in pairs(plans) do keys[#keys + 1] = k end
+    table.sort(keys)
+    local title = ACTIVATION.woundTitle(list, seq.blazed)
+    local kinds, thrown = {}, 0
+    for i, d in ipairs(dice) do
+        kinds[i] = "d6"
+        if not d.auto then thrown = thrown + 1 end
+    end
+    local function landed(got, digital)
+        local faces, hls, syms, n, gen, per, j, sh = {}, {}, {}, 0, {}, {}, 0, 0
+        local stopped                            -- a Blaze an immune enemy didn't suffer
+        local rd, sd, cc = 0, 0, 0               -- Rending, Shred, Concussive at work
+        for k, v in pairs(seq.per or {}) do per[k] = v end
+        for i, d in ipairs(dice) do
+            local f
+            if d.auto then f = 6 else j = j + 1; f = got[j] or 1 end
+            local ok = d.auto or (f ~= 1 and (f == 6 or f >= ACTIVATION.planNeed(plans[d.plan])))
+            local q = plans[d.plan]
+            if q.conc and f >= q.conc then                       -- Concussive: N+, wound or not
+                seq.conc[d.plan], cc = (seq.conc[d.plan] or 0) + 1, cc + 1
+            end
+            if ok then
+                local h = { rend = q.rend ~= nil and f >= q.rend or nil,
+                            shred = q.shred ~= nil and f >= q.shred or nil }
+                seq.hurt[d.plan] = seq.hurt[d.plan] or {}
+                table.insert(seq.hurt[d.plan], h)
+                if h.rend then rd = rd + 1 end
+                if h.shred then sd = sd + 1 end
+            end
+            local more = seq.blaze and not seq.blazed and f >= seq.blaze
+            if more and plans[d.plan].noBlaze then more, stopped = false, plans[d.plan] end   -- a Hazard Suit
+            faces[i], hls[i] = f, ok and UP or MOD
+            if ok then n, per[d.plan] = n + 1, (per[d.plan] or 0) + 1 end
+            if d.auto then sh = sh + 1 end
+            if more then gen[#gen + 1] = d.plan end
+            syms[i] = ACTIVATION.signs(d.auto, d.blazed or more)
+        end
+        local total = (seq.total or 0) + n
+        local plan = list[1]
+        local s, t, toxin = tonumber(plan.s), tonumber(plan.t), tonumber(plan.toxin)
+        local jaw = not toxin and tonumber(plan.jaw) or nil          -- Iron Jaw: t already counts it
+        local function wounds(k) return string.format("%d Wound%s", k, k == 1 and "" or "s") end
+        local what, body
+        if #list == 1 then
+            local sorted = {}
+            for i, f in ipairs(faces) do sorted[i] = f end
+            table.sort(sorted)
+            local read = {}
+            for i, f in ipairs(sorted) do read[i] = tostring(f) end
+            what = tostring(plan.weapon or seq.weapon or "Weapon") .. (plan.target and " vs " .. tostring(plan.target) or "")
+                .. (toxin and string.format(" (Toxin %d+)", toxin)
+                    or jaw and string.format(" (S%d vs T%d+%d Iron Jaw)", s, t - jaw, jaw)
+                    or string.format(" (S%d vs T%d)", s, t))
+            body = string.format("%s (%d+) = %s", table.concat(read, ", "), ACTIVATION.planNeed(plan), wounds(n))
+        else
+            local read = {}
+            for i, f in ipairs(faces) do
+                local q = plans[dice[i].plan]
+                read[i] = string.format("%s %d (%d+)", tostring(q.target or "?"), f, ACTIVATION.planNeed(q))
+            end
+            what = tostring(plan.weapon or seq.weapon or "Weapon") .. " vs " .. ACTIVATION.nameList(aims)
+                .. (toxin and string.format(" (Toxin %d+)", toxin) or string.format(" (S%d)", s or 0))
+            body = table.concat(read, ", ") .. " = " .. wounds(n)
+        end
+        if sh > 0 then body = body .. string.format(", %d by Shock", sh) end
+        if #gen > 0 then
+            body = body .. string.format(", Blaze (%d+): %d more Hit%s", seq.blaze, #gen, #gen == 1 and "" or "s")
+        end
+        if stopped then
+            body = body .. string.format(", no Blaze on %s (%s)", tostring(stopped.target or "?"), tostring(stopped.noBlaze))
+        end
+        if rd > 0 then body = body .. string.format(", %d Rending", rd) end
+        if sd > 0 then body = body .. string.format(", %d Shred", sd) end
+        if cc > 0 then body = body .. string.format(", %d Concussive", cc) end
+        if seq.blazed then
+            body = body .. " -- " .. wounds(total) .. " in all"
+            if #keys > 1 then
+                local each = {}
+                for i, k in ipairs(keys) do each[i] = string.format("%s %d", tostring(plans[k].target or "?"), per[k] or 0) end
+                body = body .. ": " .. table.concat(each, ", ")
+            end
+        end
+        ACTIVATION.sayAttack(seq.blazed and "WOUND (Blaze)" or "WOUND", what, body, total > 0 and UP or MOD, digital)
+        local roll = { title = title, kinds = kinds, faces = faces, hls = hls,
+                       syms = next(syms) and syms or nil, sum = "∑" .. total, sumInk = total > 0 and UP or MOD }
+        ACTIVATION.showDice(roll)
+        onWoundsRolled(player, { plan = plan, plans = list, faces = faces, need = ACTIVATION.planNeed(plan), wounds = n,
+                                 total = total, round = seq.blazed and 2 or 1, blaze = #gen, digital = digital })
+        if #gen > 0 then
+            ACTIVATION.later(roll, function() ACTIVATION.blazeRound(seq, gen, total, per, player) end)
+        else
+            ACTIVATION.toSaves(seq, per, player)     -- the last round: the targets save
+        end
+    end
+    if thrown == 0 then landed({}, false) return seq end   -- every die an automatic 6
+    ACTIVATION.rolling(title)
+    throwDice(thrown, colorOf(player), function(faces, digital) landed(faces, digital) end, "d6", title)
+    return seq
+end
+
+-- Blaze (N+)'s hits (`gen`: each one's plan, see ACTIVATION.woundRoll),
+-- once the Wound roll that made them has shown -- `total` wounds so far,
+-- `per` by plan: they hit by themselves -- no hit roll, never Shock -- so
+-- they go straight to their Wound roll (ACTIVATION.woundRoll: "WOUND
+-- (Blaze)", CFG.blazeMark over every die), which makes no more.
+function ACTIVATION.blazeRound(seq, gen, total, per, player)
+    local again = { plans = seq.plans, blazed = true, total = total, per = per, weapon = seq.weapon, dice = {},
+                    hurt = seq.hurt, conc = seq.conc }
+    for _, k in ipairs(gen) do again.dice[#again.dice + 1] = { plan = k, blazed = true } end
+    return ACTIVATION.woundRoll(again, player)
+end
+
+-- A Wound roll from other scripts: plan = { hits, s, t (or toxin = N), jaw
+-- (what Iron Jaw added to t), weapon = the weapon's name, target = the
+-- target's name, auto = how many of the dice are automatic 6s (Shock),
+-- blaze = Blaze (N+)'s N, and for the target's saves guid, from, by, ap and
+-- what TRAIT_RULES.hurts gives } -- obj.call("rollWounds", { hits = 2, s = 4,
+-- t = 3 }); see ACTIVATION.woundRoll. Returns the plan (its dice come later),
+-- or nil: no hits, or no S against T and no Toxin.
+function rollWounds(plan, player)
+    if type(plan) ~= "table" then return nil end
+    local hits = clamp(math.floor(tonumber(plan.hits) or 0), 0, ACTIVATION.MAX_SHOWN)
+    local s, t, toxin = tonumber(plan.s), tonumber(plan.t), tonumber(plan.toxin)
+    if hits < 1 or not (toxin or (s and t)) then return nil end
+    local auto = clamp(math.floor(tonumber(plan.auto) or 0), 0, hits)
+    local dice = {}
+    for k = 1, hits do dice[k] = { plan = 1, auto = k <= auto or nil } end
+    ACTIVATION.woundRoll({ plans = { plan }, dice = dice, blaze = tonumber(plan.blaze), weapon = plan.weapon }, player)
+    return plan
+end
+
+-- Once an attack's Wound rolls are over (seq, see ACTIVATION.woundRoll; `per`
+-- the wounds by plan): every enemy wounded -- or given Concussion -- whose
+-- card is known (plan.guid) is told (takeSaves): each wound with its own AP
+-- and Lethality (as Rending and Shred left them) and Damage, the cover it
+-- would get, what the weapon's traits do to it, and this player's colour to
+-- roll in.
+function ACTIVATION.toSaves(seq, per, player)
+    local plans, keys = seq.plans or {}, {}
+    for k in pairs(plans) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        local plan, n = plans[k], math.floor(tonumber((per or {})[k]) or 0)
+        local conc = (seq.conc or {})[k] or 0
+        if (n > 0 or conc > 0) and plan.guid then
+            local list = {}
+            for i, h in ipairs((seq.hurt or {})[k] or {}) do
+                list[i] = { ap = (tonumber(plan.ap) or 0) + (h.rend and 1 or 0),
+                            l = (tonumber(plan.l) or 0) + (h.shred and 1 or 0), dmg = plan.dmg }
+            end
+            local ok, obj = pcall(function() return getObjectFromGUID(plan.guid) end)
+            if ok and obj then
+                ACTIVATION.ask(obj, "takeSaves", { wounds = n, list = list, ap = plan.ap, l = plan.l,
+                    dmg = plan.dmg, cover = plan.cover, gas = plan.gas, web = plan.web,
+                    concussion = conc > 0 and conc or nil, radphage = (plan.rad and n > 0) or nil,
+                    weapon = plan.weapon, by = plan.by, from = plan.from, color = colorOf(player) })
+            end
+        end
+    end
+end
+
+-- This fighter is wounded (an enemy's attack, see ACTIVATION.toSaves):
+-- t = { wounds, list (each wound: { ap (how much its AP worsens a save: 2 for
+-- "-2"), l (Lethality), dmg (Damage (N)'s N: the wounds it takes off, nil
+-- 1) }; a wound not in it takes t.ap / l / dmg), cover (what cover would add,
+-- nil: none -- a melee attack), gas, web (no armour save), concussion (its
+-- stacks: Concussive), radphage, weapon, by (the attacker's name), from (its
+-- model's GUID), color (the player to roll in) }.
+--   Concussion and Radphage are put on first, whatever the saves do (see
+-- ACTIVATION.timedCondition). Then each wound is saved against once
+-- (ACTIVATION.rollSaves). Before any die is rolled, with cover to be had
+-- and an armour save it betters, the Nerve Check's panel asks "In
+-- Cover?": CFG.coverYes saves with it, X without -- the attacker
+-- highlighted orange meanwhile; another check opened over the question
+-- doesn't lose it. With nothing to ask the saves are thrown CFG.diceShow
+-- seconds later, once the Wound roll has shown. No save at all: chat says
+-- so and every wound goes through (ACTIVATION.damage). Returns "asked",
+-- true (thrown), 0 (no save) or false (Out of Action, no wounds).
+function takeSaves(t)
+    if type(t) ~= "table" or fighter.outOfAction then return false end
+    local from = ACTIVATION.fromText(t)
+    local conc = math.floor(tonumber(t.concussion) or 0)
+    if conc > 0 then ACTIVATION.timedCondition("concussion", conc, nil, from) end
+    if t.radphage then
+        local before = conditionCount("radphage")
+        if (setCondition("radphage", true) or 0) > before then
+            chat(string.format("%s gains Radphage from %s", fighter.name, from), rgbOf(COL.valueMod))
+        end
+    end
+    local n = clamp(math.floor(tonumber(t.wounds) or 0), 0, ACTIVATION.MAX_SHOWN)
+    if n < 1 then return false end
+    local sv, inv = ACTIVATION.saveOf(t), ACTIVATION.invOf(t)
+    if not (sv or inv) then
+        chat(string.format("%s has no save against %s -- %d Wound%s go%s through", fighter.name, from, n,
+            n == 1 and "" or "s", n == 1 and "es" or ""), rgbOf(COL.valueMod))
+        local all = {}
+        for i = 1, n do all[i] = ACTIVATION.wound(t, i) end
+        onSavesRolled(t.color, { wounds = n, saved = 0, through = n, faces = {}, by = t.by, weapon = t.weapon })
+        ACTIVATION.damage(t, all, nil, t.color)
+        return 0
+    end
+    local cover = tonumber(t.cover)
+    if cover and cover > 0 and sv then
+        local ok, obj = pcall(function() return t.from and getObjectFromGUID(t.from) end)
+        if ACTIVATION.roll and not ACTIVATION.roll.rolling then ACTIVATION.hideDice() end   -- the question shows
+        ACTIVATION.openCheck({ test = "question", cover = true, keep = true, pair = true,
+            title = string.format("In Cover? (+%d Save)", cover), obj = ok and obj or nil, ink = rgbOf(COL.valueMod),
+            done = function(yes, _, who) ACTIVATION.rollSaves(t, yes and cover or 0, who or t.color) end })
+        return "asked"
+    end
+    Wait.time(function() ACTIVATION.rollSaves(t, 0, t.color) end, CFG.dicePause or CFG.diceShow)
+    return true
+end
+
+-- "Kal's Autogun": the attack t (see takeSaves) came from.
+function ACTIVATION.fromText(t)
+    return string.format("%s's %s", tostring(t.by or "?"), tostring(t.weapon or "weapon"))
+end
+
+-- Wound `i` of attack t (see takeSaves): its own entry, else the attack's.
+function ACTIVATION.wound(t, i)
+    return (type(t.list) == "table" and t.list[i]) or { ap = t.ap, l = t.l, dmg = t.dmg }
+end
+
+-- The armour save against attack t: Sv as shown (Mesh Armour, a Shield /
+-- Parry ...) -- none against Gas or Web.
+function ACTIVATION.saveOf(t)
+    if t.gas or t.web then return nil end
+    return statNumber("Sv", TRAIT_RULES.saveContext())
+end
+
+-- The invulnerable save against attack t, and what gives it: the
+-- fighter's own (STAT.inv) -- or, against Gas, wargear's `gasInv` (a
+-- Respirator's 5+) when that is as good or better.
+function ACTIVATION.invOf(t)
+    local v, it = STAT.inv()
+    if t.gas then
+        for _, g in ipairs(SKILL.with("gasInv")) do
+            local n = tonumber(g.gasInv)
+            if n and not (v and v < n) then v, it = n, g end
+        end
+    end
+    return v, it
+end
+
+-- Whether weapon `name` has no AP against this fighter (an item's `noAp`:
+-- a Reflec Shroud against weapons whose name -- a word in it -- starts with
+-- Las, Plasma or Melta), and that item's name; nil when it has AP.
+function ACTIVATION.apProof(name)
+    local low = " " .. tostring(name or ""):lower()
+    for _, it in ipairs(SKILL.with("noAp")) do
+        for _, word in ipairs(type(it.noAp) == "table" and it.noAp or { it.noAp }) do
+            if low:find("[^%a]" .. tostring(word):lower():gsub("%p", "%%%0")) then return it.name end
+        end
+    end
+    return nil
+end
+
+-- The saves against t.wounds (see takeSaves), `cover` added to the
+-- armour save (0: not in cover): one D6 a wound, in one throw. Each die is
+-- taken against the better of the armour save (ACTIVATION.saveOf) --
+-- worsened by its wound's AP (none against a Reflec Shroud, see
+-- ACTIVATION.apProof) and bettered by the cover -- and the invulnerable
+-- save (ACTIVATION.invOf: as it is, nothing betters or worsens it); the
+-- armour save when they are equal. A die of CFG.saveFails or less always
+-- fails, one reaching the number saves; a number over 6 can't be made.
+-- Read in the order thrown: the first natural 1 on a save taken with
+-- wargear that burns out (the Refractor Shield) burns it out
+-- (fighter.burnt) -- the dice after it go by the armour save alone. The
+-- dice show over the stats, green saved, orange not, the wounds that go
+-- through at the right end; chat: "Bob - SAVE - Kal's Autogun (Sv 4+, AP
+-- -1, Cover +2 = 3+): 5, 2 = 1 Wound through"; stub onSavesRolled. The
+-- wounds through then do their damage (ACTIVATION.damage).
+function ACTIVATION.rollSaves(t, cover, player)
+    if fighter.outOfAction then return nil end
+    local n = clamp(math.floor(tonumber(t.wounds) or 0), 0, ACTIVATION.MAX_SHOWN)
+    if n < 1 then return nil end
+    cover = tonumber(cover) or 0
+    local sv = ACTIVATION.saveOf(t)
+    local proof = ACTIVATION.apProof(t.weapon)
+    local function apOf(i) return proof and 0 or math.max(0, math.floor(tonumber(ACTIVATION.wound(t, i).ap) or 0)) end
+    local function needOf(i) return sv and sv + apOf(i) - cover or nil end
+    local function invFor(need)
+        local v, it = ACTIVATION.invOf(t)
+        if v and not (need and need <= v) then return v, it end
+        return nil
+    end
+    local function needText(k, inv) return string.format(inv and "Inv %d+" or "%d+", k) end
+    local parts, seen, v0 = {}, {}, nil
+    for i = 1, n do
+        local k = needOf(i)
+        if k and not seen[k] then seen[k], parts[#parts + 1] = true, needText(k) end
+        v0 = v0 or invFor(k)
+    end
+    if v0 then parts[#parts + 1] = needText(v0, true) end
+    local title = "Save Roll (" .. (#parts > 0 and table.concat(parts, ", ") or "no save") .. ")"
+    local UP, MOD = COL.valueUp, COL.valueMod
+    ACTIVATION.rolling(title)
+    throwDice(n, colorOf(player), function(faces, digital)
+        local hls, read, saved, burnt, mixed, failed = {}, {}, 0, nil, false, {}
+        local first
+        for i, f in ipairs(faces) do
+            local need = needOf(i)
+            local v, it = invFor(need)
+            local k = v or need
+            local ok = k ~= nil and f > CFG.saveFails and f >= k
+            if ok then saved = saved + 1 else failed[#failed + 1] = ACTIVATION.wound(t, i) end
+            hls[i] = ok and UP or MOD
+            local mark = v and needText(v, true) or need and needText(need) or "no save"
+            first = first or mark
+            mixed = mixed or mark ~= first
+            read[i] = { f = f, mark = mark }
+            if v and it.burns and f == 1 and not burnt then
+                burnt = it
+                fighter.burnt = fighter.burnt or {}
+                fighter.burnt[it.key] = true
+                read[i].mark = mark .. ", burns out"
+                mixed = true
+            end
+        end
+        local through = #faces - saved
+        local each = {}
+        for i, r in ipairs(read) do each[i] = mixed and string.format("%d (%s)", r.f, r.mark) or tostring(r.f) end
+        local ap = apOf(1)
+        local detail = { sv and string.format("Sv %d+", sv) or (t.gas and "no Sv (Gas)" or t.web and "no Sv (Web)" or "no Sv") }
+        if proof then detail[#detail + 1] = "AP ignored, " .. proof
+        elseif ap > 0 then detail[#detail + 1] = "AP -" .. ap end
+        if cover > 0 then detail[#detail + 1] = "Cover +" .. cover end
+        local one = needOf(1)
+        if one and (ap > 0 or cover > 0) and not mixed then detail[#detail] = detail[#detail] .. " = " .. needText(one) end
+        local invItem = select(2, ACTIVATION.invOf(t))
+        if v0 or burnt then
+            local nInv = tonumber((burnt or {}).inv) or v0
+            detail[#detail + 1] = needText(nInv, true)
+                .. (invItem and invItem.gasInv and not burnt and nInv == tonumber(invItem.gasInv) and ", " .. invItem.name or "")
+        end
+        local body = table.concat(each, ", ") .. (mixed and "" or " (" .. first .. ")") .. " = "
+            .. (through == 0 and "saved" or string.format("%d Wound%s through", through, through == 1 and "" or "s"))
+        ACTIVATION.sayAttack("SAVE", ACTIVATION.fromText(t) .. " (" .. table.concat(detail, ", ") .. ")", body,
+            through == 0 and UP or MOD, digital)
+        if burnt then
+            chat(string.format("%s's %s burns out -- no invulnerable save for the rest of the battle",
+                fighter.name, burnt.name), rgbOf(MOD))
+            SKILL.drawBurnt()
+            drawStats()
+        end
+        local kinds = {}
+        for i = 1, #faces do kinds[i] = "d6" end
+        ACTIVATION.showDice{ title = title, kinds = kinds, faces = faces, hls = hls,
+                             sum = through == 0 and "Saved" or "∑" .. through, sumInk = through == 0 and UP or MOD }
+        local shown = ACTIVATION.roll
+        onSavesRolled(player, { wounds = #faces, saved = saved, through = through, faces = faces, need = needOf(1),
+                                inv = v0, cover = cover, ap = ap, burnt = burnt and burnt.name or nil,
+                                by = t.by, weapon = t.weapon, digital = digital })
+        ACTIVATION.damage(t, failed, shown, player)
+    end, "d6", title)
+    return true
+end
+
+-- The wounds that went through (`failed`: their entries, see
+-- ACTIVATION.wound), once the saves have shown (`roll`). Web: no damage --
+-- the fighter is Webbed instead (ACTIVATION.timedCondition: a Strength
+-- check at the end of its next activation ends it). Otherwise, one after
+-- the other, each takes its Damage off the wounds -- 1, or Damage (N)'s N;
+-- the one that brings the fighter to 0, and every one after it, adds its
+-- Lethality to the Injury dice -- which are then rolled
+-- (ACTIVATION.injure). Said in chat: "Bob loses 2 wounds to Kal's Autogun
+-- -- 0 left, 2 Injury dice"; stub onDamaged.
+function ACTIVATION.damage(t, failed, roll, player)
+    if #failed == 0 or fighter.outOfAction then return end
+    local from = ACTIVATION.fromText(t)
+    if t.web then
+        ACTIVATION.timedCondition("webbed", 1, "S", from)
+        onDamaged(player, { lost = 0, injury = 0, webbed = true, by = t.by, weapon = t.weapon })
+        return
+    end
+    local lost, inj, was = 0, 0, fighter.wounds.current
+    for _, w in ipairs(failed) do
+        local d = math.max(0, math.floor(tonumber(w.dmg) or 1))
+        local cur = fighter.wounds.current
+        if cur > 0 then
+            local now = math.max(0, cur - d)
+            lost = lost + cur - now
+            if now ~= cur then setWounds(now) end
+            if now == 0 then inj = inj + math.max(0, math.floor(tonumber(w.l) or 0)) end
+        else
+            inj = inj + math.max(0, math.floor(tonumber(w.l) or 0))
+        end
+    end
+    local left = fighter.wounds.current
+    local msg = lost > 0
+        and string.format("%s loses %d wound%s to %s -- %d left", fighter.name, lost, lost == 1 and "" or "s", from, left)
+        or string.format("%s %s %s", fighter.name, was == 0 and "is already at 0 wounds --" or "loses no wounds to", from)
+    if inj > 0 then msg = msg .. string.format(", %d Injury dice", inj) end
+    chat(msg, rgbOf(COL.valueMod))
+    onDamaged(player, { lost = lost, wounds = left, injury = inj, by = t.by, weapon = t.weapon })
+    if inj > 0 then
+        ACTIVATION.later(roll, function() ACTIVATION.injure(inj, from, player) end)
+    end
+end
+
+-- `n` Injury dice for wounds taken at 0 wounds (see ACTIVATION.damage),
+-- in one throw (at most MAX_SHOWN): the worst result is applied -- Out of
+-- Action, then Serious Injury (Seriously Injured), then Injury (nothing
+-- more). Said, that result alone ("Bob - Injury dice (Kal's Autogun): S.
+-- Inj") and shown over the stats, the worst result at the right end.
+function ACTIVATION.injure(n, from, player)
+    if fighter.outOfAction then return end
+    n = clamp(math.floor(tonumber(n) or 0), 0, ACTIVATION.MAX_SHOWN)
+    if n < 1 then return end
+    local color = colorOf(player)
+    local title = ACTIVATION.rollName("injury", n)
+    ACTIVATION.rolling(title)
+    throwDice(n, color, function(faces, digital)
+        local R, count = ACTIVATION.INJURY, {}
+        for i, f in ipairs(faces) do
+            local k = ACTIVATION.INJURY_DICE[f] or "serious"
+            count[k] = (count[k] or 0) + 1
+        end
+        local worst
+        for _, k in ipairs({ "out", "serious", "injured" }) do worst = worst or (count[k] and k) end
+        ACTIVATION.say(string.format("Injury dice (%s)", from), {}, R[worst].short, { color = color, digital = digital })
+        ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = worst }
+        if fighter.outOfAction then return end
+        if worst == "out" then
+            setOutOfAction{ value = true, why = "Injury dice from " .. from }
+        elseif worst == "serious" and fighter.status ~= "seriously_injured" then
+            setStatus("seriously_injured")
+        end
+    end, "injury", title)
+end
+
+-- A condition put on for a while (fighter.timed, saved): `n` stacks of
+-- `key` until the end of the fighter's next activation -- the one under
+-- way, if it is activated (Concussive's Concussion) -- or, with `test` (a
+-- stat: Web's Webbed, "S"), on until a check of that stat, passed at the
+-- end of an activation, starting with that one, takes it off. One the
+-- fighter is immune to isn't put on (see setCondition).
+-- Said: "Bob gains 2x Concussion from Kal's Stub Gun -- until the end of
+-- their next activation".
+function ACTIVATION.timedCondition(key, n, test, from)
+    local i = indexOf(CONDITIONS, key)
+    if not i then return 0 end
+    local label = CONDITIONS[i].label
+    local before = conditionCount(key)
+    local after = setCondition(key, test and math.max(before, 1) or before + n) or before
+    fighter.timed = fighter.timed or {}
+    if test then
+        if after < 1 then return 0 end
+        local has = false
+        for _, r in ipairs(fighter.timed) do has = has or (r.key == key and r.test ~= nil) end
+        if not has then table.insert(fighter.timed, { key = key, n = 1, test = test }) end
+        chat(string.format("%s is %s by %s -- no damage; a %s check at the end of their next activation frees them",
+            fighter.name, label, from, STAT.NAMES[test] or test), rgbOf(COL.valueMod))
+    else
+        local got = after - before
+        if got <= 0 then
+            if next(fighter.timed) == nil then fighter.timed = nil end
+            return 0
+        end
+        table.insert(fighter.timed, { key = key, n = got })
+        chat(string.format("%s gains %s%s from %s -- until the end of their next activation", fighter.name,
+            got > 1 and got .. "x " or "", label, from), rgbOf(COL.valueMod))
+    end
+    return after
+end
+
+-- The end of an activation (completeActivation): what fighter.timed holds
+-- is over -- the stacks wear off, or the check is made (passed: the
+-- condition goes, failed: tried again at the end of the next).
+function ACTIVATION.timedEnd(player)
+    local keep = {}
+    for _, r in ipairs(fighter.timed or {}) do
+        local i = indexOf(CONDITIONS, r.key)
+        local label = i and CONDITIONS[i].label or r.key
+        local has = conditionCount(r.key)
+        if r.test then
+            if has > 0 then
+                keep[#keep + 1] = r
+                ACTIVATION.rollTest(r.test, player, { why = label, done = function(test)
+                    if not test.passed then
+                        chat(string.format("%s stays %s", fighter.name, label), rgbOf(COL.valueMod))
+                        return
+                    end
+                    for k, q in ipairs(fighter.timed or {}) do
+                        if q == r then table.remove(fighter.timed, k) break end
+                    end
+                    if fighter.timed and next(fighter.timed) == nil then fighter.timed = nil end
+                    setCondition(r.key, 0)
+                    chat(string.format("%s breaks free -- no longer %s", fighter.name, label), rgbOf(COL.valueUp))
+                end })
+            end
+        elseif has > 0 then
+            setCondition(r.key, math.max(0, has - (tonumber(r.n) or 1)))
+            chat(string.format("%s's %s%s wears off", fighter.name, (tonumber(r.n) or 1) > 1 and r.n .. "x " or "", label),
+                rgbOf(COL.valueUp))
+        end
+    end
+    fighter.timed = next(keep) and keep or nil
+end
+
+-- Reloads a weapon profile that is OUT (a middle click on its ammo button;
+-- t = { weapon =, profile = }): the Reload action, spent as an attack is
+-- (see ACTIVATION.spendAttack) and marked used. A reload just works: the
+-- profile is back to AM -- or to Combi / AA(N), as a left click from OUT
+-- would put it -- with nothing rolled (Ammo (N+) is for shooting). Only
+-- one with Scarce (N+) needs a D6 of N or more, and stays OUT without
+-- (see ACTIVATION.reloadNow). Said in chat: "Kage - RELOAD - Autogun:
+-- reloaded", "Kage - RELOAD - Plasma Gun: Scarce 3 (4+), still OUT".
+--   A fighter with Fast Reload (a skill that says `fastReload`, while the
+-- skills work) reloads every profile that is out of ammo instead,
+-- whichever of them was clicked -- those with Scarce each on its own die
+-- ("Kage - RELOAD - Fast Reload: Autogun and Stubber reloaded").
+-- Returns whether there was a reload: only a profile that is OUT has one.
+function reloadWeapon(t, player)
+    if type(t) ~= "table" then return false end
+    local i, pi = tonumber(t.weapon), tonumber(t.profile)
+    local w = i and weaponAt(i)
+    local p = w and w.profiles and pi and w.profiles[pi]
+    if not p or TRAIT_RULES.ammoState(w, p) ~= "out" then return false end
+    local entry = ACTIONS[indexOf(ACTIONS, "reload") or 0]
+    if entry and fighter.activation == "active" and fighter.actionsLeft > 0 then
+        fighter.actionsLeft = math.max(0, fighter.actionsLeft - SKILL.cost(entry))
+        fighter.usedActions.reload = true
+        TRAIT_RULES.drawGlows()       -- the last action gone: no second Shoot (Fast Shot)
+        drawReady()
+        drawActions()
+        onActionsChanged(fighter.actionsLeft)
+    end
+    local fast = #SKILL.with("fastReload") > 0
+    local list = fast and TRAIT_RULES.empties() or { { i = i, pi = pi, w = w, p = p } }
+    ACTIVATION.reloadNow(list, player, { say = function(names)
+        if fast then
+            ACTIVATION.sayAttack("RELOAD", "Fast Reload", ACTIVATION.nameList(names) .. " reloaded", COL.valueUp)
+        else
+            ACTIVATION.sayAttack("RELOAD", names[1].name, "reloaded", COL.valueUp)
+        end
+    end })
+    return true
+end
+
+-- Reloads the profiles `list` (entries as TRAIT_RULES.empties gives them),
+-- each put back as a left click on its OUT would: to AM, or Combi / AA(N).
+-- Those without Scarce at once -- o.say(names) then says so, `names` the
+-- weapons reloaded, each once, as { name = } (for ACTIVATION.nameList).
+-- Those with Scarce (N+) get a D6 each, thrown together -- after `o.after`,
+-- a roll still on show (see ACTIVATION.later) -- and only a die of N or
+-- more reloads its profile. The dice show over the stats, green or orange,
+-- with "AM" at the right end when every one is back and "OUT" at the left
+-- when one isn't, and each is said: "Kage - RELOAD - Plasma Gun: Scarce 5
+-- (4+), reloaded". The onReloadRolled stub hears of every profile. Returns
+-- the weapons reloaded at once, and how many dice are thrown.
+function ACTIVATION.reloadNow(list, player, o)
+    o = o or {}
+    local R = TRAIT_RULES
+    local names, seen, scarce = {}, {}, {}
+    for _, e in ipairs(list) do
+        local need = R.scarce(e.p)
+        if need then
+            scarce[#scarce + 1] = { e = e, need = need }
+        else
+            setProfileState({ weapon = e.i, profile = e.pi, ammo = R.ammoNext(e.w, e.p, false) })
+            if not seen[e.w] then seen[e.w], names[#names + 1] = true, { name = TRAIT_RULES.name(e.w) } end
+            onReloadRolled(player, { weapon = e.i, profile = e.pi, reloaded = true })
+        end
+    end
+    if #names > 0 and o.say then o.say(names) end
+    if #scarce == 0 then return names, 0 end
+    local title = #scarce == 1 and TRAIT_RULES.name(scarce[1].e.w) .. " (Scarce)" or "Reload (Scarce)"
+    ACTIVATION.later(o.after, function()
+        ACTIVATION.rolling(title)
+        throwDice(#scarce, colorOf(player), function(faces, digital)
+            local hls, all = {}, true
+            for k, s in ipairs(scarce) do
+                local f, e = faces[k], s.e
+                local ok = f ~= nil and f >= s.need
+                hls[k], all = ok and COL.valueUp or COL.valueMod, all and ok
+                if f then
+                    ACTIVATION.sayAttack("RELOAD", TRAIT_RULES.name(e.w), string.format("Scarce %d (%d+), %s", f, s.need,
+                        ok and "reloaded" or "still OUT"), hls[k], digital)
+                    -- the state may have changed while the die rolled: only an OUT one is reloaded
+                    if ok and R.ammoState(e.w, e.p) == "out" then
+                        setProfileState({ weapon = e.i, profile = e.pi, ammo = R.ammoNext(e.w, e.p, false) })
+                    end
+                    onReloadRolled(player, { weapon = e.i, profile = e.pi, face = f, need = s.need, reloaded = ok,
+                                             digital = digital })
+                end
+            end
+            ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hls = hls, ammoDie = #scarce == 1 and 1 or nil,
+                                 sum = all and "AM" or nil, sumInk = COL.valueUp, ammoState = not all and "out" or nil }
+        end, "d6", title)
+    end)
+    return names, #scarce
+end
+
+-- The Reload action taken in A's panel, where no profile is pointed at: it
+-- is the reload of the one profile that is out of ammo, just as a middle
+-- click on that profile's OUT (see reloadWeapon, which spends the action).
+-- With none out of ammo, or several -- the player then picks one there --
+-- it does nothing: no action spent, only a line saying why. A fighter with
+-- Fast Reload reloads them all, however many. Returns whether there was a
+-- reload.
+function ACTIVATION.reload(player)
+    local out = TRAIT_RULES.empties()
+    local one = out[1]
+    if one and (#out == 1 or #SKILL.with("fastReload") > 0) then
+        reloadWeapon({ weapon = one.i, profile = one.pi }, player)
+        onActionChosen(player, "reload")
+        return true
+    end
+    if one then
+        chat(string.format("%s has %d profiles out of ammo -- middle-click the OUT of the one to reload",
+            fighter.name, #out), rgbOf(COL.valueMod))
+    else
+        chat(string.format("%s has no weapon out of ammo -- nothing to reload", fighter.name), rgbOf(COL.valueMod))
+    end
+    return false
+end
+
+-- A friend's Distribute Ammo reaches this fighter (t = { by = the friend's
+-- name, color = its player's }; see ACTIVATION.distribute): with a weapon
+-- out of ammo it makes an Intelligence check at once -- with none, nothing
+-- happens and nothing is said. Passed, the one profile that is out of ammo
+-- is reloaded (see ACTIVATION.reloadNow: one with Scarce still has to roll
+-- for it, once the check's dice have shown) -- a fighter with Fast Reload
+-- reloads them all; with several out of ammo and no Fast Reload the player
+-- picks the one, by hand (a click on its OUT), and is told so. Then the
+-- onAmmoChecked stub hears of it. Returns whether it checks: not with
+-- nothing out of ammo, without an Int, or Out of Action. From other
+-- scripts: obj.call("ammoCheck", { by = "Kage" }).
+function ammoCheck(t)
+    t = type(t) == "table" and t or {}
+    if fighter.outOfAction or #TRAIT_RULES.empties() == 0 then return false end
+    local test = ACTIVATION.rollTest("Int", t.color, { why = "Distribute Ammo", done = function(test, roll)
+        local names = {}
+        if test.passed then
+            local out = TRAIT_RULES.empties()           -- as they stand now
+            if #out == 1 or (#out > 1 and #SKILL.with("fastReload") > 0) then
+                names = ACTIVATION.reloadNow(out, t.color, { after = roll, say = function(list)
+                    chat(string.format("%s reloads %s%s", fighter.name, ACTIVATION.nameList(list),
+                        t.by and t.by ~= fighter.name and " with " .. tostring(t.by) .. "'s ammo" or ""), rgbOf(COL.valueUp))
+                end })
+            elseif #out > 1 then
+                chat(string.format("%s may reload one of %d profiles that are out of ammo -- click the OUT of the one",
+                    fighter.name, #out), rgbOf(COL.valueUp))
+            end
+        end
+        onAmmoChecked(test, names)
+    end })
+    return test ~= nil
+end
+
+-- Distribute Ammo (action `a`: a skill's that says `distribute`, the
+-- inches it reaches -- Munitioneer, 6): this fighter and every friend
+-- within that range, base to base, that has a weapon out of ammo make an
+-- Intelligence check at once, each on its own card, and reload on passing
+-- it (see ammoCheck). One with nothing to reload isn't asked for a check,
+-- and nothing is said of it. Each card says its own check; the friends
+-- that make one are flashed in the action's colour. Returns the names of
+-- those that check.
+function ACTIVATION.distribute(a, player)
+    local range = tonumber(a.distribute) or 0
+    local t = { by = fighter.name, color = colorOf(player) }
+    local names = {}
+    if ammoCheck(t) then names[1] = fighter.name end
+    for _, o in ipairs(ACTIVATION.friendsWithin(range)) do
+        local ok, took = ACTIVATION.ask(o.obj, "ammoCheck", t)
+        if ok and took then
+            names[#names + 1] = o.name
+            flash(o.obj, ACTIVATION.actionGlow(a.key, a.type))
+        end
+    end
+    return names
+end
+
+-- Opens the Recovery Test panel over the stats with its number of Injury
+-- dice: one, one more with a friend to assist (see
+-- ACTIVATION.surroundings) -- and what that friend's wargear adds (its
+-- `assist`: a Medicae Kit, one more) --, one more once Tend Wounds was used
+-- in this activation, and one for each Treat Ally it has had since its last
+-- Recovery test (see setTreated). `near` is what completeActivation already
+-- looked up; the Recovery Test action (A's Seriously Injured panel) opens it
+-- without.
+-- With an enemy within 1" (not Seriously Injured, see
+-- ACTIVATION.surroundings) there is nothing to roll: the panel then has
+-- one button, a dagger, that takes the fighter Out of Action
+-- (onRecoveryOut); `foes` names those enemies. Returns the number of dice
+-- (nil when Out of Action).
+function recoveryTest(near)
+    if fighter.outOfAction then return nil end
+    near = type(near) == "table" and near.foes and near or ACTIVATION.surroundings()
+    local tend = fighter.usedActions.tend_wounds == true
+    local treated = tonumber(fighter.treated) or 0
+    local kit = near.helper and math.max(0, math.floor(tonumber(near.helper.assist) or 0)) or 0
+    fighter.recovery = { dice = math.min(ACTIVATION.MAX_DICE, 1 + (near.helper and 1 or 0) + kit + (tend and 1 or 0) + treated),
+                         helper = near.helper and near.helper.name or nil, tend = tend or nil,
+                         kit = kit > 0 and (near.helper.assistWith or "wargear") or nil,
+                         treated = treated > 0 and treated or nil,
+                         foes = #near.foes > 0 and ACTIVATION.nameList(near.foes) or nil }
+    ACTIVATION.draw()
+    return fighter.recovery.dice
+end
+
+-- Treated by a friend (its Treat Ally, see ACTIVATION.treat): one more
+-- Injury dice in this fighter's next Recovery test, each time -- in the
+-- one that is open, if any, at once. They wait until that test is rolled,
+-- or the fighter is no longer Seriously Injured; false takes them back.
+-- From other scripts: obj.call("setTreated", { value = true }). Returns
+-- the dice added so far -- false for a fighter that isn't Seriously
+-- Injured, or is Out of Action: it makes no Recovery test.
+function setTreated(on)
+    if type(on) == "table" then on = on.value end
+    local rec = fighter.recovery
+    if on == false then
+        if rec and rec.treated then
+            rec.dice, rec.treated = math.max(1, rec.dice - rec.treated), nil
+            ACTIVATION.draw()
+        end
+        fighter.treated = nil
+        return false
+    end
+    if fighter.outOfAction or fighter.status ~= "seriously_injured" then return false end
+    fighter.treated = (tonumber(fighter.treated) or 0) + 1
+    if rec and not rec.foes then
+        rec.dice, rec.treated = math.min(ACTIVATION.MAX_DICE, rec.dice + 1), (rec.treated or 0) + 1
+        ACTIVATION.draw()
+    end
+    return fighter.treated
+end
+
+-- The Recovery Test's number of dice, by hand (1 to ACTIVATION.MAX_DICE).
+function setRecoveryDice(n)
+    if not fighter.recovery then return nil end
+    if type(n) == "table" then n = n.value end
+    fighter.recovery.dice = clamp(math.floor(tonumber(n) or 1), 1, ACTIVATION.MAX_DICE)
+    ACTIVATION.draw()
+    return fighter.recovery.dice
+end
+
+-- Closes the Recovery Test panel (its X).
+function closeRecovery()
+    fighter.recovery = nil
+    ACTIVATION.draw()
+    return true
+end
+
+-- Rolls the Recovery test (the panel's die): its Injury dice thrown (see
+-- throwDice), each face read as ACTIVATION.INJURY_DICE says, the best
+-- kept -- as the fighter's player would pick -- and applied: Injury makes
+-- it Active (whatever its status was), Serious Injury leaves it Seriously Injured, Out of Action
+-- takes it out (see setOutOfAction). The panel closes at once; the result
+-- is said in chat and shown over the stats when the dice have settled.
+-- Returns the number of dice (nil: nothing to roll -- no panel, or an
+-- enemy within 1").
+function rollRecovery(player)
+    local rec = fighter.recovery
+    if not rec or rec.foes or fighter.outOfAction then return nil end
+    closeRecovery()
+    fighter.treated = nil                       -- Treat Ally's dice are in this one
+    local color = colorOf(player)
+    ACTIVATION.rolling("Recovery Test")
+    throwDice(rec.dice, color, function(faces, digital)
+        local R, best = ACTIVATION.INJURY, nil
+        for i, f in ipairs(faces) do
+            local k = ACTIVATION.INJURY_DICE[f] or "serious"
+            if not best or R[k].rank > R[best].rank then best = k end
+        end
+        local why = {}
+        if rec.helper then why[#why + 1] = rec.helper .. " assists" .. (rec.kit and " with " .. rec.kit or "") end
+        if rec.tend then why[#why + 1] = "Tend Wounds" end
+        if rec.treated then why[#why + 1] = rec.treated > 1 and ("Treat Ally x" .. rec.treated) or "Treat Ally" end
+        -- "Recovery Test (Mate assists): Inj" -- only the result kept
+        ACTIVATION.say("Recovery Test" .. (#why > 0 and (" (" .. table.concat(why, ", ") .. ")") or ""), {},
+            R[best].short, { color = color, digital = digital })
+        ACTIVATION.showDice{ title = "Recovery Test", kind = "injury", faces = faces, result = best }
+        if best == "out" then setOutOfAction(true)
+        elseif best == "injured" and fighter.status ~= "active" then setStatus("active") end
+        onRecoveryRolled(player, best, faces)
+    end, "injury", "Recovery Test")
+    return rec.dice
+end
+
+-- The Nerve Check (A's Special tab): opens its panel over the stats with
+-- the Cl it is taken against -- this fighter's own, as shown, or the
+-- higher Cl of a friendly Leader / Champion in range and in sight (see
+-- ACTIVATION.nerveSource), then in green, that model highlighted green
+-- while the panel is open. Over the Recovery Test, if that is open (it
+-- shows again once this closes). Returns the Cl (nil when Out of Action).
+function nerveCheck(player)
+    if fighter.outOfAction then return nil end
+    ACTIVATION.nerveLight(false)
+    local src = ACTIVATION.nerveSource()
+    ACTIVATION.openCheck({ value = src.value, own = src.own, found = src.value,
+                           from = src.from and src.from.name, obj = src.from and src.from.obj })
+    return src.value
+end
+
+-- A ranged attack has hit this fighter (the attacker's rollAttack tells
+-- it; t = { by = the attacker's name, weapon = its weapon }): it is
+-- Suppressed -- said in chat, flashed in Suppressed's colour -- unless it
+-- has Nerves Of Steel (a skill that says `steel`, and works): then the
+-- Nerve Check's panel opens under that name, against its own Cl, and the
+-- player chooses -- the die makes the Cool check (2D6 at or under: passed,
+-- it stays as it is; failed, it is Suppressed as by any failed check), X
+-- gives up and Suppresses it. Only an Active fighter can be Suppressed:
+-- nothing happens to one that is Engaged (shooting it doesn't Suppress
+-- it), Suppressed or Seriously Injured already, or Out of Action. Returns
+-- "suppressed", "asked" (the panel is open) or false.
+function rangedHit(t)
+    t = type(t) == "table" and t or {}
+    if fighter.outOfAction or fighter.status ~= "active" then return false end
+    local hit = string.format("%s is hit by %s", fighter.name,
+        t.by and (tostring(t.by) .. (t.weapon and ("'s " .. tostring(t.weapon)) or "")) or "a ranged attack")
+    local cl = #SKILL.with("steel") > 0 and statNumber("Cl") or nil
+    if not cl then
+        local rgb = rgbOf(statusDef("suppressed").color)
+        setStatus({ key = "suppressed", quiet = true })
+        chat(hit .. " -- Suppressed", rgb)
+        flash(self, rgb)
+        return "suppressed"
+    end
+    local n = ACTIVATION.nerve
+    while n and not n.steel do n = n.held end
+    if n then return "asked" end                     -- already asking
+    chat(hit .. " -- Cool check for Nerves Of Steel, or Suppressed", rgbOf(statusDef("suppressed").color))
+    ACTIVATION.openCheck({ title = "Nerves Of Steel", value = cl, own = cl, found = cl, steel = true, keep = true,
+        done = function()                            -- given up
+            if not fighter.outOfAction and fighter.status == "active" then setStatus("suppressed") end
+        end })
+    return "asked"
+end
+
+-- An enemy's attack has hit this fighter with a weapon whose traits do
+-- something to it (the attacker's ACTIVATION.traitHits tells it; t = { by
+-- = the attacker's name, weapon = its weapon, color = the attacker's
+-- player, whose dice a check is thrown in, flash, cursed }):
+--   flash   it is Blind (its melee attacks hit on a natural 6 only, see
+--           the condition) and loses its Ready marker -- or, without one,
+--           gets none at the next turn (fighter.noReady, see setReady);
+--   cursed  it makes a Willpower check -- once for the attack, however
+--           many hits -- and gains Insanity when it fails.
+-- Said in chat, the model flashed orange. Returns whether it was affected
+-- (not when Out of Action).
+function traitHit(t)
+    if type(t) ~= "table" or fighter.outOfAction then return false end
+    local name = fighter.name
+    local hit = t.by and (tostring(t.by) .. (t.weapon and ("'s " .. tostring(t.weapon)) or "")) or "a weapon"
+    local MOD = rgbOf(COL.valueMod)
+    if t.flash then
+        setCondition("blind", true)
+        if fighter.activation == "ready" then
+            setReady(false)
+            chat(string.format("%s is blinded by %s -- Blind, and loses their Ready marker", name, hit), MOD)
+        else
+            fighter.noReady = true
+            chat(string.format("%s is blinded by %s -- Blind, and gets no Ready marker next turn", name, hit), MOD)
+        end
+        flash(self, MOD)
+    end
+    if t.cursed then
+        local test = ACTIVATION.rollTest("Wil", t.color, { why = "Cursed", done = function(res)
+            if res.passed then
+                chat(string.format("%s resists the curse of %s", name, hit), rgbOf(COL.valueUp))
+            else
+                setCondition("insanity", true)
+                chat(string.format("%s is cursed by %s -- Insanity", name, hit), MOD)
+                flash(self, MOD)
+            end
+        end })
+        if not test then chat(string.format("%s has no Willpower to test -- the curse of %s does nothing", name, hit), MOD) end
+    end
+    onTraitHit(t)
+    return true
+end
+
+-- Puts check `n` in the Nerve Check's panel (ACTIVATION.nerve), in place
+-- of the one that is open. A check something hangs on (`keep`: Nerves Of
+-- Steel's) isn't lost that way: it waits under the new one (`held`) and
+-- shows again once that has closed (see closeNerve).
+function ACTIVATION.openCheck(n)
+    local was = ACTIVATION.nerve
+    ACTIVATION.nerveLight(false)
+    if was then n.held = was.keep and was or was.held end
+    ACTIVATION.nerve = n
+    ACTIVATION.nerveLight(true)
+    ACTIVATION.draw()
+    return n
+end
+
+-- Group Activation's Leadership check (the action in A's panel, see
+-- useAction): opens the Nerve Check's panel over the stats under its own
+-- title, against this fighter's Ld as shown -- one lower for every friend
+-- after the first it is made for, then in orange. Those are the fighters
+-- of its gang `player` has selected that are Ready, however far away:
+-- range is the player's to judge, and only once the check is passed does
+-- it show who was within it (see ACTIVATION.rollGroup). They are
+-- highlighted in the action's colour while the panel is open; with
+-- nobody selected the check opens all the same, and chat says so. The
+-- panel's die rolls the check (see rollNerve). Returns the Ld to roll
+-- against (nil when Out of Action).
+function groupActivation(player)
+    if fighter.outOfAction then return nil end
+    ACTIVATION.nerveLight(false)
+    local group, far = ACTIVATION.groupOf(ACTIVATION.picked(player))
+    for _, o in ipairs(far) do group[#group + 1] = o end
+    local ld, minus, objs = statNumber("Ld"), math.max(0, #group - 1), {}
+    for i, o in ipairs(group) do objs[i] = o.obj end
+    local value = ld and ld - minus or nil
+    ACTIVATION.openCheck({ stat = "Ld", title = "Group Activation", group = group, objs = objs, minus = minus,
+                           value = value, own = ld, found = value, ink = ACTIVATION.actionGlow("group_activation") })
+    if #group == 0 then
+        chat(string.format("%s has no Ready friend selected to group activate", fighter.name), rgbOf(COL.valueMod))
+    end
+    return value
+end
+
+-- The models the open check looks to, highlighted while it is open (on),
+-- or no longer (off): the friend whose Cl a Nerve Check uses, in Active's
+-- green; the friends a Group Activation is made for, in that action's
+-- colour (`ink`).
+function ACTIVATION.nerveLight(on)
+    local n = ACTIVATION.nerve
+    for _, o in ipairs(n and (n.objs or { n.obj }) or {}) do
+        if on then pcall(function() o.highlightOn(n.ink or rgbOf(statusDef("active").color)) end)
+        else pcall(function() o.highlightOff() end) end
+    end
+end
+
+-- The Nerve Check's Cl, by hand (within STAT.LIMITS): shown in the hand-set
+-- colour unless back at the Cl looked up. A Group Activation's Ld
+-- likewise, anywhere 2D6 can roll (2 to 12). With Falling Down's height
+-- in the panel: the inches (1 to ACTIVATION.FALL_MAX).
+function setNerveValue(n)
+    local nv = ACTIVATION.nerve
+    if not nv then return nil end
+    if type(n) == "table" then n = n.value end
+    if nv.test == "question" then return nil end      -- nothing to set
+    n = math.floor(tonumber(n) or nv.value or 0)
+    if nv.test == "height" then
+        nv.value = clamp(n, 1, ACTIVATION.FALL_MAX)
+    else
+        nv.value = nv.group and clamp(n, 2, 12) or STAT.clamp("Cl", n)
+        nv.hand = nv.value ~= nv.found or nil
+    end
+    ACTIVATION.draw()
+    return nv.value
+end
+
+-- Closes the Nerve Check panel, the highlight going with it. A check
+-- that waited under it (see ACTIVATION.openCheck) shows again.
+function closeNerve()
+    local n = ACTIVATION.nerve
+    ACTIVATION.nerveLight(false)
+    ACTIVATION.nerve = n and n.held or nil
+    ACTIVATION.nerveLight(true)
+    ACTIVATION.draw()
+    return true
+end
+
+-- The panel's X: the check is closed, unrolled. One something hangs on
+-- (`done`: Nerves Of Steel's) is failed that way, and what a question
+-- asked about is called off.
+function ACTIVATION.giveUp(player)
+    local n = ACTIVATION.nerve
+    if not n then return end
+    closeNerve()
+    if n.done then n.done(false, nil, player) end
+end
+
+-- A question's Continue (see ACTIVATION.lyingLow): the panel closes, and
+-- what it asked about goes on. Returns whether there was one to answer.
+function ACTIVATION.goOn(player)
+    local n = ACTIVATION.nerve
+    if not (n and n.test == "question") then return false end
+    closeNerve()
+    if n.done then n.done(true, nil, player) end
+    return true
+end
+
+-- Rolls the Nerve Check (the panel's die): 2D6 thrown as a stat test's (see
+-- throwDice), passed at or under the panel's Cl. The panel closes at once;
+-- the result is said (and shown over the stats) when the dice have settled,
+-- and a failed check makes the fighter Suppressed -- only an Active one can
+-- be: any other status stays. With Group Activation's Leadership check in the
+-- panel, that is rolled instead (see ACTIVATION.rollGroup). Nerves Of Steel's
+-- Cool check (see rangedHit) is a Nerve Check under its own name. Returns the
+-- test (its result comes later), nil when nothing is open.
+function rollNerve(player)
+    local n = ACTIVATION.nerve
+    if not n or fighter.outOfAction then return nil end
+    if n.test == "height" then return ACTIVATION.fall(player) end   -- nothing to roll yet: its OK
+    if n.test == "question" then ACTIVATION.goOn(player) return nil end   -- nor here: its Continue
+    closeNerve()
+    if not n.value then return nil end
+    if n.group then return ACTIVATION.rollGroup(n, player) end
+    local test = { stat = "Cl", dice = 2, target = n.value, under = true, nerve = true, from = n.from,
+                   steel = n.steel }
+    local color = colorOf(player)
+    local name = n.title or "Nerve Check"            -- Nerves Of Steel's is the same check
+    local title = string.format("%s (%d)", name, n.value)
+    ACTIVATION.rolling(title)
+    throwDice(2, color, function(faces, digital)
+        local total = 0
+        for _, f in ipairs(faces) do total = total + f end
+        test.faces, test.total, test.digital = faces, total, digital
+        test.passed = statTestPasses(test, total)
+        -- "Nerve Check (8, Boss's Cl): 3 + 4 = 7" in the check's colour
+        local whose = n.hand and ", set by hand" or n.from and string.format(", %s's Cl", n.from) or ""
+        ACTIVATION.say(string.format("%s (%d%s)", name, n.value, whose), faces, total,
+            { ink = ACTIVATION.checkInk(test), color = color, digital = digital })
+        ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hl = ACTIVATION.checkInk(test) }
+        if not test.passed and not fighter.outOfAction and fighter.status == "active" then
+            setStatus("suppressed")
+        elseif n.steel and test.passed then
+            chat(string.format("%s keeps their nerve -- not Suppressed", fighter.name), rgbOf(COL.valueUp))
+        end
+        onNerveRolled(player, test)
+    end, "d6", title)
+    return test
+end
+
+-- Rolls Group Activation's Leadership check `n` (the panel's state, see
+-- groupActivation): 2D6 at or under its Ld, thrown and shown as a Nerve
+-- Check's. Passed, every friend it was made for that is still Ready and
+-- within CFG.groupRange (as they stand now, see ACTIVATION.groupOf) is
+-- group activated -- CFG.groupMark after its name until it activates (its
+-- own card's setGroupActivated) -- said in Active's green and flashed on
+-- each in the action's colour; those too far away are named too. Failed,
+-- nothing more happens -- nor is anything said about range. Returns the
+-- test (its result comes later).
+function ACTIVATION.rollGroup(n, player)
+    local test = { stat = "Ld", dice = 2, target = n.value, under = true, group = true }
+    local color = colorOf(player)
+    local title = string.format("Group Activation (%d)", n.value)
+    ACTIVATION.rolling(title)
+    throwDice(2, color, function(faces, digital)
+        local total = 0
+        for _, f in ipairs(faces) do total = total + f end
+        test.faces, test.total, test.digital = faces, total, digital
+        test.passed = statTestPasses(test, total)
+        -- "Group Activation (Ld 6, -1 for 2 fighters): 3 + 2 = 5" in the check's colour
+        local how = n.hand and ", set by hand"
+                    or n.minus > 0 and string.format(", -%d for %d fighters", n.minus, #n.group) or ""
+        ACTIVATION.say(string.format("Group Activation (Ld %d%s)", n.value, how), faces, total,
+            { ink = ACTIVATION.checkInk(test), color = color, digital = digital })
+        ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hl = ACTIVATION.checkInk(test) }
+        local taken, far = {}, {}
+        if test.passed and not fighter.outOfAction then
+            local near
+            near, far = ACTIVATION.groupOf(n.objs)
+            for _, o in ipairs(near) do
+                local ok, on = ACTIVATION.ask(o.obj, "setGroupActivated", { value = true, by = fighter.name })
+                if ok and on == true then taken[#taken + 1] = o end
+            end
+        end
+        if #taken > 0 then
+            chat(string.format("%s %s group activated by %s", ACTIVATION.nameList(taken),
+                #taken == 1 and "is" or "are", fighter.name), rgbOf(statusDef("active").color))
+            for _, o in ipairs(taken) do flash(o.obj, ACTIVATION.actionGlow("group_activation")) end
+        end
+        if #far > 0 then
+            chat(string.format('%s %s more than %g" from %s -- not group activated', ACTIVATION.nameList(far),
+                #far == 1 and "is" or "are", CFG.groupRange or 3, fighter.name), rgbOf(COL.valueMod))
+        end
+        test.activated = {}
+        for i, o in ipairs(taken) do test.activated[i] = o.name end
+        onGroupRolled(player, test)
+    end, "d6", title)
+    return test
+end
+
+-- What the fighter's gang adds to the die of its Agility tests
+-- (CFG.agilityGang; see ACTIVATION.gangMod).
+function ACTIVATION.agilityMod()
+    return ACTIVATION.gangMod(CFG.agilityGang)
+end
+
+-- What a gang rule `g` = { type, mod, unless } adds for this fighter:
+-- `mod` for a gang of that `type` -- looked for, in any case, in
+-- fighter.gangType, the roster's line under the gang's name ("House Escher
+-- (Malstrain Corrupted)") -- unless that also names any of `unless`.
+-- Returns the number (0 for none) and the type it is for.
+function ACTIVATION.gangMod(g)
+    local mine = tostring(fighter.gangType or ""):lower()
+    local want = type(g) == "table" and tostring(g.type or ""):lower() or ""
+    if want == "" or not mine:find(want, 1, true) then return 0 end
+    for _, u in ipairs(type(g.unless) == "table" and g.unless or {}) do
+        if mine:find(tostring(u):lower(), 1, true) then return 0 end
+    end
+    return math.floor(tonumber(g.mod) or 0), tostring(g.type)
+end
+
+-- An Agility test: one D6, thrown at once for `player`, passed on
+-- CFG.agility (4) or more -- with what the fighter's gang adds to the die
+-- (ACTIVATION.agilityMod: House Escher's +1), and `o.mod`, what a script
+-- says. o = { why = what it is for (said with the result), done = what
+-- hangs on it: called (passed, test, player) once it is rolled, after = a
+-- roll still on show, which it waits for (see ACTIVATION.later), mod }.
+-- Thrown and shown as a stat test's, the total at the panel's right end
+-- when something was added; said in the test's colour: "Kage - Agility
+-- Test (4+, Spring Up): 3", "Kage - Agility Test (4+, Spring Up, House
+-- Escher +1): 3 + 1 = 4". Then what hangs on it follows, and the
+-- onAgilityRolled stub hears of it. Returns the test (its result comes
+-- later), nil when Out of Action.
+function ACTIVATION.agility(o, player)
+    if fighter.outOfAction then return nil end
+    o = o or {}
+    local need = clamp(math.floor(tonumber(CFG.agility) or 4), 2, 6)
+    local bonus, gang = ACTIVATION.agilityMod()
+    local mod = bonus + math.floor(tonumber(o.mod) or 0)
+    local test = { need = need, mod = mod, why = o.why, gang = bonus ~= 0 and gang or nil }
+    local why = (o.why and ", " .. o.why or "") .. (bonus ~= 0 and string.format(", %s %+d", gang, bonus) or "")
+    local title = string.format("Agility Test (%d+)", need)
+    ACTIVATION.later(o.after, function()
+        if fighter.outOfAction then return end
+        ACTIVATION.rolling(title)
+        throwDice(1, colorOf(player), function(faces, digital)
+            local f = faces[1] or 1
+            test.face, test.total, test.digital = f, f + mod, digital
+            test.passed = test.total >= need
+            local ink = test.passed and COL.valueUp or COL.valueMod
+            local body = mod == 0 and tostring(f)
+                         or string.format("%d %s %d = %d", f, mod > 0 and "+" or "-", math.abs(mod), test.total)
+            chat(string.format("%s - Agility Test (%d+%s): %s%s", fighter.name, need, why, body,
+                digital and " (rolled digitally)" or ""), rgbOf(ink))
+            ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hl = ink,
+                                 sum = mod ~= 0 and ("∑" .. test.total) or nil, sumInk = ink }
+            if o.done then o.done(test.passed, test, player) end
+            onAgilityRolled(player, test)
+        end, "d6", title)
+    end)
+    return test
+end
+
+-- The Agility test (A's Special tab), by hand: rolled at once for
+-- `player`, nothing hanging on it -- the result is said and shown, the
+-- rest is the players'. `mod`: what a script adds to its die. From other
+-- scripts: obj.call("agilityTest"). Returns the test (its result comes
+-- later), nil when Out of Action.
+function agilityTest(mod, player)
+    if type(mod) == "table" then mod = mod.value end
+    return ACTIVATION.agility({ mod = mod }, player)
+end
+
+-- An action that boosts the fighter's stats has just been taken (`a`, its
+-- `boost` written as mods: the Stimm-Slug's +2 M, S and T): they are
+-- changed from now until the fighter is next activated (fighter.boosted,
+-- by the action's key -- see STAT.gives, ACTIVATION.comedown). Said in
+-- `rgb`: "Kage - Stimm-Slug: +2 M, +2 S, +2 T until their next
+-- activation".
+function ACTIVATION.boost(a, rgb)
+    fighter.boosted = fighter.boosted or {}
+    fighter.boosted[a.key] = true
+    local parts = {}
+    for _, k in ipairs({ "M", "WS", "BS", "S", "T", "W", "I", "A", "Sv", "Ld", "Cl", "Wil", "Int" }) do   -- as a statline reads
+        local n = tonumber(a.boost[k]) or 0
+        if n ~= 0 then parts[#parts + 1] = string.format("%+d %s", n, k) end
+    end
+    drawStats()
+    chat(string.format("%s - %s: %s until their next activation", fighter.name, a.label, table.concat(parts, ", ")), rgb)
+    return true
+end
+
+-- Insanity (see activate): a fighter with the condition has one D6 thrown
+-- for `player` as it activates, titled "Insanity" in the bar and said
+-- "Kal - Insanity: 4" -- what the number does is up to the players. `go`
+-- runs once the die has shown (ACTIVATION.later), at once without the
+-- condition. The onInsanityRolled stub hears of it.
+function ACTIVATION.insane(player, go)
+    if conditionCount("insanity") <= 0 then return go() end
+    local title, color = "Insanity", colorOf(player)
+    ACTIVATION.rolling(title)
+    throwDice(1, color, function(faces, digital)
+        local f = faces[1] or 1
+        ACTIVATION.showDice{ title = title, kind = "d6", faces = { f } }
+        ACTIVATION.say(title, { tostring(f) }, f, { color = color, digital = digital })
+        onInsanityRolled(player, { face = f, digital = digital })
+        ACTIVATION.later(ACTIVATION.roll, go)
+    end, "d6", title)
+end
+
+-- The fighter is activated again, and what boosted its stats wears off
+-- (fighter.boosted, see ACTIVATION.boost) -- at a price, for wargear that
+-- says `reaction` (the Stimm-Slug Stash: { roll = 1, wounds = 1 }): a D6
+-- each, thrown at once for `player` and shown as every roll here -- on
+-- `roll` or less a bad reaction, `wounds` lost. "Kage - Stimm-Slug (2+):
+-- 1 -- a bad reaction, loses 1 wound" in orange, "... 4 -- wears off, no
+-- harm done" in green. `go` runs when all that is settled -- once the dice
+-- have had their time over the stats (ACTIVATION.later) -- or at once,
+-- with nothing to roll. The onBoostEnded stub hears of every die.
+function ACTIVATION.comedown(player, go)
+    local was = fighter.boosted
+    fighter.boosted = nil
+    if type(was) ~= "table" or next(was) == nil then return go() end
+    drawStats()
+    local due = {}
+    for _, a in ipairs(select(2, SKILL.split())) do
+        if was[a.key] then
+            if type(a.reaction) == "table" then due[#due + 1] = a
+            else chat(string.format("%s - %s wears off", fighter.name, a.label)) end
+        end
+    end
+    if #due == 0 then return go() end
+    local function limit(a) return clamp(math.floor(tonumber(a.reaction.roll) or 1), 1, 5) end
+    local title = #due == 1 and string.format("%s (%d+)", due[1].label, limit(due[1]) + 1) or "Bad Reactions"
+    ACTIVATION.rolling(title)
+    throwDice(#due, colorOf(player), function(faces, digital)
+        local hls, lost = {}, 0
+        for i, a in ipairs(due) do
+            local f = faces[i] or 1
+            local bad = f <= limit(a)
+            local had = math.max(0, (tonumber(fighter.wounds.current) or 0) - lost)
+            local wounds = bad and math.min(had, math.max(0, math.floor(tonumber(a.reaction.wounds) or 1))) or 0
+            hls[i] = bad and COL.valueMod or COL.valueUp
+            chat(string.format("%s - %s (%d+): %d -- %s%s", fighter.name, a.label, limit(a) + 1, f,
+                not bad and "wears off, no harm done"
+                or had <= 0 and "a bad reaction, already at 0 wounds"
+                or string.format("a bad reaction, loses %d wound%s", wounds, wounds == 1 and "" or "s"),
+                digital and " (rolled digitally)" or ""), rgbOf(hls[i]))
+            lost = lost + wounds
+            onBoostEnded(player, { key = a.key, label = a.label, face = f, bad = bad, wounds = wounds, digital = digital })
+        end
+        ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hls = hls }
+        if lost > 0 and not fighter.outOfAction then setWounds((tonumber(fighter.wounds.current) or 0) - lost) end
+        ACTIVATION.later(ACTIVATION.roll, go)
+    end, "d6", title)
+end
+
+-- Spring Up (see activate): the fighter was Suppressed as it activated,
+-- and makes an Agility test, for `player`. Passed, the action that cost it
+-- is back -- both to take, A no longer shown as lost; failed, it goes on
+-- with one. Only while that activation lasts.
+function ACTIVATION.spring(player)
+    return ACTIVATION.agility({ why = "Spring Up", done = function(passed)
+        if not (passed and fighter.activation == "active" and fighter.lostAction) then return end
+        fighter.lostAction = nil
+        fighter.actionsLeft = math.min(2, fighter.actionsLeft + 1)
+        drawReady()
+        drawActions()
+        chat(string.format("%s springs up -- %d action%s left", fighter.name, fighter.actionsLeft,
+            fighter.actionsLeft == 1 and "" or "s"), rgbOf(statusDef("active").color))
+        onActionsChanged(fighter.actionsLeft)
+    end }, player)
+end
+
+-- ── Wyrd powers ──────────────────────────────────────────────────────
+-- A Wyrd's powers are skills that are actions (type "wyrd"; the cost of a
+-- Continuous one reads "F/C", "S/C": the "/C"), taken from A's Special tab.
+-- Everything they say in chat is said in purple (COL.wyrdInk, see
+-- ACTIVATION.purple). The fighter's state is fighter.wyrd, saved with it:
+--   power        the key of the Continuous power in effect (only one at a
+--                time; its name under the stats is purple, "⏳" before it, and the
+--                fighter has the condition Maintaining Power),
+--   cast         it was cast in this activation,
+--   held         a Maintain Control passed in this activation: the power
+--                outlasts the end of it (a power lasts through the end of an
+--                activation only so; CFG.powersLastNext lets one just cast
+--                last through the end of the activation it was cast in),
+--   concentrate  Concentrate was used: +CFG.concentrateMod to the
+--                Willpower checks to manifest powers until this activation
+--                ends,
+--   locked       Maintain Control (F) was used: nothing more can be cast
+--                this turn, so every Wyrd action is dimmed,
+--   hexed        whom the power in effect does something to (GUID -> the
+--                id it is known by on that card, see wyrdHex), so it can be
+--                taken back when the power ends,
+--   flaming, choosing  Flaming Weapon: the name of the weapon set alight /
+--                that it waits for one to be picked (see ACTIVATION.flame),
+--   visions      Maddening Visions cast this turn (see
+--                ACTIVATION.visionsCheck).
+-- What the powers do once manifested: see ACTIVATION.manifest.
+
+-- Says `msg` in chat, in purple.
+function ACTIVATION.purple(msg) chat(msg, rgbOf(COL.wyrdInk)) end
+
+-- Whether this fighter can use Wyrd powers at all right now: a Wyrd (its
+-- category), or anyone with a Wyrd power among its skills -- and not
+-- Seriously Injured or Out of Action, which disable them (0 wounds doesn't).
+function ACTIVATION.wyrdCan()
+    if fighter.outOfAction or fighter.status == "seriously_injured" then return false end
+    if fighter.category == "wyrd" then return true end
+    return SKILL.hasWyrd()
+end
+
+-- The fighter's Wyrd state table, made when first needed (see above).
+function ACTIVATION.wyrdState()
+    if type(fighter.wyrd) ~= "table" then fighter.wyrd = {} end
+    return fighter.wyrd
+end
+
+-- The condition Maintaining Power is on while a Continuous power is in
+-- effect, and off when none is.
+function ACTIVATION.wyrdMark()
+    local on = type(fighter.wyrd) == "table" and fighter.wyrd.power ~= nil
+    if (conditionCount("maintaining_power") > 0) ~= on and indexOf(CONDITIONS, "maintaining_power") then
+        setCondition("maintaining_power", on)
+    end
+end
+
+-- A change to that state, drawn: the power's name under the stats, the
+-- condition, and the actions (dimmed after Maintain Control (F)) -- and
+-- what the power in effect does to the fighter: its stats and weapons
+-- (Quickening, Warp Strength's L), and the card built again when a power
+-- arms it (Force Blast) or sets a weapon alight (Flaming Weapon), or no
+-- longer does.
+function ACTIVATION.wyrdDraw()
+    ACTIVATION.wyrdMark()
+    SKILL.drawWyrd()
+    drawActions()
+    local fire = ACTIVATION.fireOf()
+    if SKILL.arm(fighter) or fire ~= ACTIVATION.fireShown then
+        ACTIVATION.fireShown = fire
+        refresh()
+        return
+    end
+    drawStats()
+    TRAIT_RULES.drawWeapons()
+end
+
+-- The fighter's Wyrd power `key` as an action entry (see SKILL.split), or nil.
+function ACTIVATION.powerOf(key)
+    for _, a in ipairs(select(2, SKILL.split())) do
+        if a.key == key and a.type == "wyrd" and a.kind == "skill" then return a end
+    end
+end
+
+-- Whether action entry `a` is Continuous: its cost ends in "/C".
+function ACTIVATION.continuous(a) return tostring(a.cost or ""):upper():find("/C", 1, true) ~= nil end
+
+-- The power in effect, which Maintain Control can maintain -- its action
+-- entry -- or nil.
+function ACTIVATION.maintainable()
+    local w = fighter.wyrd
+    return type(w) == "table" and w.power and ACTIVATION.powerOf(w.power) or nil
+end
+
+-- Why Wyrd action `a` can't be taken now (said in purple, nothing spent),
+-- or nil when it can: this fighter can't use Wyrd powers right now, or
+-- Maintain Control has no Continuous power in effect to maintain -- or isn't
+-- in an activation, which is what it holds the power through.
+function ACTIVATION.wyrdRefuses(a)
+    if not ACTIVATION.wyrdCan() then
+        return string.format("%s can't use Wyrd powers right now", fighter.name)
+    end
+    if a.key == "maintain_control_s" or a.key == "maintain_control_f" then
+        if not ACTIVATION.maintainable() then
+            return string.format("%s has no Continuous power in effect -- nothing to maintain", fighter.name)
+        elseif fighter.activation ~= "active" then
+            return string.format("%s can only maintain a power during their activation", fighter.name)
+        end
+    end
+    return nil
+end
+
+-- The power in effect ends (said): the state keeps nothing of it, and what
+-- it did to other fighters is taken back (ACTIVATION.unhex) -- the weapon
+-- it set alight goes out.
+function ACTIVATION.wyrdExpire(how)
+    local w = fighter.wyrd
+    if type(w) ~= "table" or not w.power then return end
+    local a = ACTIVATION.powerOf(w.power)
+    ACTIVATION.unhex(w)
+    w.power, w.cast, w.held, w.flaming, w.choosing = nil, nil, nil, nil, nil
+    ACTIVATION.purple(string.format("%s's %s ends%s", fighter.name, a and a.label or "Wyrd power", how or ""))
+end
+
+-- The fighter's activation begins: nothing is left of the last one's
+-- Concentrate, Maintain Control (F) or Maintain Control. A power still in
+-- effect goes on through this activation.
+function ACTIVATION.wyrdStart()
+    local w = fighter.wyrd
+    if type(w) ~= "table" then return end
+    w.cast, w.held, w.concentrate, w.locked = nil, nil, nil, nil
+    if next(w) == nil then fighter.wyrd = nil end
+    ACTIVATION.wyrdDraw()
+end
+
+-- The activation is over. A power in effect goes on if a Maintain Control
+-- passed in it (`held`) -- or, with CFG.powersLastNext, if it was cast in it
+-- -- and ends otherwise. Concentrate and Maintain Control (F) are over.
+function ACTIVATION.wyrdEnd()
+    local w = fighter.wyrd
+    if type(w) ~= "table" then return end
+    if w.power and not (w.held or (w.cast and CFG.powersLastNext)) then
+        ACTIVATION.wyrdExpire(" with their activation")
+    end
+    w.cast, w.held, w.concentrate, w.locked = nil, nil, nil, nil
+    if next(w) == nil then fighter.wyrd = nil end
+    ACTIVATION.wyrdDraw()
+end
+
+-- The fighter can't keep anything going any more (Seriously Injured, Out
+-- of Action): its power ends and all the rest is forgotten.
+function ACTIVATION.wyrdDrop()
+    if type(fighter.wyrd) ~= "table" then return end
+    ACTIVATION.wyrdExpire()
+    fighter.wyrd = nil
+    ACTIVATION.wyrdDraw()
+end
+
+-- What is in the Wyrd state: { power = key of the Continuous power in
+-- effect (nil for none), cast, held, concentrate, locked, flaming (the
+-- name of the weapon Flaming Weapon set alight), choosing (it waits for
+-- one to be picked), visions (Maddening Visions this turn) } (see above),
+-- and `hexes`: the other fighters' powers on this one (see wyrdHex).
+function getWyrd()
+    local w = fighter.wyrd or {}
+    return { power = w.power, cast = w.cast == true, held = w.held == true,
+             concentrate = w.concentrate == true, locked = w.locked == true,
+             flaming = w.flaming, choosing = w.choosing == true, visions = w.visions ~= nil,
+             hexes = RULES.copy(fighter.hexes or {}) }
+end
+
+-- Concentrate (S): +CFG.concentrateMod to this fighter's Willpower checks to
+-- manifest powers until its activation ends.
+function ACTIVATION.concentrate()
+    local w = ACTIVATION.wyrdState()
+    local mod = tonumber(CFG.concentrateMod) or 1
+    ACTIVATION.purple(w.concentrate
+        and string.format("%s is concentrating already (%+d)", fighter.name, mod)
+        or string.format("%s concentrates -- %+d to Willpower checks to manifest powers until their activation ends",
+                         fighter.name, mod))
+    w.concentrate = true
+end
+
+-- Casting a Wyrd power (`a`, its action entry -- see useAction, which has
+-- already spent its action and said it): every power needs a Willpower
+-- check to manifest, but the three actions every Wyrd has (Maintain
+-- Control, Concentrate). First an enemy Wyrd may try to disrupt it (see
+-- ACTIVATION.disrupter and disruptCast: the enemy's card rolls its own
+-- Willpower check and answers through disruptResult): a natural 2 and the
+-- power is not manifested at all -- the caster needn't roll; a passed
+-- check takes CFG.disruptMod off the caster's own check; a failed one does
+-- nothing (a natural 12 is a fail, too). Then the caster's Willpower check
+-- (2D6 at or under Wil, with Concentrate's bonus and the disrupt's
+-- penalty added to Wil, however far that takes it past the stat's limits;
+-- the bar's title reads "Manifesting: Willpower (7) - 2"): a natural 2
+-- always manifests, a natural 12 never does -- and either costs the caster
+-- Perils of the Warp, which the bar's title says and chat too. A
+-- manifested Continuous power stays in effect (see ACTIVATION.wyrdEnd and
+-- ACTIVATION.maintain; the condition Maintaining Power goes on): a
+-- different one in effect before it ends. Said in purple throughout; the
+-- onPowerCast stub hears of the outcome. What the power does once
+-- manifested: see ACTIVATION.manifest -- a power aimed at an enemy is
+-- aimed now, as it is cast (the one the player has selected, within its
+-- range; none: said at once, and the power will do nothing).
+function ACTIVATION.cast(a, player)
+    local color = colorOf(player)
+    local item, aim = ACTIVATION.item(a.key), nil
+    if item and item.target then
+        local why
+        aim, why = ACTIVATION.aimFor(item, player)
+        if not aim then
+            ACTIVATION.purple(string.format("%s's %s: %s -- it will do nothing", fighter.name, a.label, why))
+        end
+    end
+    local function ended(r)
+        r.key, r.label, r.continuous = a.key, a.label, ACTIVATION.continuous(a)
+        onPowerCast(player, r)
+    end
+    -- the caster's own check, `disrupted`: by the enemy's name
+    local function attempt(disrupted)
+        local w = ACTIVATION.wyrdState()
+        local conc = w.concentrate and (tonumber(CFG.concentrateMod) or 1) or 0
+        local pen = disrupted and (tonumber(CFG.disruptMod) or -2) or 0
+        local why = a.label .. (disrupted and string.format(", disrupted %+d", pen) or "")
+                    .. (conc ~= 0 and string.format(", Concentrate %+d", conc) or "")
+        local mods = {}
+        if pen ~= 0 then mods[#mods + 1] = pen end
+        if conc ~= 0 then mods[#mods + 1] = conc end
+        local test = ACTIVATION.rollTest("Wil", player, { why = why, mods = mods, natural = true, label = "Manifesting",
+            ink = COL.wyrdInk, done = function(test, roll)
+                local ok, n = test.passed == true, test.natural
+                if fighter.outOfAction or fighter.status == "seriously_injured" then ok = false end
+                ACTIVATION.purple(string.format("%s %s %s%s", fighter.name, ok and "manifests" or "fails to manifest", a.label,
+                    n and string.format(" (a natural %d)", n) or ""))
+                if n then ACTIVATION.purple(string.format("%s suffers Perils of the Warp!", fighter.name)) end
+                if ok and ACTIVATION.continuous(a) then
+                    local st = ACTIVATION.wyrdState()
+                    if st.power and st.power ~= a.key then ACTIVATION.wyrdExpire() end
+                    st.power, st.cast, st.held = a.key, true, nil
+                    ACTIVATION.wyrdDraw()
+                end
+                if ok then ACTIVATION.manifest(a, player, aim, roll) end
+                ended({ manifested = ok, natural = n, disrupted = disrupted or false, face = test.faces and test.total })
+            end })
+        if not test then
+            ACTIVATION.purple(string.format("%s has no Willpower to cast %s with", fighter.name, a.label))
+            ended({ manifested = false, disrupted = disrupted or false })
+        end
+    end
+    local foe = ACTIVATION.wyrdCan() and ACTIVATION.disrupter()
+    if not foe then return attempt(false) end
+    -- an enemy Wyrd may disrupt: its card rolls, and tells this one
+    local pending = ACTIVATION.disrupts
+    if not pending then pending = { n = 0 }; ACTIVATION.disrupts = pending end
+    pending.n = pending.n + 1
+    local token = pending.n
+    local okG, guid = pcall(function() return self.getGUID() end)
+    pending[token] = function(res)
+        local foeName = tostring(res.name or foe.name)
+        if res.passed and res.natural == 2 then
+            ACTIVATION.purple(string.format("%s disrupts %s's %s (a natural 2) -- it is not manifested",
+                foeName, fighter.name, a.label))
+            ended({ manifested = false, disrupted = true, disruptedBy = foeName, natural = nil })
+        elseif res.passed then
+            ACTIVATION.purple(string.format("%s disrupts %s's %s -- %s's Willpower check is at %+d", foeName,
+                fighter.name, a.label, fighter.name, tonumber(CFG.disruptMod) or -2))
+            attempt(true)
+        else
+            ACTIVATION.purple(string.format("%s fails to disrupt %s's %s", foeName, fighter.name, a.label))
+            attempt(false)
+        end
+    end
+    local asked, took = ACTIVATION.ask(foe.obj, "disruptCast", { by = okG and guid or nil, token = token,
+        caster = fighter.name, power = a.label, color = color })
+    if not (asked and took) then            -- a card that can't: nobody disrupts
+        pending[token] = nil
+        return attempt(false)
+    end
+    ACTIVATION.purple(string.format("%s tries to disrupt %s's %s", foe.name, fighter.name, a.label))
+    flash(foe.obj, rgbOf(COL.wyrdInk))
+    -- an answer that never comes (the dice and the card have waited long enough): cast undisrupted
+    Wait.time(function()
+        local f = pending[token]
+        if not f then return end
+        pending[token] = nil
+        attempt(false)
+    end, (tonumber(CFG.diceWait) or 45) + 15)
+end
+
+-- The answer of the enemy Wyrd that was asked to disrupt a cast (see
+-- disruptCast): t = { token, name, passed, natural } -- passed: it made its
+-- Willpower check (a natural 2 is a pass, a natural 12 a fail), natural:
+-- 2 or 12 for one of those. Carries on with the cast that was waiting for
+-- it. Returns whether one was.
+function disruptResult(t)
+    local pending = ACTIVATION.disrupts
+    local f = type(t) == "table" and pending and pending[t.token]
+    if not f then return false end
+    pending[t.token] = nil
+    f(t)
+    return true
+end
+
+-- An enemy Wyrd's cast is to be disrupted by this fighter (see
+-- ACTIVATION.cast, which asks): t = { by = the caster's GUID, token,
+-- caster, power, color = the caster's player, whose dice these are }. Makes
+-- the Willpower check (2D6 at or under Wil, natural 2 a pass and natural 12
+-- a fail), said in purple -- Perils of the Warp with either natural number,
+-- said here too -- and, once the dice have shown, tells the caster's card
+-- (disruptResult). Returns whether it is checking (false: it can't -- not a
+-- Wyrd, Seriously Injured, Out of Action, no Willpower).
+function disruptCast(t)
+    if type(t) ~= "table" or not ACTIVATION.wyrdCan() or not statNumber("Wil") then return false end
+    local title = tostring(t.power or "Wyrd power")
+    local test = ACTIVATION.rollTest("Wil", t.color, { why = title, natural = true, label = "Disrupt", ink = COL.wyrdInk,
+        done = function(test, roll)
+            if test.natural then
+                ACTIVATION.purple(string.format("%s suffers Perils of the Warp!", fighter.name))
+            end
+            ACTIVATION.later(roll, function()
+                local okO, caster = pcall(function() return t.by and getObjectFromGUID(t.by) end)
+                if okO and caster then
+                    ACTIVATION.ask(caster, "disruptResult", { token = t.token, name = fighter.name,
+                        passed = test.passed == true, natural = test.natural })
+                end
+            end)
+        end })
+    return test ~= nil
+end
+
+-- Maintain Control (`a`: its (S) or (F) action, see useAction, which has
+-- spent it and checked there is a Continuous power in effect and an
+-- activation under way -- ACTIVATION.maintainable): a Willpower check, the
+-- bar's title "Maintaining: Willpower (7) + 3" -- (S) with CFG.maintainMod
+-- added to Wil, (F) with nothing -- passed, the power is held through the
+-- end of this activation (see ACTIVATION.wyrdEnd), else it ends with it.
+-- (F) also dims every Wyrd action, used well or not: nothing more can be
+-- cast this turn.
+function ACTIVATION.maintain(a, player)
+    local w = ACTIVATION.wyrdState()
+    local power = ACTIVATION.maintainable()
+    if a.key == "maintain_control_f" then w.locked = true end
+    ACTIVATION.wyrdDraw()
+    if not power then return end
+    local mod = a.key == "maintain_control_s" and (tonumber(CFG.maintainMod) or 3) or 0
+    local test = ACTIVATION.rollTest("Wil", player, { mods = mod ~= 0 and { mod } or {}, ink = COL.wyrdInk, label = "Maintaining",
+        why = power.label .. ", Maintain Control" .. (mod ~= 0 and string.format(" %+d", mod) or ""),
+        done = function(test)
+            -- the activation may have ended while the dice rolled
+            if fighter.wyrd ~= w or w.power ~= power.key or fighter.activation ~= "active" then return end
+            if test.passed then
+                w.held = true
+                ACTIVATION.purple(string.format("%s keeps control of %s until the end of their next activation", fighter.name, power.label))
+            else
+                ACTIVATION.purple(string.format("%s loses control of %s -- it ends with their activation", fighter.name, power.label))
+            end
+            ACTIVATION.wyrdDraw()
+        end })
+    if not test then
+        ACTIVATION.purple(string.format("%s has no Willpower to maintain %s with", fighter.name, power.label))
+    end
+end
+
+-- ── What a Wyrd power does ──────────────────────────────────────────────
+-- Once manifested, a power does what its entry in the rules says
+-- (`maintained`, `weapon`, `flaming`, `meleeL`, `target`, `area`, `aura`,
+-- `rerollHits`, `void`, `visions` -- see ACTIVATION.manifest). What it does
+-- to other fighters lives on their cards (fighter.hexes, see wyrdHex) or is
+-- read off this one's as it matters (engageInfo); what it does to its own
+-- Wyrd while in effect is worked out from fighter.wyrd.power (SKILL.live).
+
+-- The order a statline reads in, for saying what a power changes.
+ACTIVATION.STATLINE = { "M", "WS", "BS", "S", "T", "W", "I", "A", "Sv", "Ld", "Cl", "Wil", "Int" }
+
+-- The fighter's Wyrd power `key` as an item under the stats (SKILL.owned),
+-- with everything its entry says -- or nil.
+function ACTIVATION.item(key)
+    for _, it in ipairs(SKILL.owned()) do
+        if it.key == key and it.kind == "skill" and it.type == "wyrd" then return it end
+    end
+end
+
+-- The fighter's power in effect that says `field` (an item), or nil.
+function ACTIVATION.liveField(field)
+    for _, it in ipairs(SKILL.with(field)) do
+        if SKILL.live(it) then return it end
+    end
+end
+
+-- What a power of this fighter's is known by on other fighters' cards:
+-- this model's GUID and the power's key.
+function ACTIVATION.hexId(key)
+    local ok, g = pcall(function() return self.getGUID() end)
+    return tostring(ok and g or fighter.name) .. ":" .. tostring(key)
+end
+
+-- Stat changes as said in chat, better ones with a plus: { Sv = -1, Cl = 1 }
+-- -> "+1 Sv, +1 Cl"; { Cl = -1 } -> "-1 Cl".
+function ACTIVATION.modsText(mods)
+    local parts = {}
+    for _, k in ipairs(ACTIVATION.STATLINE) do
+        local n = tonumber((mods or {})[k]) or 0
+        if n ~= 0 then
+            parts[#parts + 1] = string.format("%+d %s", STAT.better(k, n) and math.abs(n) or -math.abs(n), k)
+        end
+    end
+    return table.concat(parts, ", ")
+end
+
+-- The auras of the power in effect, as other cards see them (engageInfo):
+-- a list of { id, label, side, range, mods, lend = { stat = this fighter's
+-- number as shown } } -- nil for none (no power with an `aura` in effect,
+-- or the fighter can't use its powers right now).
+function ACTIVATION.auraOf()
+    local it = ACTIVATION.wyrdCan() and ACTIVATION.liveField("aura")
+    if not it then return nil end
+    local a, lend = it.aura, nil
+    for _, k in ipairs(type(a.lend) == "table" and a.lend or {}) do
+        local n = statNumber(k)
+        if n then lend = lend or {}; lend[k] = n end
+    end
+    return { { id = ACTIVATION.hexId(it.key), label = it.name, side = a.side or "friends",
+               range = tonumber(a.range), mods = a.mods, lend = lend } }
+end
+
+-- Flaming Weapon: the trait melee profiles of weapon `w` gain (its
+-- `flaming`) while it is the one set alight and the power is in effect --
+-- nil otherwise. ACTIVATION.fireOf: which weapon that is and with what, as
+-- the card was built (it is built again when that changes, see
+-- ACTIVATION.wyrdDraw).
+function ACTIVATION.flameTrait(w)
+    local wy = fighter.wyrd
+    if not (w and type(wy) == "table" and wy.flaming and w.name == wy.flaming) then return nil end
+    local it = ACTIVATION.liveField("flaming")
+    return it and tostring(it.flaming) or nil
+end
+function ACTIVATION.fireOf()
+    local wy, it = fighter.wyrd, ACTIVATION.liveField("flaming")
+    if not (it and type(wy) == "table" and wy.flaming) then return nil end
+    return tostring(wy.flaming) .. "|" .. tostring(it.flaming)
+end
+-- The weapon in slot `slot` is the one Flaming Weapon sets alight (a left
+-- click on it while the power waits, or the only melee weapon there is).
+function ACTIVATION.flame(slot)
+    local w, wy, it = weaponAt(slot), fighter.wyrd, ACTIVATION.liveField("flaming")
+    if not (w and it and type(wy) == "table" and TRAIT_RULES.melee(w)) then return false end
+    wy.choosing, wy.flaming = nil, w.name
+    ACTIVATION.purple(string.format("%s's %s gains %s (%s)", fighter.name, TRAIT_RULES.name(w), it.flaming, it.name))
+    ACTIVATION.wyrdDraw()
+    return true
+end
+
+-- Everything this fighter's power in effect did to other fighters (`w`,
+-- fighter.wyrd: w.hexed, GUID -> the id it is known by there) is taken
+-- back from them.
+function ACTIVATION.unhex(w)
+    for guid, id in pairs((type(w) == "table" and w.hexed) or {}) do
+        local okS, me = pcall(function() return self.getGUID() end)
+        if okS and me == guid then
+            wyrdHex({ id = id, value = false })
+        else
+            local ok, obj = pcall(function() return getObjectFromGUID(guid) end)
+            if ok and obj then ACTIVATION.ask(obj, "wyrdHex", { id = id, value = false }) end
+        end
+    end
+    if type(w) == "table" then w.hexed = nil end
+end
+
+-- A power (`a`, its action entry) has just been manifested (see
+-- ACTIVATION.cast; a Continuous one is in effect already), and does what
+-- it says -- all said in purple:
+--   on its Wyrd while in effect: stats (`maintained`, see STAT.gives), a
+--     weapon (`weapon`, see SKILL.arm), melee L (`meleeL`), and for the
+--     enemies: ranged hits re-rolled (`rerollHits`, see
+--     ACTIVATION.attackDice), at Long range (`void`, see
+--     TRAIT_RULES.measure) -- one line says what;
+--   Flaming Weapon (`flaming`): its only melee weapon is set alight at
+--     once, else every melee weapon lights up purple until one is
+--     clicked (see onTriggerClick, ACTIVATION.flame);
+--   an aura (`aura`) on the fighters it reaches (ACTIVATION.auraPush);
+--   an area (`area`) at once, until the end of the turn (ACTIVATION.areaHex);
+--   Maddening Visions (`visions`), until the end of the turn
+--     (fighter.wyrd.visions, see ACTIVATION.visionsCheck);
+--   on the enemy aimed at as it was cast (`aim`, `target`): see
+--     ACTIVATION.hexTarget -- after the cast's dice (`roll`) have shown.
+function ACTIVATION.manifest(a, player, aim, roll)
+    local it = ACTIVATION.item(a.key)
+    if not it then return end
+    local P, name, st = ACTIVATION.purple, fighter.name, ACTIVATION.wyrdState()
+    local parts = {}
+    local stats = ACTIVATION.modsText(it.maintained)
+    if stats ~= "" then parts[#parts + 1] = stats end
+    if tonumber(it.meleeL) then parts[#parts + 1] = string.format("%+d L to melee weapons", tonumber(it.meleeL)) end
+    if type(it.weapon) == "table" and ACTIVATION.continuous(a) then
+        parts[#parts + 1] = "equipped with " .. tostring(it.weapon.name or it.name)
+    end
+    if it.rerollHits then parts[#parts + 1] = "enemies re-roll their ranged hits" end
+    if tonumber(it.void) then parts[#parts + 1] = string.format('at Long range to enemies within %s"', it.void) end
+    if #parts > 0 then
+        P(string.format("%s's %s: %s%s", name, it.name, table.concat(parts, ", "),
+            ACTIVATION.continuous(a) and " while it lasts" or ""))
+    end
+    if it.flaming then
+        local melee = {}
+        for i = 1, weaponCount() do
+            if TRAIT_RULES.melee(weaponAt(i)) then melee[#melee + 1] = i end
+        end
+        if #melee == 0 then
+            P(string.format("%s has no melee weapon for %s", name, it.name))
+        elseif #melee == 1 then
+            ACTIVATION.flame(melee[1])
+        else
+            st.choosing = true
+            P(string.format("%s: click a melee weapon to give it %s (%s)", name, tostring(it.flaming), it.name))
+            TRAIT_RULES.drawGlows()
+        end
+    end
+    if type(it.aura) == "table" then
+        local au, names = it.aura, ACTIVATION.auraPush()
+        local who = (au.side == "enemies" and "enemies" or au.side == "all" and "fighters" or "friends")
+                    .. (tonumber(au.range) and string.format(' within %s"', au.range) or "")
+        local what = {}
+        for _, k in ipairs(type(au.lend) == "table" and au.lend or {}) do
+            if statNumber(k) then what[#what + 1] = string.format("%s %d", k, statNumber(k)) end
+        end
+        local text = #what > 0 and string.format("%s may use %s's %s", who, name, table.concat(what, " and "))
+                     or string.format("%s to %s", ACTIVATION.modsText(au.mods), who)
+        P(string.format("%s's %s: %s while it lasts%s", name, it.name, text,
+            #names > 0 and " -- " .. ACTIVATION.nameList(names) or ""))
+    end
+    if type(it.area) == "table" then
+        local ar, names = it.area, ACTIVATION.areaHex(it)
+        local text = ar.oneAction and "one action when activated this round"
+                     or ACTIVATION.modsText(ar.mods) .. " until the end of the turn"
+        P(string.format("%s's %s: %s -- %s", name, it.name, text,
+            #names > 0 and ACTIVATION.nameList(names)
+            or string.format('nobody within %s"', tostring(ar.range or "range"))))
+    end
+    if type(it.visions) == "table" then
+        local key = tostring(it.visions.condition or "insanity")
+        local c = CONDITIONS[indexOf(CONDITIONS, key) or 0]
+        st.visions = { range = tonumber(it.visions.range) or 3, condition = key, label = it.name }
+        P(string.format('%s\'s %s: an enemy ending their activation within %s" of %s gains %s this turn', name, it.name,
+            tostring(st.visions.range), name, c and c.label or key))
+    end
+    if type(it.target) == "table" then ACTIVATION.hexTarget(it, aim, player, roll) end
+end
+
+-- A power aimed at an enemy (item `it`, its `target`; `aim` the enemy's
+-- table entry, taken as it was cast -- nil: nothing happens) does to it
+-- what it says, once the cast's dice (`roll`) have shown: a stat this
+-- Wyrd tests first (`roll`: Assail's BS -- failed, it misses); a hit
+-- (`hit`: Leech Essence) whose Wound roll this card makes; stats set
+-- before modifiers while in effect (`base`: Paroxysm -- given to it as a
+-- hex, taken back when the power ends); or the rest, which the enemy's
+-- own card does (wyrdTarget: Suppressed, its test, Out of Action ...).
+function ACTIVATION.hexTarget(it, aim, player, roll)
+    local tg, P = it.target, ACTIVATION.purple
+    if not aim then return end
+    local purple = rgbOf(COL.wyrdInk)
+    local function go()
+        if type(tg.hit) == "table" then
+            local s = tonumber(tg.hit.S)
+            P(string.format("%s's %s hits %s (S%s, AP %s, L%s)", fighter.name, it.name, aim.name, tostring(tg.hit.S or "-"),
+                tonumber(tg.hit.AP) and tonumber(tg.hit.AP) ~= 0 and tostring(tg.hit.AP) or "-", tostring(tg.hit.L or "-")))
+            flash(aim.obj, purple)
+            if s and aim.t then
+                local okG, guid = pcall(function() return aim.obj.getGUID() end)
+                local okS, mine = pcall(function() return self.getGUID() end)
+                local ap = tonumber(tg.hit.AP)
+                rollWounds({ hits = 1, s = s, t = aim.t, weapon = it.name, target = aim.name, by = fighter.name,
+                             guid = okG and guid or nil, from = okS and mine or nil,
+                             ap = ap and ap < 0 and -ap or 0 }, player)
+            end
+            return
+        end
+        if type(tg.base) == "table" then
+            local st = ACTIVATION.wyrdState()
+            local live = st.power == it.key
+            if live then ACTIVATION.unhex(st) end           -- cast again: the last enemy's goes
+            local id = ACTIVATION.hexId(it.key)
+            local ok, took = ACTIVATION.ask(aim.obj, "wyrdHex", { id = id,
+                value = { label = it.name, by = fighter.name, base = tg.base, turn = not live or nil } })
+            if not (ok and took) then return end
+            local okG, guid = pcall(function() return aim.obj.getGUID() end)
+            if live and okG and guid then st.hexed = { [guid] = id } end
+            local set = {}
+            for _, k in ipairs(ACTIVATION.STATLINE) do
+                local n = tonumber(tg.base[k])
+                if n then set[#set + 1] = string.format("%s %d%s", k, n, STAT_ROLLS[k] and not STAT_ROLLS[k].under and "+" or "") end
+            end
+            P(string.format("%s's %s: %s's %s before modifiers%s", fighter.name, it.name, aim.name, table.concat(set, " and "),
+                live and " while it lasts" or " until the end of the turn"))
+            flash(aim.obj, purple)
+            return
+        end
+        local ok = ACTIVATION.ask(aim.obj, "wyrdTarget", { by = fighter.name, power = it.name, color = colorOf(player),
+            suppress = tg.suppress, test = tg.test, ifReady = tg.ifReady, needReady = tg.needReady, fail = tg.fail,
+            needStatus = tg.needStatus, out = tg.out })
+        if ok then flash(aim.obj, purple) end
+    end
+    if not tg.roll then return ACTIVATION.later(roll, go) end
+    ACTIVATION.later(roll, function()
+        local test = ACTIVATION.rollTest(tostring(tg.roll), player, { why = it.name .. " vs " .. aim.name, ink = COL.wyrdInk,
+            done = function(test, r)
+                if test.passed then return ACTIVATION.later(r, go) end
+                P(string.format("%s's %s misses %s", fighter.name, it.name, aim.name))
+            end })
+        if not test then P(string.format("%s has no %s for %s", fighter.name, tostring(tg.roll), it.name)) end
+    end)
+end
+
+-- An enemy Wyrd's power aimed at this fighter (see ACTIVATION.hexTarget):
+-- t = { by = the Wyrd's name, power = its name, color = the Wyrd's
+-- player (whose dice these are), and what it does: needStatus (nothing
+-- unless the fighter is in that status), out (Out of Action), needReady
+-- (nothing unless it has its Ready marker), suppress (Suppressed -- only
+-- an Active fighter can be), test ("Cl", "Wil" -- a stat check --
+-- "agility" or "nerve": the Nerve Check's panel opens, and a failed check
+-- Suppresses as ever) -- with ifReady only while it is Ready -- and fail,
+-- what a failed test does: "unready" (it loses its Ready marker) or a
+-- condition's key (it gains it). Said in purple. Returns whether it was
+-- affected at all.
+function wyrdTarget(t)
+    if type(t) ~= "table" or fighter.outOfAction then return false end
+    local P, name = ACTIVATION.purple, fighter.name
+    local power, by = tostring(t.power or "a Wyrd power"), tostring(t.by or "an enemy Wyrd")
+    if t.needStatus and fighter.status ~= t.needStatus then
+        P(string.format("%s isn't %s -- %s does nothing", name, statusDef(t.needStatus).label, power))
+        return false
+    end
+    if t.out then
+        setOutOfAction({ value = true, why = string.format("%s by %s", power, by) })
+        return true
+    end
+    if t.needReady and fighter.activation ~= "ready" then
+        P(string.format("%s isn't Ready -- %s does nothing", name, power))
+        return false
+    end
+    if t.suppress then
+        if fighter.status == "active" then
+            setStatus({ key = "suppressed", quiet = true })
+            P(string.format("%s is Suppressed by %s's %s", name, by, power))
+        else
+            P(string.format("%s isn't Active -- %s's %s doesn't Suppress them", name, by, power))
+        end
+    end
+    local test = t.test
+    if test and t.ifReady and fighter.activation ~= "ready" then test = nil end
+    if not test then return true end
+    local function failed()
+        if t.fail == "unready" then
+            if fighter.activation == "ready" then
+                setReady(false)
+                P(string.format("%s loses their Ready marker (%s)", name, power))
+            end
+        elseif t.fail and indexOf(CONDITIONS, t.fail) then
+            setCondition(t.fail, true)
+            P(string.format("%s gains %s (%s)", name, CONDITIONS[indexOf(CONDITIONS, t.fail)].label, power))
+        end
+    end
+    if test == "nerve" then
+        P(string.format("%s must take a Nerve Check (%s)", name, power))
+        nerveCheck(t.color)
+    elseif test == "agility" then
+        ACTIVATION.agility({ why = power, done = function(passed) if not passed then failed() end end }, t.color)
+    elseif not ACTIVATION.rollTest(tostring(test), t.color, { why = power, ink = COL.wyrdInk,
+        done = function(res) if not res.passed then failed() end end }) then
+        P(string.format("%s has no %s to test -- %s does nothing", name, tostring(test), power))
+    end
+    return true
+end
+
+-- Another fighter's Wyrd power on this one, or taken off (t = { id = what
+-- that power is known by here, value = what it does -- false: taken off }):
+--   label, by   the power's name and its Wyrd's;
+--   mods        stat changes, as a condition's (Warp Shield, Aura Of
+--               Despair);
+--   base        stats set before any modifier (Paroxysm: BS and WS 6+);
+--   lend        stats this fighter may use where better than its own
+--               (Unbreakable Will: the Wyrd's Wil and Cl);
+--   oneAction   it takes one action when activated (Freeze Time);
+--   turn        it lasts until the end of the turn (see setReady);
+--   aura        it lasts while this fighter is within its Wyrd's reach (see
+--               ACTIVATION.auraPull).
+-- Kept in fighter.hexes, saved; the stats show it in purple. Returns
+-- whether anything was given or taken (a fighter Out of Action is given
+-- nothing).
+function wyrdHex(t)
+    if type(t) ~= "table" or t.id == nil then return false end
+    local id = tostring(t.id)
+    if type(t.value) ~= "table" then
+        if not (fighter.hexes and fighter.hexes[id]) then return false end
+        fighter.hexes[id] = nil
+        if next(fighter.hexes) == nil then fighter.hexes = nil end
+    else
+        if fighter.outOfAction then return false end
+        fighter.hexes = fighter.hexes or {}
+        fighter.hexes[id] = RULES.copy(t.value)
+    end
+    drawStats()
+    return true
+end
+
+-- The turn is over (the fighter is readied for the next, see setReady):
+-- the other fighters' powers that last until then go (Freeze Time, Warp
+-- Shield), and so do this one's Maddening Visions.
+function ACTIVATION.turnOver()
+    local changed = false
+    for id, h in pairs(fighter.hexes or {}) do
+        if h.turn then fighter.hexes[id], changed = nil, true end
+    end
+    if fighter.hexes and next(fighter.hexes) == nil then fighter.hexes = nil end
+    local w = fighter.wyrd
+    if type(w) == "table" and w.visions then
+        w.visions = nil
+        if next(w) == nil then fighter.wyrd = nil end
+    end
+    if changed then drawStats() end
+end
+
+-- The power that holds this fighter to one action when it activates
+-- (Freeze Time: a hex that says `oneAction`) -- its name -- or nil.
+function ACTIVATION.frozen()
+    for _, h in pairs(fighter.hexes or {}) do
+        if h.oneAction then return tostring(h.label or "a Wyrd power") end
+    end
+    return nil
+end
+
+-- The model has been put down: the auras of the Wyrds around it reach it
+-- or not (ACTIVATION.auraPull) -- and an aura of its own reaches whom it
+-- reaches from here (ACTIVATION.auraPush).
+function ACTIVATION.wyrdMoved()
+    if ACTIVATION.auraOf() then ACTIVATION.auraPush() end
+    ACTIVATION.auraPull()
+end
+
+-- A Continuous Wyrd power of this fighter's put in effect -- or ended -- by
+-- hand, with no Willpower check (a left click on its name under the stats;
+-- t = { key = the power's key, value = true / false, nil: the other way
+-- round }, `player` the one who clicked -- or ("quickening", true)): on, it
+-- takes the place of any other in effect and does what it does while in
+-- effect (see ACTIVATION.manifest -- with no enemy aimed at), counting as
+-- cast in this activation if one is under way (else it lasts through the next
+-- one, see ACTIVATION.wyrdEnd); the condition Maintaining Power comes and
+-- goes with it, and taking that off by hand ends it too (see setCondition).
+-- Said in purple. Returns whether it is in effect (nil for no such power).
+function setMaintained(t, player)
+    local key, on = t, player                   -- setMaintained("quickening", true)
+    if type(t) == "table" then key, on = t.key, t.value else player = nil end
+    local a = ACTIVATION.powerOf(tostring(key or ""))
+    if not (a and ACTIVATION.continuous(a)) then return nil end
+    local st = ACTIVATION.wyrdState()
+    if on == nil or type(on) ~= "boolean" then on = st.power ~= a.key end
+    if not on then
+        if st.power == a.key then
+            ACTIVATION.wyrdExpire(" (set by hand)")
+            ACTIVATION.wyrdDraw()
+        end
+        return false
+    end
+    if st.power == a.key then return true end
+    if not ACTIVATION.wyrdCan() then
+        ACTIVATION.purple(string.format("%s can't use Wyrd powers right now", fighter.name))
+        return false
+    end
+    if st.power then ACTIVATION.wyrdExpire() end
+    st.power, st.cast, st.held = a.key, fighter.activation == "active" or nil, nil
+    ACTIVATION.purple(string.format("%s maintains %s (set by hand)", fighter.name, a.label))
+    ACTIVATION.wyrdDraw()
+    ACTIVATION.manifest(a, player, nil, nil)
+    return true
+end
+
+-- The activation is over, and with it a question about an attack that was
+-- never answered -- not one about this fighter's cover (see takeSaves),
+-- which another fighter's attack asked.
+function ACTIVATION.endQuestion()
+    local n = ACTIVATION.nerve
+    if n and n.test == "question" and not n.cover then closeNerve() end
+end
+
+-- Falling Down (A's Special tab): its panel over the stats -- the Nerve
+-- Check's, under its own title -- asks how far the fighter falls: "Height"
+-- left of the first diamond, which holds the inches (a left click one
+-- more, a right click one fewer; `height` to start with, else the lowest
+-- fall that wounds), OK where the die is, and X, which calls it off. OK
+-- makes the fall (see ACTIVATION.fall). From other scripts:
+-- obj.call("fallingDown", 5). Returns the height shown (nil when Out of
+-- Action).
+--   A fighter with wargear that says `noFall` (a Grav Chute) doesn't fall:
+-- no panel, no test, nothing lost -- only said, in green. Returns 0.
+function fallingDown(height)
+    if fighter.outOfAction then return nil end
+    local chute = SKILL.with("noFall")[1]
+    if chute then
+        chat(string.format("%s has a %s -- a fall does them no harm", fighter.name, chute.name), rgbOf(COL.valueUp))
+        return 0
+    end
+    if type(height) == "table" then height = height.value end
+    local h = clamp(math.floor(tonumber(height) or (CFG.fallLevels or {})[1] or 3), 1, ACTIVATION.FALL_MAX)
+    ACTIVATION.openCheck({ test = "height", title = "Falling Down", stat = "Height", value = h })
+    return h
+end
+
+-- Falling Down's OK: the fighter falls the height in the panel, which
+-- closes, and its Agility test is rolled at once: what the fall does
+-- follows from it (see ACTIVATION.land). Returns the height (nil with no
+-- height in the panel).
+function ACTIVATION.fall(player)
+    local n = ACTIVATION.nerve
+    if not (n and n.test == "height") or fighter.outOfAction then return nil end
+    closeNerve()
+    local height = n.value
+    ACTIVATION.agility({ why = "Falling Down", done = function(passed, test, who)
+        ACTIVATION.land(height, passed, test, who or player)
+    end }, player)
+    return height
+end
+
+-- What a fall of `height` inches does, its Agility test made (`passed`;
+-- `test` its roll, if there was one). A passed test takes
+-- CFG.fallSave (3) inches off the height; what is left, if anything, is
+-- looked up in CFG.fallLevels (3, 6):
+--   less than 3"   the fighter becomes Suppressed, and its activation, if
+--                  it is in one, is complete (see ACTIVATION.fallEnd);
+--   3" to 6"       it loses a wound first -- at 0 wounds then, or already,
+--                  an Injury dice is rolled and applied (see
+--                  ACTIVATION.fallInjury) -- then as above;
+--   more than 6"   it loses a wound and goes Out of Action.
+-- With Catfall (a skill that says `catfall`, and works) the fall counts
+-- one level less, though never less than the lowest. Said in chat: 'Kage
+-- falls 5", counting as 2"'; then the onFallen stub hears of it.
+function ACTIVATION.land(height, passed, test, player)
+    if fighter.outOfAction then return end
+    local levels = type(CFG.fallLevels) == "table" and CFG.fallLevels or {}
+    local low, high = tonumber(levels[1]) or 3, tonumber(levels[2]) or 6
+    local left = height - (passed and (tonumber(CFG.fallSave) or 3) or 0)
+    local level = left <= 0 and 0 or left < low and 1 or left <= high and 2 or 3
+    local catfall = #SKILL.with("catfall") > 0
+    local lowered = catfall and level > 1
+    if lowered then level = level - 1 end
+    local line = string.format('%s falls %g"', fighter.name, height)
+    if passed then line = line .. string.format(', counting as %g"', math.max(0, left)) end
+    if lowered then line = line .. ", a level less with Catfall" end
+    local fall = { height = height, counted = math.max(0, left), level = level, catfall = catfall,
+                   passed = passed == true }
+    if level == 0 then
+        chat(line .. " -- no harm done", rgbOf(COL.valueUp))
+        onFallen(player, fall)
+        return
+    end
+    if level >= 2 then
+        local had = tonumber(fighter.wounds.current) or 0
+        line = line .. (had > 0 and " -- loses 1 wound" or " -- already at 0 wounds")
+        chat(line, rgbOf(COL.valueMod))
+        if had > 0 then setWounds(had - 1) end
+    else
+        chat(line, rgbOf(COL.valueMod))
+    end
+    onFallen(player, fall)
+    if level >= 3 then
+        setOutOfAction({ value = true, why = string.format('a fall of more than %g"', high) })
+    elseif level == 2 and hpOut() then
+        -- once the Agility test's die has had its time over the stats
+        ACTIVATION.later(test and ACTIVATION.roll, function() ACTIVATION.fallInjury(catfall, player) end)
+    else
+        ACTIVATION.fallEnd(catfall, player)
+    end
+end
+
+-- The Injury dice of a fall that left the fighter at 0 wounds (see
+-- ACTIVATION.land): one, thrown and shown as the others, said in chat
+-- ("Kage - Falling Down (Injury dice): Serious Injury") and applied -- Out
+-- of Action takes the fighter out, Serious Injury makes it Seriously
+-- Injured, Injury does no more. Then the fall ends (ACTIVATION.fallEnd).
+function ACTIVATION.fallInjury(catfall, player)
+    if fighter.outOfAction then return end
+    local color = colorOf(player)
+    local title = ACTIVATION.rollName("injury", 1)
+    ACTIVATION.rolling(title)
+    throwDice(1, color, function(faces, digital)
+        local k = ACTIVATION.INJURY_DICE[faces[1]] or "serious"
+        local R = ACTIVATION.INJURY[k]
+        ACTIVATION.say("Falling Down (Injury dice)", { R.short }, R.label, { color = color, digital = digital })
+        ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = k }
+        if fighter.outOfAction then return end
+        if k == "out" then
+            setOutOfAction({ value = true, why = "injured by the fall" })
+            return
+        end
+        if k == "serious" and fighter.status ~= "seriously_injured" then setStatus("seriously_injured") end
+        ACTIVATION.fallEnd(catfall, player)
+    end, "injury", title)
+end
+
+-- How a fall ends for a fighter still on the table (see ACTIVATION.land):
+-- it becomes Suppressed -- only an Active fighter can be, any other stays
+-- as it is -- and its activation, if it is in one, is complete. With
+-- Catfall (`catfall`), an Active fighter makes another Agility test first
+-- -- once the fall's own dice have had their time over the stats: passed,
+-- neither happens.
+function ACTIVATION.fallEnd(catfall, player)
+    if fighter.outOfAction then return end
+    local function down()
+        if fighter.outOfAction then return end
+        if fighter.status == "active" then setStatus("suppressed") end
+        if fighter.activation == "active" then completeActivation() end
+    end
+    if not catfall or fighter.status ~= "active" then return down() end
+    ACTIVATION.agility({ why = "Catfall", after = ACTIVATION.roll, done = function(passed)
+        if not passed then return down() end
+        chat(string.format("%s lands on their feet -- not Suppressed", fighter.name), rgbOf(COL.valueUp))
+    end }, player)
+end
+
+-- How far an action moves its fighter (`a.distance`: a list of { stat,
+-- times }, see RULES.skills), worked out from the stats as shown and said
+-- in chat, in the action's colour: 'Kage - Sprint: M 5 + 2x I 4 = 13"'.
+-- Returns the inches.
+function ACTIVATION.sayDistance(a, rgb)
+    local parts, total = {}, 0
+    for _, d in ipairs(type(a.distance) == "table" and a.distance or {}) do
+        local stat, times = tostring(d[1] or d.stat or ""), tonumber(d[2] or d.times) or 1
+        local v = statNumber(stat) or 0
+        total = total + times * v
+        parts[#parts + 1] = string.format("%s%s %g", times ~= 1 and string.format("%gx ", times) or "", stat, v)
+    end
+    chat(string.format('%s - %s: %s = %g"', fighter.name, a.label, table.concat(parts, " + "), total), rgb)
+    return total
+end
+
+-- Coup de Grace (the action in A's panel, see useAction): one D6 plus the
+-- fighter's Strength as shown -- and what its gang adds (CFG.coupGang:
+-- Genestealer Cults +1) -- thrown and shown as every roll here, the total
+-- at the panel's right end -- "Kage - Coup de Grace: 4 + 3S = 7".
+-- With an enemy selected by `player` (ACTIVATION.target: just one) a
+-- second D6 is thrown with it, for that fighter, plus its Strength as its
+-- own card shows it: when this fighter's total is the same or higher the
+-- enemy goes Out of Action (its card's setOutOfAction says so); lower, it
+-- holds on. "Kage - Coup de Grace vs Bob: 4 + 3S = 7 against 2 + 3S = 5",
+-- green when that takes the enemy out, orange when not, as this fighter's
+-- die (the first) and the totals beside the dice ("7 : 5") are.
+--   Cut-Throat (a skill that says `cutThroat`, and works): when the enemy
+-- rolled more, this fighter's die is thrown again -- once, the first
+-- having had its time over the stats -- against the total the enemy has
+-- (`again`: that roll's { aim, foeFace }).
+--   Then the onCoupRolled stub hears of it. Returns whether it rolled (not
+-- when Out of Action).
+function ACTIVATION.coup(player, again)
+    if fighter.outOfAction then return false end
+    local aim = again and again.aim or ACTIVATION.target(player)
+    local s, foeS = statNumber("S") or 0, aim and tonumber(aim.s) or 0
+    local mod, gang = ACTIVATION.gangMod(CFG.coupGang)
+    local title = again and "Coup de Grace (Cut-Throat)" or "Coup de Grace"
+    local color = colorOf(player)
+    ACTIVATION.rolling(title)
+    throwDice((aim and not again) and 2 or 1, color, function(faces, digital)
+        local f = faces[1] or 1
+        local mine = f + s + mod
+        local r = { face = f, s = s, mod = mod ~= 0 and mod or nil, total = mine, digital = digital,
+                    rerolled = again ~= nil or nil }
+        local own = string.format("%d + %dS%s = %d", f, s,
+            mod ~= 0 and string.format(" %s %d %s", mod > 0 and "+" or "-", math.abs(mod), gang) or "", mine)
+        local tail = digital and " (rolled digitally)" or ""
+        if not aim then
+            announce(string.format("%s - Coup de Grace: %s%s", fighter.name, own, tail), color)
+            ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, sum = "∑" .. mine }
+            onCoupRolled(player, r)
+            return
+        end
+        local ff = again and again.foeFace or faces[2] or 1
+        local theirs = ff + foeS
+        r.target, r.foeFace, r.foeS, r.foeTotal, r.out = aim.name, ff, foeS, theirs, mine >= theirs
+        local reroll = theirs > mine and not again and #SKILL.with("cutThroat") > 0
+        local ink = r.out and COL.valueUp or COL.valueMod
+        chat(string.format("%s - %s vs %s: %s against %d + %dS = %d%s%s", fighter.name, title, aim.name, own,
+            ff, foeS, theirs, r.out and "" or reroll and " -- rolled again with Cut-Throat"
+            or string.format(" -- %s holds on", aim.name), tail), rgbOf(ink))
+        ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hls = { ink },
+                             sum = mine .. " : " .. theirs, sumInk = ink }
+        if r.out then
+            ACTIVATION.ask(aim.obj, "setOutOfAction", { value = true, why = "Coup de Grace by " .. fighter.name })
+        end
+        onCoupRolled(player, r)
+        if reroll then
+            ACTIVATION.later(ACTIVATION.roll, function() ACTIVATION.coup(player, { aim = aim, foeFace = ff }) end)
+        end
+    end, "d6", title)
+    return true
+end
+
+-- Whether a dice total passes a test from rollStat.
+function statTestPasses(test, total)
+    if test.under then return total <= test.target end
+    return total >= test.target
+end
+
+-- This model's looks (see LOOKS): the five colours and the frame settings.
+function getLooks()
+    local t = {}
+    for _, k in ipairs(LOOKS_KEYS) do t[k] = looks[k] end
+    return t
+end
+
+-- New looks for this model: written into its GM Notes (so they stay with
+-- the model) and shown at once. Missing fields keep their defaults.
+function setLooks(t)
+    applyLooks(t)
+    pcall(function() self.setGMNotes(notesWithLooks(self.getGMNotes(), formatLooks(getLooks()))) end)
+    if ui.built then refresh() end
+    return getLooks()
+end
+
+-- The looks read again from the GM Notes -- after the importer (or a
+-- person) changed them -- and shown. No block there: the defaults.
+function reloadLooks()
+    local ok, notes = pcall(function() return self.getGMNotes() end)
+    applyLooks(ok and parseLooks(notes) or nil)
+    if ui.built then refresh() end
+    return getLooks()
+end
+
+-- Back to the default looks: the block is taken out of the GM Notes.
+function clearLooks()
+    pcall(function() self.setGMNotes(notesWithLooks(self.getGMNotes(), nil)) end)
+    return reloadLooks()
+end
+
+-- An image registered at runtime, beside the ASSETS table: { name =
+-- ..., url = ... }. Rebuilds, so the new art shows.
+function setAsset(params)
+    if type(params) ~= "table" or not params.name then return false end
+    dynamicAssets[params.name] = params.url or ""
+    refresh()
+    return true
+end
+
+function showUI(flag)
+    ui.visible = (flag ~= false)
+    if ui.built then setAttr("mundaRoot", "active", ui.visible) else refresh() end
+    return ui.visible
+end
+
+function toggleUI() return showUI(not ui.visible) end
+
+-- The table's own rules: the overrides (see RULES.merge) of the first
+-- object tagged CFG.controllerTag that has them -- a Mundane Controller;
+-- with none, or an older one, the rules as written -- laid over the
+-- defaults. The card is rebuilt when that changes anything. The card
+-- fetches them when it loads, the Controller has every card fetch them
+-- again when its rules change. Returns whether anything changed.
+function RULES.fetch()
+    local ok, objs = pcall(function() return getObjectsWithTag(CFG.controllerTag) end)
+    for _, obj in ipairs(ok and type(objs) == "table" and objs or {}) do
+        local okC, t = ACTIVATION.ask(obj, "getRules")
+        if okC and type(t) == "table" then return t end
+    end
+    return nil
+end
+function loadRules()
+    if not RULES.use(RULES.fetch()) then return false end
+    SKILL.arm(fighter)            -- a skill's weapon may have come or gone
+    if ui.built then refresh() end
+    return true
+end
+
+--============================================================================
+-- 12. STUBS -- the rules layer. Everything below is deliberately inert:
+--      hooks where the rest of the game's rules can go.
+--============================================================================
+
+-- Fired after the status changes, whether picked on the card or by script.
+function onStatusChanged(key, label)
+    -- STUB: apply what the status means, e.g. Engaged locking the fighter in
+    -- combat, Seriously Injured limiting what it can do. (setStatus has
+    -- already said it in chat.)
+end
+
+-- Fired when an action is taken (a left click in A's panel, or useAction),
+-- after its cost is spent: `key` from ACTIONS.
+function onActionChosen(player, key)
+    -- STUB: what each action does goes here.
+end
+
+-- Fired when the actions left change: activated (2, or 1), spent, readied
+-- or finished (0).
+function onActionsChanged(left)
+    -- STUB: anything more an activation's actions do.
+end
+
+-- Fired when a condition's stacks change (C's panel, the bar under the
+-- stats, or setCondition): `count` now, `before` it changed; 0 is off.
+function onConditionChanged(key, count, before)
+    -- Stat changes are already applied through CONDITIONS[...].mods.
+    -- STUB: anything else a condition does (e.g. Blind or Webbed limiting
+    -- actions, Insanity's random behaviour) goes here.
+end
+
+-- Fired after wounds change.
+function onWoundsChanged(current, max)
+    -- STUB: anything more a change of wounds does. (Damage taken rolls its
+    -- own Injury dice, see ACTIVATION.damage; wounds set by hand roll none.)
+end
+
+-- Fired by attackWith (a profile's attack button): attack = { weapon,
+-- profile, name, stats (the profile), melee, mode ("attack" / "rapid_fire"),
+-- attacks (melee), action ("fight" / "shoot" / "braced_shot" /
+-- "aimed_shot"), aimed, hit ... }. Says nothing: the attack's result line
+-- (see rollAttack) is its only line in chat.
+function onWeaponAttack(player, attack)
+    -- STUB: anything more an attack does as it is made. (The card rolls
+    -- its dice itself, see rollAttack.)
+end
+
+-- Fired by rollAttack once an attack's dice have settled and been said
+-- (and a profile's Ammo checks applied): r = { attack (see attackWith),
+-- faces (in the order thrown), need (the hit dice's number, 2-6), hits
+-- (melee: the dice that hit; ranged: 0 on a miss, else 1 or the Firepower
+-- dice's hits), and for a ranged attack hit (the hit die hit), ammo (the
+-- Ammo checks that count), spared (Reliable ignored one), state ("out",
+-- "jam", "spent" or nil), target (the selected enemy's name, when a Wound
+-- roll follows: see rollWounds), targets (a Template's: every enemy hit),
+-- shock (the hit dice that Shocked: a number, or true for a ranged one's)
+-- }, digital }.
+function onAttackRolled(player, r)
+    -- STUB: what the card leaves out of the sequence -- line of sight.
+end
+
+-- Fired by rollWounds -- each round of it: the Wound roll, and the one for
+-- Blaze's hits -- once its dice have settled and been said: r = { plan
+-- (see ACTIVATION.woundPlan: hits, s, t, jaw, toxin, weapon, target; the
+-- first die's), plans (every one its dice went by: a Template's several),
+-- faces (in the order thrown, Shock's automatic 6s among them), need
+-- (2-6), wounds, total (with the round before), round (1, or 2 for
+-- Blaze's), blaze (the more hits Blaze made), digital }.
+function onWoundsRolled(player, r)
+    -- STUB: anything more a Wound roll does (the target's saves follow,
+    -- see ACTIVATION.toSaves).
+end
+
+-- Fired on the wounded fighter's card once its save roll has settled and
+-- been said (see ACTIVATION.rollSaves) -- or at once with no save to take:
+-- r = { wounds, saved, through (the wounds that went through), faces (in
+-- the order thrown), need (the save, AP and cover in it; nil: none), inv
+-- (the invulnerable save, nil: none), cover, ap, burnt (the wargear that
+-- burnt out), by, weapon, digital }.
+function onSavesRolled(player, r)
+    -- STUB: anything more a save roll does (the damage follows, see
+    -- ACTIVATION.damage).
+end
+
+-- Fired once the wounds through have done their damage (see
+-- ACTIVATION.damage): r = { lost (wounds), wounds (left), injury (the
+-- Injury dice to roll), webbed (Web: no damage, Webbed instead), by,
+-- weapon }.
+function onDamaged(player, r)
+    -- STUB: anything more damage does.
+end
+
+-- Fired by traitHit once a weapon's traits have done to this fighter what
+-- they do (t: see traitHit; Cursed's check may still be rolling).
+function onTraitHit(t)
+    -- STUB: anything more Cursed or Flash does.
+end
+
+-- Fired for every profile a reload reaches (see ACTIVATION.reloadNow: the
+-- Reload action, Fast Reload, Distribute Ammo), once it is back or its
+-- die has settled and been said: r = { weapon, profile, reloaded } -- and
+-- for a profile with Scarce (N+) also face, need (its N) and digital.
+function onReloadRolled(player, r)
+    -- STUB: anything more a Reload does.
+end
+
+-- Fired by ammoCheck once a Distribute Ammo's Intelligence check has been
+-- rolled and said: the test (see onStatRoll) and the weapons it reloaded,
+-- each { name = } -- none on a failed check, nor while the player still
+-- has to pick the profile.
+function onAmmoChecked(test, reloaded)
+    -- STUB: anything more handed-out ammo does.
+end
+
+-- Fired as a boost wears off at a price (see ACTIVATION.comedown: the
+-- Stimm-Slug), once its die has settled and been said: r = { key (the
+-- action's), label, face, bad (a bad reaction), wounds (lost to it),
+-- digital }.
+function onBoostEnded(player, r)
+    -- STUB: anything more a bad reaction does.
+end
+
+-- Fired as an Insane fighter's die has settled and been said (see
+-- ACTIVATION.insane): r = { face, digital }.
+function onInsanityRolled(player, r)
+    -- STUB: what the number does.
+end
+
+-- Fired after a profile's state changes (its buttons, or setProfileState).
+function onProfileChanged(weapon, profile, p)
+    -- STUB: e.g. log a jam.
+end
+
+-- Fired by rollStat once the dice have settled and the result has been
+-- announced: test.faces, test.total and -- for a real test -- test.passed.
+function onStatRoll(player, test)
+    -- STUB: what a passed or failed test does (e.g. a failed Cool test).
+end
+
+-- Fired by rollRecovery once the dice have settled and the result has been
+-- said and applied: "injured", "serious" or "out", and the D6 faces.
+function onRecoveryRolled(player, result, faces)
+    -- STUB: e.g. the Lasting Injury roll for a fighter taken Out of Action.
+end
+
+-- Fired by rollNerve once the dice have settled and the result has been
+-- said (and a failed check has made the fighter Suppressed): test.faces,
+-- test.total, test.target, test.passed, and test.from -- the friend whose
+-- Cl was used, if any.
+function onNerveRolled(player, test)
+    -- STUB: anything more a Nerve Check does.
+end
+
+-- Fired by Group Activation's Leadership check (see ACTIVATION.rollGroup)
+-- once the dice have settled, the result has been said and the friends
+-- taken along are marked: test.faces, test.total, test.target,
+-- test.passed, and test.activated -- their names (none when it failed).
+function onGroupRolled(player, test)
+    -- STUB: anything more a Group Activation does.
+end
+
+-- Fired once an Agility test's die has settled and the result has been
+-- said (and whatever hung on it has followed): test.need, test.mod (what
+-- was added), test.face, test.total, test.passed, test.gang (the gang
+-- type that added to the die, if any) and test.why -- "Spring Up",
+-- "Falling Down", "Catfall", or nil for one made by hand.
+function onAgilityRolled(player, test)
+    -- STUB: what a passed or failed Agility test does (leaping a gap,
+    -- staying on a ledge).
+end
+
+-- Fired by a fall (Falling Down in A's Special tab) once its Agility test
+-- is made and the fall is said: fall.height (inches), fall.counted (after
+-- a passed test), fall.level (0 no harm, 1 to 3: see ACTIVATION.land),
+-- fall.catfall, fall.passed. The wound it costs is already lost; an Injury
+-- dice, Suppressed and Out of Action follow.
+function onFallen(player, fall)
+    -- STUB: anything more a fall does (landing on another model).
+end
+
+-- Fired by a Wyrd power's cast (see ACTIVATION.cast) once it is settled
+-- and said: r = { key, label (the power), continuous, manifested, natural
+-- (2 or 12 on the caster's own check -- Perils of the Warp), disrupted (an
+-- enemy Wyrd's check passed), disruptedBy (its name, when that was a
+-- natural 2 and the caster didn't roll) }.
+function onPowerCast(player, r)
+    -- STUB: anything more a cast does. (What a manifested power does is
+    -- ACTIVATION.manifest's.)
+end
+
+-- Fired by a Coup de Grace (the action in A's panel) once its dice have
+-- settled and been said (and an enemy that lost has gone Out of Action):
+-- r = { face, s (the fighter's Strength), total, digital, rerolled (it is
+-- Cut-Throat's second roll) } and, with an enemy selected, target (its
+-- name), foeFace, foeS, foeTotal and out (it went Out of Action).
+function onCoupRolled(player, r)
+    -- STUB: anything more a Coup de Grace does.
+end
+
+-- Fired by rollFirepower ("Roll Firepower" in A's Special tab) once the
+-- Firepower dice have settled and their result has been said: fp = {
+-- faces, face (the first), hits (all together), ammo = an Ammo check is due }.
+function onFirepowerRolled(player, fp)
+    -- STUB: what the hits and the Ammo check do.
+end
+
+-- Fired by rollInjuries ("Roll Injuries" in A's Special tab) once the
+-- Injury dice have settled and been said: each die's result ("injured",
+-- "serious", "out") and the faces. Nothing is applied but Out of Action
+-- when every die says so (see rollInjuries).
+function onInjuriesRolled(player, results, faces)
+    -- STUB: what an Injury roll by hand does (a fighter at 0 wounds).
+end
+
+-- Line of sight helper, for a shooting sequence.
+function checkLineOfSight(targetObject)
+    -- STUB: Physics.cast from this model's head toward the target and report
+    -- the obstructions, so cover and visibility can be worked out.
+    return nil
+end
+
+--============================================================================
+-- 13. LIFECYCLE
+--============================================================================
+
+function onSave()
+    return JSON.encode({
+        fighter  = fighter,
+        visible  = ui.visible,
+        importId = ui.importId,   -- which import the fighter came from
+    })
+end
+
+function onLoad(savedState)
+    local restored
+    if savedState and savedState ~= "" then
+        local ok, data = pcall(function() return JSON.decode(savedState) end)
+        if ok and type(data) == "table" then restored = data end
+    end
+    if restored and restored.visible ~= nil then ui.visible = restored.visible end
+
+    -- A fresh import (an id this model hasn't loaded yet) replaces whatever
+    -- was saved; otherwise the saved fighter carries on.
+    local fresh = type(IMPORTED) == "table" and IMPORTED.fighter
+                  and not (restored and restored.importId == IMPORTED.id)
+    local data  = fresh and IMPORTED.fighter or (restored and restored.fighter)
+    ui.importId = fresh and IMPORTED.id or (restored and restored.importId)
+
+    -- The looks come from the GM Notes (see LOOKS), before anything is built.
+    local okN, notes = pcall(function() return self.getGMNotes() end)
+    applyLooks(okN and parseLooks(notes) or nil)
+
+    -- One frame of breathing room so the object is fully spawned before the
+    -- UI is attached; TTS can drop the XML otherwise. Routing the data
+    -- through setFighter means a save from an older version of this script
+    -- still lands on a complete, well-shaped fighter.
+    -- The base is measured then too, if the fighter came without one. The
+    -- table's own rules (see loadRules) come first, so it is built with them.
+    Wait.frames(function()
+        RULES.use(RULES.fetch())
+        setFighter(data)
+        currentBase()
+        engage.spot = positionOf(self)
+    end, 1)
+end
+
+-- Where the model stood before it moved (see runEngagement) -- unless the
+-- last drop is still unchecked: the spot before that one still counts.
+function onPickUp(playerColor)
+    if not engage.pending then engage.spot = positionOf(self) or engage.spot end
+end
+
+-- Put down: once the model has come to rest (or CFG.engageSettle seconds
+-- on), check engagement (CFG.autoEngage) and the Wyrd powers' auras. A
+-- newer drop takes over from an older one's wait, and a model picked up
+-- again before settling is checked on its next drop.
+function onDrop(playerColor)
+    engage.token, engage.pending = engage.token + 1, true
+    local token, frames = engage.token, 0
+    local function go()
+        if token ~= engage.token then return end
+        local okH, held = pcall(function() return self.held_by_color end)
+        if okH and held then return end
+        if CFG.autoEngage then checkEngagement() end
+        ACTIVATION.wyrdMoved()                    -- the Wyrd powers' auras, where it stands now
+    end
+    Wait.condition(go, function()
+        frames = frames + 1
+        if token ~= engage.token then return true end
+        local ok, still = pcall(function() return self.resting end)
+        return frames > 2 and (not ok or still == true)
+    end, CFG.engageSettle, go)
+end
+]=]
+--@@CARD_END
+
+-- ===========================================================================
+-- Everything below this line is updater/updater.lua, pasted unchanged.
+-- ===========================================================================
+
+--[[ =========================================================================
+  SELF-UPDATE BLOCK for keeping tools hosted via Github up to date.
+  Source: https://github.com/Antaresx101/TTS_tools   (MIT)
+
+  When using any of my tools with this functionality, in TabletopSimulator,
+  typing "!update" in the chat as the host will automatically update all such
+  tools in the session with the newest version (if it isn´t on it already).
+
+  A tool is one file. Where it has an on-screen UI, that layout travels
+  inside the script and goes on when the object loads, so an update is one
+  download and one write, and cannot leave half a tool behind.
+
+  Nothing happens until you ask. Loading a mod sends no requests and changes no
+  scripts, it is triggered manually always.
+========================================================================== ]]
+
+-- CONFIG -- running someone else's tool and want it left exactly where it is:
+-- Stop Updates permanently: set SELF_UPDATE to false and nothing below ever runs.
+-- Adopting the block: set the three TOOL_ values.
+-- Forking the repo: change REPO_BASE, the only string here that names a host.
+local SELF_UPDATE    = true                    -- false pins this copy for good
+local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
+local TOOL_ID        = "mundane-importer"
+local TOOL_VERSION   = "2.1.0"                 -- bumped with manifest.json
+local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
+
+-- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
+-- pages and truncated bodies; any file carrying this block is usually bigger
+-- than that. scripts/validate.py enforces it at publish time.
+local MIN_BYTES     = 1024
+local APPLY_TIMEOUT = 20                       -- seconds to wait for a safe moment
+local UI_FRAMES     = 5                        -- frames a layout takes to go live
+local SPREAD        = 8                        -- seconds to smear checks across
+local CHAT_COMMAND  = "!update"                -- host types it, every copy hears
+local LABEL         = "[" .. TOOL_ID .. "] "   -- four tools, four named voices
+
+local function report(msg)   -- host console only; never chat for everyone
+  print("[" .. TOOL_ID .. " " .. TOOL_VERSION .. "] " .. msg)
+end
+
+local function url(file)     -- ?ts= defeats the ~5 minute raw.github cache
+  return REPO_BASE .. "/tools/" .. TOOL_ID .. "/" .. file .. "?ts=" .. os.time()
+end
+
+-- Plain X.Y.Z only; a suffix such as "-rc1" is ignored. Each part has to stay
+-- under 1000, which holds for every version this repo will ever publish.
+local function rank(v)
+  local a, b, c = string.match(tostring(v), "^(%d+)%.(%d+)%.(%d+)")
+  return (tonumber(a) or 0) * 1000000 + (tonumber(b) or 0) * 1000 + (tonumber(c) or 0)
+end
+
+-- Every release newer than this copy, newest first, as the lines that hang
+-- under the update message: a copy that sat out three releases sees all
+-- three on update, thats why the manifest carries a history. Notes are one string
+-- or a list of them; anything else renders as nothing.
+local function whatsNew(m)
+  local out = ""
+  local function add(r)
+    if type(r) ~= "table" or rank(r.version) <= rank(TOOL_VERSION) then return end
+    local notes = type(r.notes) == "string" and { r.notes } or r.notes
+    if type(notes) ~= "table" then return end
+    for _, n in ipairs(notes) do out = out .. "\n  - " .. tostring(n) end
+  end
+  add(m.stable)
+  for _, r in ipairs(type(m.history) == "table" and m.history or {}) do add(r) end
+  return out
+end
+
+-- One message per tool: three dice rollers on a table are three scripts that
+-- cannot see each other, so the first to speak leaves what it said here and
+-- the rest read it and keep quiet. Two strings named after this tool are all
+-- the block does with Global: one for an install, one for whichever answer.
+local GLOBAL_KEY = "SELFUPDATE_" .. string.gsub(TOOL_ID, "%W", "_")
+local function once(suffix, value, msg)
+  local key = GLOBAL_KEY .. suffix
+  local ok, said = pcall(function() return Global.getVar(key) end)
+  if ok and said == value then return end
+  pcall(function() Global.setVar(key, value) end)
+  broadcastToAll(msg, {0.6, 0.9, 0.6})
+end
+
+-- Writes the new script and reloads only while the object is idle. If it never
+-- goes idle we still write, and the new script starts on the next load. The
+-- tool's UI rides inside the script, so there is nothing else here to write.
+local function apply(code, version, notes)
+  local function idle()
+    return self.held_by_color == nil and not self.isSmoothMoving()
+       and not self.spawning
+  end
+  local function commit(withReload)
+    -- Carry the tool's own saved state across the reload, if it keeps any.
+    pcall(function()
+      if type(onSave) == "function" then self.script_state = onSave() end
+    end)
+    self.setLuaScript(code)              -- WRITE: the only script write, on self
+    once("", version, LABEL .. "updated to v" .. version .. notes)
+    if withReload then
+      self.reload()                  -- self is invalid after this line
+    else
+      report("v" .. version .. " written; it starts on the next load")
+    end
+  end
+  Wait.condition(function() commit(true) end, idle, APPLY_TIMEOUT,
+                 function() commit(false) end)
+end
+
+-- The loop guard: writing back what is already running would reload forever.
+-- One file is the whole tool now, so one comparison covers it.
+local function install(code, version, notes)
+  if code == self.getLuaScript() then
+    return report("already running this code")
+  end
+  apply(code, version, notes)
+end
+
+local function onPayload(req, version, notes)
+  if req.is_error or req.response_code ~= 200 then return end   -- silently
+  local code = req.text or ""
+  -- Three of the four gates: long enough, signed for this tool, and whole.
+  -- The loop guard is the fourth. Any failure leaves the object as it is.
+  if #code < MIN_BYTES then return report("rejected: shorter than MIN_BYTES") end
+  if not string.find(code, TOOL_SIGNATURE, 1, true) then
+    return report("rejected: TOOL_SIGNATURE missing")
+  end
+  -- The block's last function, named in halves so this line cannot match
+  -- itself: the payload carries this file too, and a search for the whole
+  -- literal would find the search. Finding the real one proves the body
+  -- arrived to its last line rather than stopping somewhere in the middle.
+  if not string.find(code, "function Updater_" .. "stateVersion", 1, true) then
+    return report("rejected: cut short before the end of the block")
+  end
+  install(code, version, notes)
+end
+
+-- Answers: the repository is not there (offline, blocked, moved, private, 404),
+-- or nothing needs fetching because this copy is the published one.
+-- Once per tool per asking, either way. A manifest that arrives but will not
+-- parse goes to the host console instead: the repository is alive so it´s on that author.
+local function onManifest(req)
+  if req.is_error or req.response_code ~= 200 then
+    return once("_ANSWER", "offline", LABEL .. "could not reach its repository ("
+                .. tostring(req.error or req.response_code) .. ")")
+  end
+  local ok, m = pcall(JSON.decode, req.text)
+  if not ok or type(m) ~= "table" or type(m.stable) ~= "table" then
+    return report("manifest unreadable")
+  end
+  local version = tostring(m.stable.version)
+  if rank(version) <= rank(TOOL_VERSION) then            -- nothing to fetch
+    return once("_ANSWER", "current", LABEL .. "up to date at v" .. TOOL_VERSION)
+  end
+  local notes = whatsNew(m)
+  WebRequest.get(url("tool.lua"), function(r) onPayload(r, version, notes) end)
+end
+
+-- Seconds to hold this object's request for: over 0, under SPREAD, the same
+-- number every session for any one object. Folded by hand because this Lua
+-- rejects tonumber(guid, 36), and math.random belongs to the tool above.
+local function stagger()
+  local guid, n = tostring(self.getGUID() or ""), 0
+  for i = 1, #guid do n = (n * 31 + string.byte(guid, i)) % 100003 end
+  return (n % (SPREAD * 100 - 1) + 1) / 100
+end
+
+-- One check, now. The chat command calls this, and so can the tool above:
+-- from its own code, or from Global with obj.call("Updater_check"). The tool
+-- needs no call of its own for the command below to work.
+function Updater_check()
+  if not SELF_UPDATE then return end
+  -- A fresh ask, a fresh answer: every copy clears the flag in this frame,
+  -- long before the first reply can come back.
+  pcall(function() Global.setVar(GLOBAL_KEY .. "_ANSWER", "") end)
+  Wait.time(function() WebRequest.get(url("manifest.json"), onManifest) end,
+            stagger())
+end
+
+-- The tool's UI, spliced in above this block as TOOL_XML by scripts/validate.py
+-- and applied here rather than kept on the object. One file, one write: an
+-- update cannot land half a tool, because there are no halves. The tool's own
+-- onLoad runs first, so whatever it registers - the custom assets a layout
+-- names by image="", for one - is in place before the layout that wants them.
+-- A tool with no UI declares no TOOL_XML and this does nothing at all.
+local toolLoad = onLoad
+function onLoad(saved)
+  if type(toolLoad) == "function" then toolLoad(saved) end
+  if not TOOL_XML then return end
+  self.UI.setXml(TOOL_XML)                        -- WRITE: the only UI write
+  -- setXml is queued, and the elements it creates are not addressable in this
+  -- frame or the next: setValue and setAttribute on them do nothing, and say
+  -- nothing. A tool that fills its layout in at load does that from onUIReady
+  -- and never has to guess a delay of its own - this is the only place that
+  -- number lives, so getting it wrong is one edit rather than one per tool.
+  if type(onUIReady) == "function" then Wait.frames(onUIReady, UI_FRAMES) end
+end
+
+-- Chat reaches object scripts, not just the Global one, so every copy on the
+-- table hears the host's command for itself and checks itself: no object ever
+-- speaks to another, and nothing has to be added to the Global script. The
+-- only thing read out of chat is whether the line is exactly CHAT_COMMAND from
+-- someone with admin. Whatever onChat the tool above defined is captured here
+-- and still called with everything, so this cannot eat a tool's own commands.
+local toolChat = onChat
+function onChat(message, player)
+  if SELF_UPDATE and message == CHAT_COMMAND and player and player.admin then
+    Updater_check()
+  end
+  if type(toolChat) == "function" then return toolChat(message, player) end
+end
+
+-- Optional migration hook. Returns the version that wrote the saved state and
+-- the version running now; do any migrating in the tool above, not here.
+function Updater_stateVersion(saved)
+  local ok, t = pcall(JSON.decode, saved or "")
+  local v = (ok and type(t) == "table") and t.version or nil
+  return v, TOOL_VERSION
+end
