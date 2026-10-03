@@ -2,7 +2,7 @@
   "stable": {
     "version": "2.1.0",
     "notes": [
-      "Added auto-update feature."
+      "Added auto-update feature (use !update in the chat)."
     ]
   },
   "history": [
