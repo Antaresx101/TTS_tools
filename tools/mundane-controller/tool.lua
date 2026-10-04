@@ -1247,35 +1247,40 @@ local PANEL = { position = "0 335 -5", rotation = "0 0 180", scale = "1 1 1" }
 local DIE_ICON = "https://steamusercontent-a.akamaihd.net/ugc/12001738551517573707/F2E806437431BEE65DD78832C9C5A286D327A301/"
 
 -- The deployment's model: rolled on the setup's Roll for Deployment, a
--- see-through custom model of the deployment zones is put in the middle
--- of the table (0, 0, 0; locked). MESH[face of the D6] gives its mesh's
--- link: { link, stretch = true } -- one model made for a BASE" map,
--- stretched across (not up) to the map size chosen; { link } -- one model
--- for every map size, as it is; or { [36] = link, [48] = link } -- one per
--- map size. COLLIDER is the one collider every model shares (stretched
--- with a stretched one). Empty link: no model for it; chat says so.
+-- see-through custom model of the deployment zones is put on the table
+-- (locked). MESH[face of the D6] says which: { apart = N } -- the one
+-- model ZONE (made for a BASE" map, stretched along its own x alone -- not
+-- z, not up -- to the map size chosen) put down twice, N" from the middle
+-- of the table either way along z, the second turned half round; { link }
+-- -- one model for every map size, as it is, in the middle (0, 0, 0); or
+-- { [36] = link, [48] = link } -- one per map size, in the middle.
+-- COLLIDER is the one collider every model shares (stretched with a
+-- stretched one). Empty link: no model for it; chat says so.
 -- It is tinted TINT (8100FF at alpha 150), turned TURN degrees at a time
--- and stretched up / down by STEP (of its own height, never below STEP)
--- by the small buttons beside the row -- kept for the next one (saved).
--- A right click on the row takes it away, and the next puts it back;
--- Start Game takes it away, and going back from round 1 to the setup puts
--- it back. SIZES: the map sizes the setup's Map Size goes through, in turn.
+-- about the middle of the table and stretched up / down by STEP (of its
+-- own height, never below STEP) by the small buttons beside the row --
+-- kept for the next one (saved). A right click on the row takes it away,
+-- and the next puts it back; Start Game takes it away, and going back from
+-- round 1 to the setup puts it back. SIZES: the map sizes the setup's Map
+-- Size goes through, in turn.
 local DEPLOY = {
     SIZES = { 36, 48 },
     MESH = {
-        { "https://steamusercontent-a.akamaihd.net/ugc/10974335390482002701/A93B7353D4420B5D9AC736ADF013DDC05F01E533/", stretch = true },         -- 1 Sniping Range
-        { "https://steamusercontent-a.akamaihd.net/ugc/14993753071562012643/6DD044D03216E91BE9CEEFEBCB9BA60D3F2EE393/", stretch = true },         -- 2 Face Off
-        { "https://steamusercontent-a.akamaihd.net/ugc/14320186872023997195/3CAB82657ECAF318784193E611A9B11E06760AB2/", stretch = true },         -- 3 Stand Off
+        { apart = 12 },                 -- 1 Sniping Range (ZONE, twice)
+        { apart = 9 },                  -- 2 Face Off (ZONE, twice)
+        { apart = 6 },                  -- 3 Stand Off (ZONE, twice)
         { "https://steamusercontent-a.akamaihd.net/ugc/11891530078336619171/3F73632BB82474CB818688E2AF2B0080B726354D/" },                         -- 4 Ambush
         { [36] = "https://steamusercontent-a.akamaihd.net/ugc/17867774420708299133/10A0F962A14186C96646CA6F25A87194272F8D2E/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/17929910256943798418/A327586A2CD4B113197323620CFE2C157DEF2352/" },       -- 5 Free for All
         { [36] = "https://steamusercontent-a.akamaihd.net/ugc/15512193714167926411/4AFE70845D320E07D87041B2CC95B5E87A7EFDE0/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/14713276897348078853/B3B86E458A793322E22F8D4A93D0E3182D5B0E8D/" },       -- 6 Chance Encounter
     },
+    ZONE = "https://steamusercontent-a.akamaihd.net/ugc/17711522206232040145/473C795DE47225D6B3AE455CD0DAE400D1BF1AD7/",                          -- Sniping Range, Face Off, Stand Off: the one zone, put down twice
     BASE = 36,
     COLLIDER = "https://steamusercontent-a.akamaihd.net/ugc/9590185350319248742/E1ACACACB191CDC4F0211AC33E42B34B043DBD19/",
     TINT = { r = 0x81 / 255, g = 0, b = 1, a = 150 / 255 },
     TURN = 90, STEP = 0.5,
     TAG  = "Mundane Deployment",
     turn = 0, tall = 1,     -- how the last one stood: turned, and stretched up (saved)
+    objs = {},              -- the models last put down
 }
 
 -- Homebrew: the table's own rules, as named sets, each a choice between
@@ -1620,14 +1625,17 @@ function SETUP.swap()
         SETUP.side(3 - SETUP.attacker)), SETUP.SAY)
 end
 
--- The deployment's model on the table, if there is one (the last spawned,
--- else the first found with DEPLOY.TAG -- one from before a load).
+-- The deployment's models on the table: those last put down, else every
+-- one with DEPLOY.TAG (from before a load). An empty list for none.
 function DEPLOY.find()
-    local o = DEPLOY.obj
-    if o and not (o.isDestroyed and o.isDestroyed()) then return o end
+    local out = {}
+    for _, o in ipairs(DEPLOY.objs or {}) do
+        if not (o.isDestroyed and o.isDestroyed()) then out[#out + 1] = o end
+    end
+    if #out > 0 then return out end
     local ok, list = pcall(function() return getObjectsWithTag(DEPLOY.TAG) end)
-    DEPLOY.obj = ok and type(list) == "table" and list[1] or nil
-    return DEPLOY.obj
+    DEPLOY.objs = ok and type(list) == "table" and list or {}
+    return DEPLOY.objs
 end
 
 -- Every deployment model taken off the table. Returns whether there was one.
@@ -1638,65 +1646,80 @@ function DEPLOY.remove()
         any = true
         pcall(function() o.destruct() end)
     end
-    if DEPLOY.obj then
-        any = true
-        pcall(function() if not DEPLOY.obj.isDestroyed() then DEPLOY.obj.destruct() end end)
+    for _, o in ipairs(DEPLOY.objs or {}) do
+        pcall(function() if not o.isDestroyed() then any = true; o.destruct() end end)
     end
-    DEPLOY.obj = nil
+    DEPLOY.objs = {}
     return any
 end
 
 -- Deployment `face`'s model on the map size chosen: its mesh's link, its
--- collider's, and how far it is stretched across (1: made for that size).
+-- collider's, how far it is stretched along x (1: made for that size),
+-- and how far from the middle its two copies go (nil: one, in the middle).
 function DEPLOY.model(face)
     local mesh = DEPLOY.MESH[face] or {}
+    if mesh.apart then return DEPLOY.ZONE, DEPLOY.COLLIDER, SETUP.map / DEPLOY.BASE, mesh.apart end
     if mesh[1] == nil then return mesh[SETUP.map] or "", DEPLOY.COLLIDER, 1 end
-    return mesh[1], DEPLOY.COLLIDER, mesh.stretch and SETUP.map / DEPLOY.BASE or 1
+    return mesh[1], DEPLOY.COLLIDER, 1
+end
+
+-- Point `x`, `z` (on the table, from its middle) turned `yaw` degrees
+-- about the middle, as an object turned so is.
+function DEPLOY.turned(x, z, yaw)
+    local a = math.rad(yaw)
+    return x * math.cos(a) + z * math.sin(a), -x * math.sin(a) + z * math.cos(a)
 end
 
 -- The model of deployment `face` (Roll for Deployment's result) on the
--- map size chosen, in place of any other: in the middle of the table,
--- turned DEPLOY.turn, stretched up DEPLOY.tall, locked, see-through. With no link for
--- it, chat says so and nothing is put down.
+-- map size chosen, in place of any other (see DEPLOY.model): turned
+-- DEPLOY.turn about the middle of the table, stretched up DEPLOY.tall,
+-- locked, see-through. With no link for it, chat says so and nothing is
+-- put down. Returns the models put down.
 function DEPLOY.spawn(face, name)
     DEPLOY.remove()
-    local url, collider, stretch = DEPLOY.model(face)
+    local url, collider, stretch, apart = DEPLOY.model(face)
     if url == "" or not spawnObject then
         printToAll(string.format('%sNo deployment model for %s on a %d" x %d" map yet.', CHAT_PREFIX, name or "?",
             SETUP.map, SETUP.map), { 0.7, 0.7, 0.7 })
-        return nil
+        return {}
     end
-    local ok, o = pcall(spawnObject, {
-        type = "Custom_Model",
-        position = { 0, 0, 0 },
-        rotation = { 0, DEPLOY.turn, 0 },
-        scale = { stretch, DEPLOY.tall, stretch },
-        sound = false,
-        callback_function = function(obj)
+    local spots = apart and { { apart, 0 }, { -apart, 180 } } or { { 0, 0 } }
+    for _, spot in ipairs(spots) do
+        local x, z = DEPLOY.turned(0, spot[1], DEPLOY.turn)
+        local ok, o = pcall(spawnObject, {
+            type = "Custom_Model",
+            position = { x, 0, z },
+            rotation = { 0, (DEPLOY.turn + spot[2]) % 360, 0 },
+            scale = { stretch, DEPLOY.tall, 1 },
+            sound = false,
+            callback_function = function(obj)
+                pcall(function()
+                    obj.setLock(true)
+                    obj.setName("Deployment: " .. (name or ""))
+                    obj.setColorTint(DEPLOY.TINT)
+                end)
+            end,
+        })
+        if ok and o then
             pcall(function()
-                obj.setLock(true)
-                obj.setName("Deployment: " .. (name or ""))
-                obj.setColorTint(DEPLOY.TINT)
+                o.setCustomObject({ mesh = url, collider = collider, type = 0, cast_shadows = false })
             end)
-        end,
-    })
-    if not (ok and o) then return nil end
-    pcall(function()
-        o.setCustomObject({ mesh = url, collider = collider, type = 0, cast_shadows = false })
-    end)
-    pcall(function() o.setLock(true) end)
-    pcall(function() o.addTag(DEPLOY.TAG) end)
-    DEPLOY.obj, DEPLOY.stretch = o, stretch
-    return o
+            pcall(function() o.setLock(true) end)
+            pcall(function() o.addTag(DEPLOY.TAG) end)
+            DEPLOY.objs[#DEPLOY.objs + 1] = o
+        end
+    end
+    return DEPLOY.objs
 end
 
 -- The deployment rolled put on the table again (nothing when none was
--- rolled). Returns the model, if one was put down.
+-- rolled). Returns the models put down.
 function DEPLOY.again()
     for _, row in ipairs(SETUP.ROWS) do
         local face = row.deploy and SETUP.rolled[row.key]
         if face then return DEPLOY.spawn(face, row.results[face]) end
     end
+    return {}
 end
 
 -- Row `k`'s roll-off: a D6 for each side, thrown together, the left
@@ -2761,25 +2784,32 @@ function SETUP.nextMap(k)
     for n, size in ipairs(DEPLOY.SIZES) do if size == SETUP.map then i = n end end
     SETUP.map = DEPLOY.SIZES[i % #DEPLOY.SIZES + 1]
     SETUP.draw(k)
-    if DEPLOY.find() then DEPLOY.again() end
+    if #DEPLOY.find() > 0 then DEPLOY.again() end
 end
 
 -- A click on one of the deployment's small buttons (any mouse button):
--- the model turned DEPLOY.TURN degrees, or stretched up / down by
--- DEPLOY.STEP of its height -- remembered for the next one.
+-- the models turned DEPLOY.TURN degrees about the middle of the table, or
+-- stretched up / down by DEPLOY.STEP of their height -- remembered for the
+-- next one.
 function onDeployTool(player, value, id)
     id = tostring(id or "")
-    if id == "deployTurn" then DEPLOY.turn = (DEPLOY.turn + DEPLOY.TURN) % 360
+    local by = 0
+    if id == "deployTurn" then DEPLOY.turn, by = (DEPLOY.turn + DEPLOY.TURN) % 360, DEPLOY.TURN
     elseif id == "deployUp" then DEPLOY.tall = DEPLOY.tall + DEPLOY.STEP
     elseif id == "deployDown" then DEPLOY.tall = math.max(DEPLOY.STEP, DEPLOY.tall - DEPLOY.STEP)
     else return end
-    local o = DEPLOY.find()
-    if not o then return end
-    local across = DEPLOY.stretch or 1
-    pcall(function()
-        o.setRotation({ 0, DEPLOY.turn, 0 })
-        o.setScale({ across, DEPLOY.tall, across })
-    end)
+    for _, o in ipairs(DEPLOY.find()) do
+        pcall(function()
+            if by ~= 0 then
+                local p, r = o.getPosition(), o.getRotation()
+                local x, z = DEPLOY.turned(p.x or p[1] or 0, p.z or p[3] or 0, by)
+                o.setPosition({ x, p.y or p[2] or 0, z })
+                o.setRotation({ 0, ((r.y or r[2] or 0) + by) % 360, 0 })
+            end
+            local sc = o.getScale()
+            o.setScale({ sc.x or sc[1] or 1, DEPLOY.tall, sc.z or sc[3] or 1 })
+        end)
+    end
 end
 
 -- A left click on a victory points plate's Attacker / Defender: swapped.
