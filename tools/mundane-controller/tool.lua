@@ -1,12 +1,11 @@
--- TTS-SELFUPDATE:mundane-controller
---
 -- ==============================================================
 --  MUNDANE CONTROLLER (N26) by Antares77
 --
---  The table's game: the turn -- "Start Game", then a click on it readies
---  every fighter for the next -- the two players' victory points and
---  gangs, and each gang's Bottle Check, due once one of its fighters has
---  gone Out of Action this turn. Every roll the fighter cards make (and
+--  The table's game: before it, the setup (the scenario, objective and
+--  crews rolled, Attacker and Defender, then "Start Game"); the turn -- a
+--  click on it readies every fighter for the next -- the two players'
+--  victory points and gangs, and each gang's Bottle Check, due once one
+--  of its fighters has gone Out of Action this turn. Every roll the fighter cards make (and
 --  its own Roll Dice / Roll Firepower / Roll Injuries buttons) falls in a
 --  line under its panel (see DICE).
 --
@@ -425,16 +424,24 @@ RULES.actionTypes = {
 -- layer, but for four the card knows by their keys: treat_ally,
 -- group_activation, coup_de_grace and reload (see useAction) -- and after
 -- dash no ranged weapon can be fired, but for one with Assault (see the
--- card's TRAIT_RULES.shot). Fight and the Shoot actions pay for the
+-- card's TRAIT_RULES.shot). `distance`: how far the action moves its
+-- fighter, a list of { stat, times } added up -- "D6" for a die thrown for
+-- it -- shown over the stats and said with the action (see the card's
+-- ACTIVATION.moveBy), the bar's title `distanceTitle` or the label with
+-- what it adds up ("Dash (M + I)"). Fight and the Shoot actions pay for the
 -- weapons' attacks: taken from the panel, they light up the weapons they
 -- are for, and the attack after them spends nothing more (see the card's
 -- ACTIVATION.attackCost). `desc`, when filled in, shows over the stats
 -- while the cursor is on the action.
 RULES.actions = {
-    { key = "move",             label = "Move",             cost = "S", type = "movement", desc = "" },
-    { key = "dash",             label = "Dash",             cost = "D", type = "movement", desc = "" },
-    { key = "engage",           label = "Engage",           cost = "S", type = "close",    desc = "" },
-    { key = "charge",           label = "Charge",           cost = "D", type = "close",    desc = "" },
+    { key = "move",             label = "Move",             cost = "S", type = "movement", desc = "",
+      distance = { { "M", 1 } }, distanceTitle = "Movement" },
+    { key = "dash",             label = "Dash",             cost = "D", type = "movement", desc = "",
+      distance = { { "M", 1 }, { "I", 1 } } },
+    { key = "engage",           label = "Engage",           cost = "S", type = "close",    desc = "",
+      distance = { { "D6", 1 } } },
+    { key = "charge",           label = "Charge",           cost = "D", type = "close",    desc = "",
+      distance = { { "M", 1 }, { "D6", 1 } } },
     { key = "coup_de_grace",    label = "Coup de Grace",    cost = "S", type = "close",    desc = "" },
     { key = "interact",         label = "Interact",         cost = "S", type = "utility",  desc = "" },
     { key = "shoot",            label = "Shoot",            cost = "S", type = "shooting", desc = "" },
@@ -556,8 +563,9 @@ RULES.conditions = {
 --              the lowest), and an Agility test then saves it from being
 --              Suppressed by the fall (Catfall; see the card's fallingDown);
 --   distance   for a skill that is an action: the inches it moves its
---              fighter, said in chat when it is taken -- a list of { stat,
---              times }, added up (Sprint: M + 2x I);
+--              fighter, shown and said in chat when it is taken -- a list
+--              of { stat, times }, added up (Sprint: M + 2x I), as the
+--              actions' own `distance` is;
 --   fearsome   true: an enemy that starts a fight against it makes a
 --              Willpower check first, and fails into the Feared condition
 --              (see the card's rollAttack) -- unless it is Fearsome itself;
@@ -896,8 +904,8 @@ RULES.traits = {
     assault   = "assault",            -- after a Dash, one Shoot with it, for no action
     toxin     = "toxin",              -- Toxin (N+)  (the card's TRAIT_RULES.toxin)
     shock     = "shock",              -- Shock (N+): a hit roll of N+ wounds automatically, as a 6
-    knockback = "knockback",          -- Knockback (N+): a hit roll of N+ pushes the target back (once an attack)
-    blast     = "blast[^,]*",         -- Blast (3") / (5"): a Knockback with it pushes nobody
+    knockback = "knockback",          -- Knockback (N+): a hit roll of N+ knocks the target back (once an attack)
+    blast     = "blast[^,]*",         -- Blast (3") / (5"): a Knockback with it knocks nobody back
     cursed    = "cursed",             -- a target hit makes a Willpower check, failed: Insanity
     flash     = "flash",              -- ranged: no Wound roll; the target hit is Blind and loses its Ready marker
     graviton  = "graviton pulse",     -- ranged: no Wound roll
@@ -982,9 +990,9 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   shockNatural  Shock (N+) and Knockback (N+): false -- the hit roll
 --                 with its modifiers must reach N (Shock (6+) with +1 to
 --                 hit: a 5 does); true -- the die's own roll.
---   knockback     Knockback (N+): how many inches the target is pushed
---                 straight away from the attacker, once the attack is over
---                 (see the card's knockback).
+--   knockback     Knockback (N+): how many inches the target is knocked
+--                 back, shown on its card once the attack is over -- the
+--                 players move the model (see the card's knockback).
 --   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
 --                 Firepower dice give shares the hit roll, so every one of
 --                 them wounds automatically; true -- only the first does.
@@ -1219,6 +1227,7 @@ local DICE = {
     PLAIN = "Die_6",
     BELOW = 100, DROP = 4, SPIN = 18, PUSH = 3, STEP = 1.4, SCALE = 1,
     SORT  = "thrown", TURN = { d6 = 0, firepower = 180, injury = 180 },
+    APART = 4,              -- a roll-off's two dice: this far apart, each on its side's side
     JOIN = 1, NEXT = 1.5, WAIT = 12, MAX = 20,
     FALL  = 0.3, KICK = 10,
     TAG   = "Mundane Dice",
@@ -1234,6 +1243,38 @@ local PANEL = { position = "0 335 -5", rotation = "0 0 180", scale = "1 1 1" }
 -- The die on the Bottle Check's roll button -- the fighter card's own
 -- (its ASSETS stat_die), so both look alike. Empty: a "D" instead.
 local DIE_ICON = "https://steamusercontent-a.akamaihd.net/ugc/12001738551517573707/F2E806437431BEE65DD78832C9C5A286D327A301/"
+
+-- The deployment's model: rolled on the setup's Roll for Deployment, a
+-- see-through custom model of the deployment zones is put in the middle
+-- of the table (0, 0, 0; locked). MESH[face of the D6] gives its mesh's
+-- link: { link, stretch = true } -- one model made for a BASE" map,
+-- stretched across (not up) to the map size chosen; { link } -- one model
+-- for every map size, as it is; or { [36] = link, [48] = link } -- one per
+-- map size. COLLIDER is the one collider every model shares (stretched
+-- with a stretched one). Empty link: no model for it; chat says so.
+-- It is tinted TINT (8100FF at alpha 150), turned TURN degrees at a time
+-- and stretched up / down by STEP (of its own height, never below STEP)
+-- by the small buttons beside the row -- kept for the next one (saved).
+-- A right click on the row takes it away, and the next puts it back;
+-- Start Game takes it away, and going back from round 1 to the setup puts
+-- it back. SIZES: the map sizes the setup's Map Size goes through, in turn.
+local DEPLOY = {
+    SIZES = { 36, 48 },
+    MESH = {
+        { "https://steamusercontent-a.akamaihd.net/ugc/9465755442651241131/390F4CE0CDC31319D057EA10E172162A1488D256/", stretch = true },         -- 1 Sniping Range
+        { "https://steamusercontent-a.akamaihd.net/ugc/9465755442651241131/390F4CE0CDC31319D057EA10E172162A1488D256/", stretch = true },         -- 2 Face Off
+        { "https://steamusercontent-a.akamaihd.net/ugc/9465755442651241131/390F4CE0CDC31319D057EA10E172162A1488D256/", stretch = true },         -- 3 Stand Off
+        { "https://steamusercontent-a.akamaihd.net/ugc/11891530078336619171/3F73632BB82474CB818688E2AF2B0080B726354D/" },                         -- 4 Ambush
+        { [36] = "https://steamusercontent-a.akamaihd.net/ugc/17867774420708299133/10A0F962A14186C96646CA6F25A87194272F8D2E/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/17929910256943798418/A327586A2CD4B113197323620CFE2C157DEF2352/" },       -- 5 Free for All
+        { [36] = "https://steamusercontent-a.akamaihd.net/ugc/15512193714167926411/4AFE70845D320E07D87041B2CC95B5E87A7EFDE0/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/14713276897348078853/B3B86E458A793322E22F8D4A93D0E3182D5B0E8D/" },       -- 6 Chance Encounter
+    },
+    BASE = 36,
+    COLLIDER = "https://steamusercontent-a.akamaihd.net/ugc/9590185350319248742/E1ACACACB191CDC4F0211AC33E42B34B043DBD19/",
+    TINT = { r = 0x81 / 255, g = 0, b = 1, a = 150 / 255 },
+    TURN = 90, STEP = 0.5,
+    TAG  = "Mundane Deployment",
+    turn = 0, tall = 1,     -- how the last one stood: turned, and stretched up (saved)
+}
 
 -- Homebrew: the table's own rules, as named sets, each a choice between
 -- the rules as written and the set's -- two radio buttons on the panel's
@@ -1305,8 +1346,8 @@ local BOTTLE_H  = 120                  -- the two Bottle Checks, under the victo
 local NAME_H    = 32                   -- the gangs' names, over the Bottle Checks
 local VP_ROW_H  = PLAY_H - 2 * (BAR_H + 6) - 6 - NAME_H - 6 - BOTTLE_H   -- the victory points and the turn
 
--- The turn it counts (0: the game hasn't started -- the plate reads
--- "Start Game"), and the two players' victory points and names.
+-- The turn it counts (0: the game hasn't started -- the plate shows the
+-- game's setup, see SETUP), and the two players' victory points and names.
 local turn = 0
 local vp, vpNames = { 0, 0 }, { "Player 1", "Player 2" }
 
@@ -1317,10 +1358,373 @@ local function plateButton(id, fn)
         ' onClick="%s" />', id, fn)
 end
 
+-- Reset all Fighters: every fighter's card back to the fighter as
+-- imported (see onResetFighters) -- after a second click, within WAIT
+-- seconds, while the button asks.
+local RESET = {
+    LABEL = "Reset all Fighters",
+    ASK   = "Click again to reset",
+    WAIT  = 4,
+    ASKING = "#B03030E6|#C04040E6|#8A2020E6|#B0303066",   -- brighter than RED while it asks
+    asking = false, token = 0,
+}
+
+-- The game's setup, on the round plate until the game starts: a column
+-- of buttons (ROWS, top to bottom, all as tall) -- the map size (a click
+-- goes on to the next of DEPLOY.SIZES), three that roll a D6 in the dice
+-- line for the battle's deployment, objective and crews (said on
+-- everyone's screen, and the result is the button's text from then on; a
+-- click rolls again -- the deployment also puts its model on the table,
+-- see DEPLOY), the roll-off for who chooses Attacker and Defender,
+-- three that do nothing yet, and Start Game (the round plate's own left
+-- click: round 1, and the plate shows the round from then on). Each row of
+-- ROWS:
+--   label    what the button reads until it has rolled
+--   start    Start Game
+--   key      what a save knows its roll by
+--   say      the word the result is said after ("Scenario: Ambush")
+--   results  what each face of the D6 means (as said)
+--   button   ... and as the button shows it, where it differs: "\n" for
+--            a line break of its own
+--   rollOff  a D6 for each side, thrown together (DICE.APART apart, the
+--            left side's on the left): the higher one chooses -- a tie
+--            is thrown again
+--   map      the map size
+--   deploy   the deployment: its model, and the small buttons beside it
+--            (TOOL_W wide each, GAP apart) that turn it, and raise and
+--            lower it
+-- Which side attacks shows at the bottom of each victory points plate
+-- (the left one is the Attacker until swapped there). Crews with
+-- reinforcements are remembered on the round plate (SETUP.reminder).
+local SETUP = {
+    ROWS = {
+        { label = "Map Size", map = true },
+        { label = "Roll for Deployment", key = "deployment", say = "Deployment", deploy = true,
+          results = { "Sniping Range", "Face Off", "Stand Off", "Ambush", "Free for All", "Chance Encounter" } },
+        { label = "Roll for Objective", key = "objective", say = "Objective",
+          results = { "King of the Hive", "Turf War", "Tunnel Clash", "Object Lesson", "Flank 'em", "Burn Them Out" } },
+        { label = "Roll for Crews", key = "crews", say = "Crew",
+          results = { "Hybrid (3 + D3) - Reinforcements (5) - D3 per Round", "Custom (10)", "Hybrid (3 + 4)",
+                      "Attacker: Hybrid (4 + 4)  ||  Defender: Custom (3) - Reinforcements (7) - D3 per Round",
+                      "Custom (5)", "Hybrid (D3 + 5)" },
+          button = { [1] = "Hybrid (3 + D3)\nReinforcements (5) - D3 per Round",
+                     [4] = "Attacker: Hybrid (4 + 4)\nDefender: Custom (3) - Reinforcements (7) - D3 per Round" } },
+        { label = "Determine Attacker | Defender", key = "sides", rollOff = true },
+        { label = "Choose Crews" },
+        { label = "Gang Tactics" },
+        { label = "Deployment (Defender starts)" },
+        { label = "Start Game", start = true },
+    },
+    attacker = 1,           -- the side (1 left, 2 right) that attacks; the other defends (saved)
+    map      = 36,          -- the map size, in inches a side (saved)
+    rolled   = {},          -- a roll's key -> the face it came up (saved)
+    rolling  = {},          -- a row -> true while its die is falling
+    W = ROW_W - 2 * 130 - 12,   -- the round plate's width
+    GAP = 4, PAD = 6,       -- the rows: apart, and clear of the plate's edge (each as tall: the rest)
+    FONT = 17, MIN = 9,     -- a row's text: its size, and the smallest it shrinks to
+    TOOL_W = 36,            -- the deployment's small buttons: each column's width
+    FILL  = "#4D5A5EE6",    -- a row: lighter than the plate, so it reads as a button
+    START = "#E6E5E1E6",    -- Start Game: parchment, with anthracite type
+    ATTACKER = "#E0B830E6", DEFENDER = "#2BB3ADE6",   -- yellow and turquoise, with anthracite type
+    SAY = { 1, 0.85, 0.4 }, -- what the rolls and swaps say
+}
+
+-- How wide a character of Arial Bold is, in ems (any other: as wide as
+-- an "n") -- to wrap and size a row's text (see SETUP.fit).
+SETUP.EM = {}
+for chars, em in pairs({ [" ijlI.,;!|'"] = 0.278, ["ft():-"] = 0.333, r = 0.389, z = 0.5,
+                         ["acekpsvxy0123456789J"] = 0.556, ["+"] = 0.584, ["bdghnopquFLTZ"] = 0.611,
+                         ["EPSVXY"] = 0.667, ["ABCDHKNRU"] = 0.722, ["wGOQ"] = 0.778, M = 0.833, m = 0.889,
+                         W = 0.944 }) do
+    for c in chars:gmatch(".") do SETUP.EM[c] = em end
+end
+function SETUP.em(c) return SETUP.EM[c] or 0.611 end
+
+-- `text` wrapped at its spaces (and its own line breaks) and sized to fit
+-- `w` x `h`: the lines (joined by line breaks) and the font size -- FONT,
+-- or as much smaller as it needs (never below MIN).
+function SETUP.fit(text, w, h)
+    local function width(s, size)
+        local n = 0
+        for c in s:gmatch(".") do n = n + SETUP.em(c) end
+        return n * size
+    end
+    local lines
+    for size = SETUP.FONT, SETUP.MIN, -1 do
+        lines = {}
+        for given in (text .. "\n"):gmatch("([^\n]*)\n") do
+            local first = #lines + 1
+            for word in given:gmatch("%S+") do
+                local cur = #lines >= first and lines[#lines]
+                if cur and width(cur .. " " .. word, size) <= w then lines[#lines] = cur .. " " .. word
+                else lines[#lines + 1] = word end
+            end
+        end
+        local fits = #lines * size * 1.2 <= h
+        for _, l in ipairs(lines) do fits = fits and width(l, size) <= w end
+        if fits then return table.concat(lines, "\n"), size end
+    end
+    return table.concat(lines, "\n"), SETUP.MIN
+end
+
+-- Row `k`'s middle (up from the plate's) and height, and its button's
+-- width and middle across -- the plate's height shared out evenly between
+-- the rows; the deployment's button leaves room for its small buttons on
+-- the right.
+function SETUP.place(k)
+    local n = #SETUP.ROWS
+    local h = (VP_ROW_H - 6 - 2 * SETUP.PAD - (n - 1) * SETUP.GAP) / n
+    local w, tools = SETUP.W - 6 - 2 * SETUP.PAD, SETUP.ROWS[k].deploy and 2 * (SETUP.TOOL_W + SETUP.GAP) or 0
+    return (VP_ROW_H - 6) / 2 - SETUP.PAD - (k - 1) * (h + SETUP.GAP) - h / 2, h, w - tools, -tools / 2
+end
+
+-- Side `n`'s name as the setup says it: its gang's, or "Player <n>".
+function SETUP.side(n)
+    local name = trim(tostring(vpNames[n] or ""))
+    return name ~= "" and name or ("Player " .. n)
+end
+
+-- The reminder at the bottom of the round plate once the game is under
+-- way: what each part of the crews rolled that brings reinforcements
+-- brings every round, as "Reinforcements - D3" -- "Defender:
+-- Reinforcements - D3" when only one side's part of it does. Nil when none
+-- does (or no crews were rolled).
+function SETUP.reminder()
+    for _, row in ipairs(SETUP.ROWS) do
+        local text = row.key == "crews" and row.results[SETUP.rolled.crews or 0]
+        if text then
+            local out = {}
+            for part in (text .. "||"):gmatch("(.-)||") do
+                local each = part:match("Reinforcements %(%d+%) %- (%S+) per Round")
+                if each then
+                    local who = trim(part):match("^(%a+):")
+                    out[#out + 1] = (who and who .. ": " or "") .. "Reinforcements - " .. each
+                end
+            end
+            return #out > 0 and table.concat(out, ", ") or nil
+        end
+    end
+end
+
+-- What row `k` reads, fitted: its text and font size.
+function SETUP.view(k)
+    local row = SETUP.ROWS[k]
+    local text = row.label
+    local face = row.key and SETUP.rolled[row.key]
+    if row.map then text = string.format('Map Size: %d" x %d"', SETUP.map, SETUP.map)
+    elseif SETUP.rolling[k] then text = "Rolling..."
+    elseif face and row.rollOff then text = SETUP.side(face) .. " chooses"
+    elseif face then text = row.say .. ": " .. (row.button and row.button[face] or row.results[face])
+    end
+    local _, h, w = SETUP.place(k)
+    return SETUP.fit(text, w - 6, h - 4)
+end
+
+-- The reminder (SETUP.reminder) as the round plate shows it: its text,
+-- font size, and whether it shows -- at the bottom, in the last row's
+-- place, as big as a row's text.
+function SETUP.note()
+    local text = SETUP.reminder()
+    local _, h, w = SETUP.place(#SETUP.ROWS)
+    local fitted, size = SETUP.fit(text or "", w - 6, h - 4)
+    return fitted, size, text ~= nil
+end
+function SETUP.noteXml()
+    local y, h, w = SETUP.place(#SETUP.ROWS)
+    local text, size, on = SETUP.note()
+    return string.format('<Text id="roundNote" active="%s" rectAlignment="MiddleCenter" offsetXY="0 %g" width="%g"' ..
+        ' height="%g" fontSize="%d" fontStyle="Bold" alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>',
+        tostring(on), y, w - 6, h - 4, size, PALE, xmlEsc(text))
+end
+
+-- The setup's column of rows, in the round plate (shown before round 1).
+function SETUP.xml()
+    local out = { string.format('<Panel id="setupPanel" active="%s" rectAlignment="MiddleCenter" width="%g" height="%g"' ..
+        ' color="#00000000">', tostring(turn < 1), SETUP.W - 6, VP_ROW_H - 6) }
+    for k, row in ipairs(SETUP.ROWS) do
+        local y, h, w, x = SETUP.place(k)
+        local text, size = SETUP.view(k)
+        out[#out + 1] = string.format([[
+                <Panel id="setup_%d" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g" height="%g" color="%s"%s>
+                  %s
+                  <Text id="setupTxt_%d" rectAlignment="MiddleCenter" width="%g" height="%g" fontSize="%d" fontStyle="Bold"
+                        alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>
+                </Panel>]], k, x, y, w, h, row.start and SETUP.START or SETUP.FILL, BEVEL,
+            plateButton("setupBtn_" .. k, row.start and "onAdvanceTurn" or "onSetup"), k, w - 6, h - 4, size,
+            row.start and INK or PALE, SETUP.esc(text))
+        if row.deploy then out[#out + 1] = SETUP.toolsXml(y, h, w / 2 + x) end
+    end
+    out[#out + 1] = "</Panel>"
+    return table.concat(out, "\n")
+end
+
+-- A row's text as a Text holds it: inch marks and apostrophes as they
+-- are (a Text would show an entity as it is written).
+function SETUP.esc(s)
+    return (tostring(s or ""):gsub("&", "and"):gsub("[<>]", ""))
+end
+
+-- The deployment's small buttons, right of its button (whose right edge
+-- is at `right`), in a row `h` tall at `y`: one that turns the model
+-- (deployTurn, as tall as the row) and, in a column beside it, one that
+-- raises it over one that lowers it (deployUp / deployDown) -- each a
+-- clear button over a framed panel, like the rows.
+function SETUP.toolsXml(y, h, right)
+    local tw, g = SETUP.TOOL_W, SETUP.GAP
+    local function tool(id, x, yy, hh, label, size)
+        return string.format([[
+                <Panel id="%sBox" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g" height="%g" color="%s"%s>
+                  %s
+                  <Text rectAlignment="MiddleCenter" width="%g" height="%g" fontSize="%d" fontStyle="Bold"
+                        alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>
+                </Panel>]], id, x, yy, tw, hh, SETUP.FILL, BEVEL, plateButton(id, "onDeployTool"), tw, hh, size, PALE, label)
+    end
+    local x1, x2, hh = right + g + tw / 2, right + 2 * g + 1.5 * tw, (h - 2) / 2
+    return tool("deployTurn", x1, y, h, "90°", 13) .. "\n" ..
+        tool("deployUp", x2, y + hh / 2 + 1, hh, "▲", 10) .. "\n" ..
+        tool("deployDown", x2, y - hh / 2 - 1, hh, "▼", 10)
+end
+
+-- Row `k` redrawn in place (font sizes scaled by PANEL_DETAIL like the
+-- built XML's).
+function SETUP.draw(k)
+    local text, size = SETUP.view(k)
+    self.UI.setAttribute("setupTxt_" .. k, "fontSize", string.format("%d", size * PANEL_DETAIL))
+    setLabel("setupTxt_" .. k, text)
+end
+
+-- Every row redrawn (a side's name in the roll-off's result may have
+-- changed).
+function SETUP.drawAll()
+    for k in ipairs(SETUP.ROWS) do SETUP.draw(k) end
+end
+
+-- Side `n`'s part, as its victory points plate shows it: the word and the
+-- colour behind it.
+function SETUP.role(n)
+    if n == SETUP.attacker then return "Attacker", SETUP.ATTACKER end
+    return "Defender", SETUP.DEFENDER
+end
+
+-- Attacker and Defender swapped, both plates redrawn, and said in chat.
+function SETUP.swap()
+    SETUP.attacker = 3 - SETUP.attacker
+    for n = 1, 2 do
+        local word, fill = SETUP.role(n)
+        setLabel("vpRoleTxt_" .. n, word)
+        self.UI.setAttribute("vpRole_" .. n, "color", fill)
+    end
+    printToAll(string.format("%sAttacker: %s -- Defender: %s", CHAT_PREFIX, SETUP.side(SETUP.attacker),
+        SETUP.side(3 - SETUP.attacker)), SETUP.SAY)
+end
+
+-- The deployment's model on the table, if there is one (the last spawned,
+-- else the first found with DEPLOY.TAG -- one from before a load).
+function DEPLOY.find()
+    local o = DEPLOY.obj
+    if o and not (o.isDestroyed and o.isDestroyed()) then return o end
+    local ok, list = pcall(function() return getObjectsWithTag(DEPLOY.TAG) end)
+    DEPLOY.obj = ok and type(list) == "table" and list[1] or nil
+    return DEPLOY.obj
+end
+
+-- Every deployment model taken off the table. Returns whether there was one.
+function DEPLOY.remove()
+    local any = false
+    local ok, list = pcall(function() return getObjectsWithTag(DEPLOY.TAG) end)
+    for _, o in ipairs(ok and type(list) == "table" and list or {}) do
+        any = true
+        pcall(function() o.destruct() end)
+    end
+    if DEPLOY.obj then
+        any = true
+        pcall(function() if not DEPLOY.obj.isDestroyed() then DEPLOY.obj.destruct() end end)
+    end
+    DEPLOY.obj = nil
+    return any
+end
+
+-- Deployment `face`'s model on the map size chosen: its mesh's link, its
+-- collider's, and how far it is stretched across (1: made for that size).
+function DEPLOY.model(face)
+    local mesh = DEPLOY.MESH[face] or {}
+    if mesh[1] == nil then return mesh[SETUP.map] or "", DEPLOY.COLLIDER, 1 end
+    return mesh[1], DEPLOY.COLLIDER, mesh.stretch and SETUP.map / DEPLOY.BASE or 1
+end
+
+-- The model of deployment `face` (Roll for Deployment's result) on the
+-- map size chosen, in place of any other: in the middle of the table,
+-- turned DEPLOY.turn, stretched up DEPLOY.tall, locked, see-through. With no link for
+-- it, chat says so and nothing is put down.
+function DEPLOY.spawn(face, name)
+    DEPLOY.remove()
+    local url, collider, stretch = DEPLOY.model(face)
+    if url == "" or not spawnObject then
+        printToAll(string.format('%sNo deployment model for %s on a %d" x %d" map yet.', CHAT_PREFIX, name or "?",
+            SETUP.map, SETUP.map), { 0.7, 0.7, 0.7 })
+        return nil
+    end
+    local ok, o = pcall(spawnObject, {
+        type = "Custom_Model",
+        position = { 0, 0, 0 },
+        rotation = { 0, DEPLOY.turn, 0 },
+        scale = { stretch, DEPLOY.tall, stretch },
+        sound = false,
+        callback_function = function(obj)
+            pcall(function()
+                obj.setLock(true)
+                obj.setName("Deployment: " .. (name or ""))
+                obj.setColorTint(DEPLOY.TINT)
+            end)
+        end,
+    })
+    if not (ok and o) then return nil end
+    pcall(function()
+        o.setCustomObject({ mesh = url, collider = collider, type = 0, cast_shadows = false })
+    end)
+    pcall(function() o.setLock(true) end)
+    pcall(function() o.addTag(DEPLOY.TAG) end)
+    DEPLOY.obj, DEPLOY.stretch = o, stretch
+    return o
+end
+
+-- The deployment rolled put on the table again (nothing when none was
+-- rolled). Returns the model, if one was put down.
+function DEPLOY.again()
+    for _, row in ipairs(SETUP.ROWS) do
+        local face = row.deploy and SETUP.rolled[row.key]
+        if face then return DEPLOY.spawn(face, row.results[face]) end
+    end
+end
+
+-- Row `k`'s roll-off: a D6 for each side, thrown together, the left
+-- side's on the left. The higher one chooses Attacker and Defender (said
+-- on everyone's screen, and on the row); a tie is thrown again.
+function SETUP.rollOff(k, color)
+    SETUP.rolling[k] = true
+    SETUP.draw(k)
+    DICE.request({ kinds = { "d6", "d6" }, apart = DICE.APART, inOrder = true, color = color,
+        done = function(faces, digital)
+            local how = digital and " (rolled digitally)" or ""
+            if faces[1] == faces[2] then
+                DICE.announce(string.format("%sRoll-off: %s and %s both roll %d -- rolled again%s", CHAT_PREFIX,
+                    SETUP.side(1), SETUP.side(2), faces[1], how), SETUP.SAY)
+                return SETUP.rollOff(k, color)
+            end
+            local win = faces[1] > faces[2] and 1 or 2
+            SETUP.rolling[k] = nil
+            SETUP.rolled[SETUP.ROWS[k].key] = win
+            SETUP.draw(k)
+            DICE.announce(string.format("%s%s chooses%s", CHAT_PREFIX, SETUP.side(win), how), SETUP.SAY)
+        end })
+end
+
 -- A player's victory points, beside the turn: clicking the plate counts
--- them (left +1, right -1). The gang's name is over its Bottle Check
--- (nameXml).
+-- them (left +1, right -1). At its bottom the side's part, Attacker or
+-- Defender (vpRole_<n>: a click there swaps them, see SETUP). The gang's
+-- name is over its Bottle Check (nameXml).
 local function vpXml(n)
+    local word, fill = SETUP.role(n)
     return string.format([[
           <Panel preferredWidth="130" color="%s" outline="#29313366" outlineSize="2 2" padding="2 2 2 2">
             <Panel color="#00000000" outline="#E6E5E159" outlineSize="1 1">
@@ -1329,8 +1733,14 @@ local function vpXml(n)
                     fontStyle="Bold" color="%s" raycastTarget="false">VP</Text>
               <Text id="vpText_%d" rectAlignment="MiddleCenter" offsetXY="0 -10" width="120" height="140"
                     fontSize="90" fontStyle="Bold" color="%s" raycastTarget="false">%d</Text>
+              <Panel id="vpRole_%d" rectAlignment="MiddleCenter" offsetXY="0 %g" width="114" height="34" color="%s"%s>
+                %s
+                <Text id="vpRoleTxt_%d" rectAlignment="MiddleCenter" width="110" height="30" fontSize="20" fontStyle="Bold"
+                      alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>
+              </Panel>
             </Panel>
-          </Panel>]], LIT, plateButton("vpBtn_" .. n, "onVp"), PALE, n, PALE, vp[n])
+          </Panel>]], LIT, plateButton("vpBtn_" .. n, "onVp"), PALE, n, PALE, vp[n],
+        n, -(VP_ROW_H - 4) / 2 + 6 + 17, fill, BEVEL, plateButton("vpRoleBtn_" .. n, "onSwapRoles"), n, INK, word)
 end
 
 -- A player's gang name (to type in, or put one of the gang's models on
@@ -1351,7 +1761,8 @@ end
 -- BOTTLE.target), with "Ld" left of it, and the die that rolls it
 -- (bottleRoll: the card's die, DIE_ICON, upright over it -- ICON of the
 -- diamond's side, as on the card's roll buttons -- or a "D"). The panel
--- itself (bottle_<n>) turns dark red while the check must be taken. Every
+-- itself (bottle_<n>) turns dark red while the check must be taken; a left
+-- click on "Bottle Check" (bottleHead_<n>) switches that by hand. Every
 -- diamond is a turned button with a plain Text over it (a turned button's
 -- label would turn with it).
 local BOTTLE = {
@@ -1391,40 +1802,35 @@ local function bottleXml(n)
     return string.format([[
           <Panel id="bottle_%d" preferredWidth="%g" color="%s" outline="#29313366" outlineSize="2 2" padding="3 3 3 3">
             <Panel color="#00000000" outline="#E6E5E159" outlineSize="1 1">
+              <Button id="bottleHead_%d" rectAlignment="UpperCenter" offsetXY="0 -6" width="%g" height="28"
+                      colors="#00000000|#FFFFFF14|#FFFFFF26|#00000000" outline="#00000000" onClick="onBottleHead" />
               <Text rectAlignment="UpperCenter" offsetXY="0 -6" width="%g" height="28" fontSize="20" fontStyle="Bold"
                     color="%s" raycastTarget="false">Bottle Check</Text>
               <Text rectAlignment="MiddleCenter" offsetXY="%g %g" width="40" height="%d" fontSize="22" fontStyle="Bold"
                     color="%s" raycastTarget="false">Ld</Text>
               %s%s
             </Panel>
-          </Panel>]], n, W, BOTTLE.color(n), W - 20, PALE,
+          </Panel>]], n, W, BOTTLE.color(n), n, W - 20, W - 20, PALE,
         -step / 2 - d * math.sqrt(2) / 2 - BOTTLE.LD_GAP - BOTTLE.LD_W / 2, y, d, PALE,
         dia("bottleVal", 1, v and tostring(v) or "-", "onBottleValue", BOTTLE.ink(n, will)), die())
 end
 
--- How the turn plate reads: "Turn" over the number, or -- before turn 1 --
--- "Start Game" alone, smaller and centred. Returns the caption's
--- visibility, the text, its font size and its offset (unscaled; see
--- detailed / drawTurn).
-local function turnView(t)
-    if t < 1 then return false, "Start\nGame", 64, "0 0" end
-    return true, tostring(t), 150, "0 -20"
-end
-
 -- The play section, under the header: two slim bars of buttons ("Clear
--- All Conditions" and "Homebrew Rules", then "Roll Dice", "Roll Firepower"
+-- All Conditions", "Reset all Fighters" and "Homebrew Rules", then "Roll Dice", "Roll Firepower"
 -- and "Roll Injuries": a die under the panel per click, quick clicks
 -- gathered into one roll -- see DICE.click), then the turn in a framed
--- plate between the two players' victory points -- clicking the turn
--- advances it (every fighter readied; a right click steps it back) -- and
+-- plate between the two players' victory points -- before the game the
+-- setup's buttons (SETUP), Start Game first; from turn 1 "Turn" over the
+-- number (the panel turnView), and clicking it advances the turn (every fighter
+-- readied; a right click steps it back, below turn 1 to the setup) -- and
 -- under them each player's gang name (nameXml) over their Bottle Check
 -- (bottleXml).
 local function playXml()
-    local caption, text, size, offset = turnView(turn)
     return string.format([[
       <VerticalLayout id="playSection" preferredHeight="%d" spacing="6" childForceExpandHeight="false">
         <HorizontalLayout preferredHeight="%d" spacing="6">
           <Button id="clearConditions" fontSize="15" colors="%s" textColor="%s" onClick="onClearConditions">Clear All Conditions</Button>
+          <Button id="resetFighters" fontSize="15" colors="%s" textColor="%s" onClick="onResetFighters">%s</Button>
           <Button id="homebrewBtn" fontSize="15" colors="%s" textColor="%s" onClick="onHomebrewOpen">%s</Button>
         </HorizontalLayout>
         <HorizontalLayout preferredHeight="%d" spacing="6">
@@ -1436,11 +1842,15 @@ local function playXml()
 %s
           <Panel preferredWidth="%d" color="%s" outline="#29313366" outlineSize="2 2" padding="3 3 3 3">
             <Panel color="#00000000" outline="#E6E5E159" outlineSize="1 1">
+              <Panel id="turnView" active="%s" rectAlignment="MiddleCenter" width="%d" height="%d" color="#00000000">
+                %s
+                <Text id="turnCaption" rectAlignment="MiddleCenter" offsetXY="0 90" width="%d" height="70"
+                      fontSize="51" fontStyle="Bold" color="%s" raycastTarget="false">Round</Text>
+                <Text id="turnText" rectAlignment="MiddleCenter" offsetXY="0 -20" width="%d" height="170"
+                      fontSize="150" fontStyle="Bold" color="%s" raycastTarget="false">%s</Text>
+                %s
+              </Panel>
               %s
-              <Text id="turnCaption" active="%s" rectAlignment="MiddleCenter" offsetXY="0 90" width="%d" height="70"
-                    fontSize="51" fontStyle="Bold" color="%s" raycastTarget="false">Turn</Text>
-              <Text id="turnText" rectAlignment="MiddleCenter" offsetXY="%s" width="%d" height="170"
-                    fontSize="%d" fontStyle="Bold" color="%s" raycastTarget="false">%s</Text>
             </Panel>
           </Panel>
 %s
@@ -1453,11 +1863,10 @@ local function playXml()
 %s
 %s
         </HorizontalLayout>
-      </VerticalLayout>]], PLAY_H, BAR_H, RED, PALE, LIT, PALE, HOMEBREW.button(), BAR_H, LIT, PALE, LIT, PALE, LIT, PALE,
-        VP_ROW_H, vpXml(1), ROW_W - 2 * 130 - 12, LIT,
-        plateButton("turnBtn", "onAdvanceTurn"), tostring(caption), ROW_W - 2 * 130 - 30, PALE, offset,
-        ROW_W - 2 * 130 - 30, size, PALE, text,
-        vpXml(2), NAME_H, nameXml(1), nameXml(2), BOTTLE_H, bottleXml(1), bottleXml(2))
+      </VerticalLayout>]], PLAY_H, BAR_H, LIT, PALE, RED, PALE, RESET.LABEL, LIT, PALE, HOMEBREW.button(), BAR_H, LIT, PALE, LIT, PALE, LIT, PALE,
+        VP_ROW_H, vpXml(1), SETUP.W, LIT, tostring(turn >= 1), SETUP.W - 6, VP_ROW_H - 6,
+        plateButton("turnBtn", "onAdvanceTurn"), SETUP.W - 30, PALE, SETUP.W - 30, PALE, tostring(turn), SETUP.noteXml(),
+        SETUP.xml(), vpXml(2), NAME_H, nameXml(1), nameXml(2), BOTTLE_H, bottleXml(1), bottleXml(2))
 end
 
 -- A homebrew set's name or description as a Text shows it (see HOMEBREW).
@@ -1555,6 +1964,7 @@ function onVpName(player, value, id)
         vpNames[n] = trim(tostring(value or ""))
         BOTTLE.hand[n] = nil
         BOTTLE.draw(n)
+        SETUP.drawAll()
     end
 end
 
@@ -1748,6 +2158,7 @@ function BOTTLE.tick()
             if g then
                 vpNames[n] = g
                 self.UI.setAttribute("vpName_" .. n, "text", g)
+                SETUP.drawAll()
                 pcall(function() o.highlightOn({ 0.9, 0.8, 0.4 }, 1) end)
                 printToAll(string.format("%s%s play on the %s.", CHAT_PREFIX, g, n == 1 and "left" or "right"),
                     { 0.9, 0.8, 0.4 })
@@ -1780,7 +2191,10 @@ end
 -- buttons'.
 -- A roll: { kinds = { "d6", "firepower", ... }, color = the roller's, and
 -- who hears of it: done(faces, digital, dice) and / or a card (from = its
--- GUID, token), or -- own, the buttons' -- said on everyone's screen }.
+-- GUID, token), or -- own, the buttons' -- said on everyone's screen;
+-- apart = its dice fall in a row in the order thrown, that far apart, and
+-- lie so (none: they fall from the middle out, and lie STEP apart);
+-- inOrder = never lined up by SORT }.
 -- DICE.busy is the roll falling now, DICE.queue the rolls waiting for it,
 -- DICE.shown the last roll's dice, lined up; DICE.open the buttons' roll
 -- still gathering clicks. The tokens let a newer wait win over an older one.
@@ -1835,6 +2249,7 @@ function DICE.spawn(req, kind)
     local i = #req.dice + 1
     local k = i - 1
     local off = (k % 2 == 1 and 1 or -1) * math.ceil(k / 2) * DICE.STEP + (math.random() - 0.5) * 0.3
+    if req.apart then off = (k - (#req.kinds - 1) / 2) * req.apart end   -- in a row, in order, that far apart
     local m, d, url, s = req.mid, req.dir, DICE.URL[kind] or "", DICE.SCALE
     -- the roll's entry: where it spawned and, once spawned, its kick (see
     -- DICE.settled)
@@ -1940,7 +2355,7 @@ function DICE.finish(req)
     end
     local thrown = {}
     for i, d in ipairs(list) do thrown[i] = d end
-    if DICE.SORT ~= "thrown" then
+    if DICE.SORT ~= "thrown" and not req.inOrder then
         table.sort(list, function(a, b)
             local ka, kb = DICE.ORDER[a.kind] or 9, DICE.ORDER[b.kind] or 9
             if ka ~= kb then return ka < kb end
@@ -1973,7 +2388,7 @@ function DICE.lineUp(req, list)
     local n, m, dir = #list, req.mid, req.dir
     for i, d in ipairs(list) do
         if d.obj then
-            local off = (i - (n + 1) / 2) * DICE.STEP
+            local off = (i - (n + 1) / 2) * (req.apart or DICE.STEP)
             pcall(function()
                 d.obj.setPositionSmooth({ m.x + dir.x * off, low or m.y + 1, m.z + dir.z * off }, false, true)
                 local rot = DICE.faceUp(d.obj, d.face, yaw + (DICE.TURN[d.kind] or 0))
@@ -2021,25 +2436,29 @@ function DICE.announce(msg, rgb)
     if broadcastToAll then broadcastToAll(msg, rgb) else printToAll(msg, rgb) end
 end
 
--- The Injury dice's results as the chat names them (RULES.injury's labels).
+-- The Injury dice's results as the chat names them (RULES.injury's short
+-- names: Inj, S. Inj, OOA), and their ranks (1 the worst).
 RULES.follow(function()
-    DICE.INJURY = {}
-    for k, r in pairs(RULES.injury) do DICE.INJURY[k] = r.label end
+    DICE.INJURY, DICE.RANK = {}, {}
+    for k, r in pairs(RULES.injury) do DICE.INJURY[k], DICE.RANK[k] = r.short or r.label, r.rank or 0 end
 end)
 
 -- The buttons' roll said on everyone's screen, in the roller's colour: the
 -- D6 and their total, the Firepower dice (CHART) and their hits -- and
--- whether an Ammo check is due -- and the Injury dice's results (only the
--- results: no count of dice, no faces).
+-- whether an Ammo check is due -- and the Injury dice's results, every
+-- one and the best after them ("Inj, OOA = Inj"; no count of dice, no
+-- faces).
 function DICE.say(req, list, digital)
-    local d6, fp, inj, total, hits, ammo = {}, {}, {}, 0, 0, false
+    local d6, fp, inj, total, hits, ammo, best = {}, {}, {}, 0, 0, false, nil
     for _, d in ipairs(list) do
         if d.kind == "firepower" then
             local f = DICE.CHART.firepower[d.face] or DICE.CHART.firepower[1]
             fp[#fp + 1] = string.format("%d hit%s%s", f.hits, f.hits == 1 and "" or "s", f.ammo and " + Ammo" or "")
             hits, ammo = hits + f.hits, ammo or f.ammo == true
         elseif d.kind == "injury" then
-            inj[#inj + 1] = DICE.INJURY[DICE.CHART.injury[d.face] or "serious"]
+            local k = DICE.CHART.injury[d.face] or "serious"
+            inj[#inj + 1] = DICE.INJURY[k]
+            if not best or (DICE.RANK[k] or 0) > (DICE.RANK[best] or 0) then best = k end
         else
             d6[#d6 + 1], total = tostring(d.face), total + d.face
         end
@@ -2053,7 +2472,9 @@ function DICE.say(req, list, digital)
         parts[#parts + 1] = string.format("%d Firepower dice: %s = %d hits%s", #fp, table.concat(fp, ", "), hits,
             ammo and " -- Ammo check" or "")
     end
-    if #inj > 0 then parts[#parts + 1] = "Injury dice: " .. table.concat(inj, ", ") end
+    if #inj > 0 then
+        parts[#parts + 1] = "Injury dice: " .. table.concat(inj, ", ") .. (#inj > 1 and " = " .. DICE.INJURY[best] or "")
+    end
     local rgb = { 0.9, 0.9, 0.9 }
     if req.color and stringColorToRGB then
         local ok, c = pcall(stringColorToRGB, req.color)
@@ -2152,9 +2573,33 @@ function onFighterOut(t)
         if BOTTLE.key(vpNames[n]) == key then shown = true; BOTTLE.draw(n) end
     end
     if not due then return end
-    printToAll(string.format("[%s] %s is Out of Action: %s must take a Bottle Check this turn.%s", gang,
+    printToAll(string.format("[%s] %s is Out of Action: %s must take a Bottle Check this round.%s", gang,
         tostring(t.name or "A fighter"), gang,
         shown and "" or " Put one of its models on a Victory Points plate of the Mundane Controller."), { 1, 0.55, 0.2 })
+end
+
+-- "Bottle Check" over a side's diamonds, left click: the reminder that its
+-- gang must take the check switched by hand -- on, or off when it was lit
+-- by mistake (then a fighter going Out of Action later this turn lights it
+-- again). Said in chat. A side without a gang yet asks for one, as the die
+-- does.
+function onBottleHead(player, value, id)
+    local n = tonumber(tostring(id or ""):match("_(%d)$"))
+    if not n or tostring(value) == "-2" or tostring(value) == "-3" then return end
+    if not BOTTLE.named(n) then
+        broadcastToAll(string.format("%sBottle Check: no gang on the %s yet -- put one of your gang's models on your " ..
+            "Victory Points plate of the Mundane Controller.", CHAT_PREFIX, n == 1 and "left" or "right"), { 1, 0.55, 0.2 })
+        return
+    end
+    local key = BOTTLE.key(vpNames[n])
+    local on = BOTTLE.due[key] ~= "due"
+    BOTTLE.due[key] = on and "due" or nil
+    for m = 1, 2 do
+        if BOTTLE.key(vpNames[m]) == key then BOTTLE.draw(m) end
+    end
+    printToAll(string.format("%sBottle Check for %s %s (set by hand)", CHAT_PREFIX, vpNames[n],
+        on and "to take this round" or "no longer to take"), { 1, 0.55, 0.2 })
+    return on
 end
 
 -- The Ld diamond: left click one more, right click one fewer (by hand).
@@ -2238,36 +2683,137 @@ local function updatedNote(n)
     return n > 0 and string.format(" (%d older card(s) brought up to date first -- press again for them)", n) or ""
 end
 
--- The turn plate redrawn in place for `turn` (see turnView); sizes are
--- scaled by PANEL_DETAIL like the built XML's.
+-- The round plate redrawn in place for `turn` (the round): the setup's
+-- buttons before round 1, the round from then on, with the reinforcements
+-- reminder (font sizes scaled by PANEL_DETAIL like the built XML's).
 local function drawTurn()
-    local caption, text, size, offset = turnView(turn)
-    self.UI.setAttribute("turnCaption", "active", tostring(caption))
-    self.UI.setAttribute("turnText", "fontSize", string.format("%d", size * PANEL_DETAIL))
-    self.UI.setAttribute("turnText", "offsetXY", (offset:gsub("%-?[%d%.]+", function(n)
-        return string.format("%g", tonumber(n) * PANEL_DETAIL) end)))
-    setLabel("turnText", text)
+    self.UI.setAttribute("setupPanel", "active", tostring(turn < 1))
+    self.UI.setAttribute("turnView", "active", tostring(turn >= 1))
+    setLabel("turnText", tostring(turn))
+    local text, size, on = SETUP.note()
+    self.UI.setAttribute("roundNote", "active", tostring(on))
+    self.UI.setAttribute("roundNote", "fontSize", string.format("%d", size * PANEL_DETAIL))
+    setLabel("roundNote", text)
 end
 
--- A click on the turn: the counter on one ("Start Game" -> turn 1) and
--- every fighter readied -- at Start Game every weapon's Reliable trait
--- ready again too (the card's resetReliable). A right click only steps
--- the counter back, for a turn advanced by mistake -- below turn 1 to
--- "Start Game".
+-- A click on the turn (or on the setup's Start Game): the counter on one
+-- (Start Game -> turn 1) and every fighter readied -- at Start Game every
+-- weapon's Reliable trait ready again too (the card's resetReliable). A
+-- right click only steps the counter back, for a turn advanced by mistake
+-- -- below turn 1 to the setup.
 function onAdvanceTurn(player, value, id)
     if tostring(value) == "-2" then
+        local was = turn
         if turn > 0 then BOTTLE.newTurn() end
         turn = math.max(0, turn - 1)
         drawTurn()
+        if was == 1 then DEPLOY.again() end               -- back to the setup: the deployment's model too
         return
     end
     turn = turn + 1
     drawTurn()
     BOTTLE.newTurn()
     local n, up = everyFighter("setReady", true)
-    if turn == 1 then everyFighter("resetReliable") end   -- Start Game: every Reliable ready
-    printToAll(string.format("%sTurn %d: %d fighter(s) readied%s.", CHAT_PREFIX, turn, n, updatedNote(up)),
+    if turn == 1 then                                     -- Start Game: every Reliable ready, the deployment's model gone
+        everyFighter("resetReliable")
+        DEPLOY.remove()
+    end
+    printToAll(string.format("%sRound %d: %d fighter(s) readied%s.", CHAT_PREFIX, turn, n, updatedNote(up)),
         { 0.3, 1, 0.4 })
+end
+
+-- A click on a setup row (setupBtn_<k>, see SETUP) -- Map Size: either
+-- mouse button, the next size; Roll for Deployment: a right click takes
+-- its model away, or puts it back; otherwise a left click: a roll's D6
+-- thrown in the dice line ("Rolling..." on the row until it lands), its
+-- result said on everyone's screen and shown on the row; Determine
+-- Attacker | Defender: the roll-off (SETUP.rollOff). The rest do nothing
+-- yet.
+function onSetup(player, value, id)
+    local k = tonumber(tostring(id or ""):match("^setupBtn_(%d+)$"))
+    local row = k and SETUP.ROWS[k]
+    if row and row.deploy and tostring(value) == "-2" then
+        if not DEPLOY.remove() then DEPLOY.again() end
+        return
+    end
+    if row and row.map then return SETUP.nextMap(k) end                -- either mouse button
+    if not row or tostring(value) ~= "-1" or SETUP.rolling[k] then return end
+    if row.rollOff then return SETUP.rollOff(k, player and player.color or nil) end
+    if not row.results then return end
+    SETUP.rolling[k] = true
+    SETUP.draw(k)
+    DICE.request({ kinds = { "d6" }, color = player and player.color or nil, done = function(faces, digital)
+        SETUP.rolling[k] = nil
+        SETUP.rolled[row.key] = faces[1]
+        SETUP.draw(k)
+        DICE.announce(string.format("%s%s: %s%s", CHAT_PREFIX, row.say, row.results[faces[1]],
+            digital and " (rolled digitally)" or ""), SETUP.SAY)
+        if row.deploy then DEPLOY.spawn(faces[1], row.results[faces[1]]) end
+    end })
+end
+
+-- The map size on to the next of DEPLOY.SIZES (row `k` redrawn); a
+-- deployment model on the table is swapped for that size's.
+function SETUP.nextMap(k)
+    local i = 1
+    for n, size in ipairs(DEPLOY.SIZES) do if size == SETUP.map then i = n end end
+    SETUP.map = DEPLOY.SIZES[i % #DEPLOY.SIZES + 1]
+    SETUP.draw(k)
+    if DEPLOY.find() then DEPLOY.again() end
+end
+
+-- A click on one of the deployment's small buttons (any mouse button):
+-- the model turned DEPLOY.TURN degrees, or stretched up / down by
+-- DEPLOY.STEP of its height -- remembered for the next one.
+function onDeployTool(player, value, id)
+    id = tostring(id or "")
+    if id == "deployTurn" then DEPLOY.turn = (DEPLOY.turn + DEPLOY.TURN) % 360
+    elseif id == "deployUp" then DEPLOY.tall = DEPLOY.tall + DEPLOY.STEP
+    elseif id == "deployDown" then DEPLOY.tall = math.max(DEPLOY.STEP, DEPLOY.tall - DEPLOY.STEP)
+    else return end
+    local o = DEPLOY.find()
+    if not o then return end
+    local across = DEPLOY.stretch or 1
+    pcall(function()
+        o.setRotation({ 0, DEPLOY.turn, 0 })
+        o.setScale({ across, DEPLOY.tall, across })
+    end)
+end
+
+-- A left click on a victory points plate's Attacker / Defender: swapped.
+function onSwapRoles(player, value, id)
+    if tostring(value) == "-1" then SETUP.swap() end
+end
+
+-- The Reset all Fighters button as it stands: red, brighter while it asks
+-- for the second click.
+function RESET.draw()
+    setLabel("resetFighters", RESET.asking and RESET.ASK or RESET.LABEL)
+    self.UI.setAttribute("resetFighters", "colors", RESET.asking and RESET.ASKING or RED)
+    self.UI.setAttribute("resetFighters", "textColor", PALE)
+end
+
+-- A left click on Reset all Fighters: the first asks for a second (for
+-- RESET.WAIT seconds), the second puts every fighter back as imported (the
+-- card's resetFighter; older cards brought up to date first, as for every
+-- call to all fighters).
+function onResetFighters(player, value, id)
+    if tostring(value) ~= "-1" then return end
+    RESET.token = RESET.token + 1
+    if not RESET.asking then
+        RESET.asking = true
+        RESET.draw()
+        local token = RESET.token
+        Wait.time(function()
+            if token == RESET.token and RESET.asking then RESET.asking = false; RESET.draw() end
+        end, RESET.WAIT)
+        return
+    end
+    RESET.asking = false
+    RESET.draw()
+    local n, up = everyFighter("resetFighter")
+    printToAll(string.format("%s%d fighter(s) reset to how they were imported%s.", CHAT_PREFIX, n, updatedNote(up)),
+        { 1, 0.7, 0.2 })
 end
 
 function onClearConditions(player, value, id)
@@ -2543,7 +3089,8 @@ end
 
 function onSave()
     return JSON.encode({ version = VERSION, turn = turn, vp = vp, vpNames = vpNames, bottle = BOTTLE.due, rules = RULES.custom,
-        homebrew = HOMEBREW.list() })
+        homebrew = HOMEBREW.list(), setup = { attacker = SETUP.attacker, rolled = SETUP.rolled, map = SETUP.map,
+                                              deployTurn = DEPLOY.turn, deployTall = DEPLOY.tall } })
 end
 
 -- The version comes from the updater block at the end of the published
@@ -2562,6 +3109,21 @@ function onLoad(saved)
         end
         if type(data.bottle) == "table" then BOTTLE.due = data.bottle end
         if type(data.rules) == "table" then RULES.custom = data.rules end
+        if type(data.setup) == "table" then
+            SETUP.attacker = data.setup.attacker == 2 and 2 or 1
+            for _, size in ipairs(DEPLOY.SIZES) do
+                if tonumber(data.setup.map) == size then SETUP.map = size end
+            end
+            DEPLOY.turn = tonumber(data.setup.deployTurn) or DEPLOY.turn
+            DEPLOY.tall = math.max(DEPLOY.STEP, tonumber(data.setup.deployTall) or DEPLOY.tall)
+            SETUP.rolled = {}
+            for _, row in ipairs(SETUP.ROWS) do
+                local face = row.key and tonumber((data.setup.rolled or {})[row.key])
+                if face and (row.rollOff and (face == 1 or face == 2) or row.results and row.results[face]) then
+                    SETUP.rolled[row.key] = face
+                end
+            end
+        end
         if type(data.homebrew) == "table" then
             HOMEBREW.on = {}
             for _, id in ipairs(data.homebrew) do
@@ -2580,225 +3142,4 @@ function onLoad(saved)
     -- the cards that loaded before this did asked no one: tell them now
     -- (the table's own rules only -- as written, they already have them)
     if next(RULES.active) then Wait.frames(RULES.push, 2) end
-end
-
--- ===========================================================================
--- Everything below this line is updater/updater.lua, pasted unchanged.
--- ===========================================================================
-
---[[ =========================================================================
-  SELF-UPDATE BLOCK for keeping tools hosted via Github up to date.
-  Source: https://github.com/Antaresx101/TTS_tools   (MIT)
-
-  When using any of my tools with this functionality, in TabletopSimulator,
-  typing "!update" in the chat as the host will automatically update all such
-  tools in the session with the newest version (if it isn´t on it already).
-
-  A tool is one file. Where it has an on-screen UI, that layout travels
-  inside the script and goes on when the object loads, so an update is one
-  download and one write, and cannot leave half a tool behind.
-
-  Nothing happens until you ask. Loading a mod sends no requests and changes no
-  scripts, it is triggered manually always.
-========================================================================== ]]
-
--- CONFIG -- running someone else's tool and want it left exactly where it is:
--- Stop Updates permanently: set SELF_UPDATE to false and nothing below ever runs.
--- Adopting the block: set the three TOOL_ values.
--- Forking the repo: change REPO_BASE, the only string here that names a host.
-local SELF_UPDATE    = true                    -- false pins this copy for good
-local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
-local TOOL_ID        = "mundane-controller"
-local TOOL_VERSION   = "2.1.3"                 -- bumped with manifest.json
-local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"
-
--- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
--- pages and truncated bodies; any file carrying this block is usually bigger
--- than that. scripts/validate.py enforces it at publish time.
-local MIN_BYTES     = 1024
-local APPLY_TIMEOUT = 20                       -- seconds to wait for a safe moment
-local UI_FRAMES     = 5                        -- frames a layout takes to go live
-local SPREAD        = 8                        -- seconds to smear checks across
-local CHAT_COMMAND  = "!update"                -- host types it, every copy hears
-local LABEL         = "[" .. TOOL_ID .. "] "   -- four tools, four named voices
-
-local function report(msg)   -- host console only; never chat for everyone
-  print("[" .. TOOL_ID .. " " .. TOOL_VERSION .. "] " .. msg)
-end
-
-local function url(file)     -- ?ts= defeats the ~5 minute raw.github cache
-  return REPO_BASE .. "/tools/" .. TOOL_ID .. "/" .. file .. "?ts=" .. os.time()
-end
-
--- Plain X.Y.Z only; a suffix such as "-rc1" is ignored. Each part has to stay
--- under 1000, which holds for every version this repo will ever publish.
-local function rank(v)
-  local a, b, c = string.match(tostring(v), "^(%d+)%.(%d+)%.(%d+)")
-  return (tonumber(a) or 0) * 1000000 + (tonumber(b) or 0) * 1000 + (tonumber(c) or 0)
-end
-
--- Every release newer than this copy, newest first, as the lines that hang
--- under the update message: a copy that sat out three releases sees all
--- three on update, thats why the manifest carries a history. Notes are one string
--- or a list of them; anything else renders as nothing.
-local function whatsNew(m)
-  local out = ""
-  local function add(r)
-    if type(r) ~= "table" or rank(r.version) <= rank(TOOL_VERSION) then return end
-    local notes = type(r.notes) == "string" and { r.notes } or r.notes
-    if type(notes) ~= "table" then return end
-    for _, n in ipairs(notes) do out = out .. "\n  - " .. tostring(n) end
-  end
-  add(m.stable)
-  for _, r in ipairs(type(m.history) == "table" and m.history or {}) do add(r) end
-  return out
-end
-
--- One message per tool: three dice rollers on a table are three scripts that
--- cannot see each other, so the first to speak leaves what it said here and
--- the rest read it and keep quiet. Two strings named after this tool are all
--- the block does with Global: one for an install, one for whichever answer.
-local GLOBAL_KEY = "SELFUPDATE_" .. string.gsub(TOOL_ID, "%W", "_")
-local function once(suffix, value, msg)
-  local key = GLOBAL_KEY .. suffix
-  local ok, said = pcall(function() return Global.getVar(key) end)
-  if ok and said == value then return end
-  pcall(function() Global.setVar(key, value) end)
-  broadcastToAll(msg, {0.6, 0.9, 0.6})
-end
-
--- Writes the new script and reloads only while the object is idle. If it never
--- goes idle we still write, and the new script starts on the next load. The
--- tool's UI rides inside the script, so there is nothing else here to write.
-local function apply(code, version, notes)
-  local function idle()
-    return self.held_by_color == nil and not self.isSmoothMoving()
-       and not self.spawning
-  end
-  local function commit(withReload)
-    -- Carry the tool's own saved state across the reload, if it keeps any.
-    pcall(function()
-      if type(onSave) == "function" then self.script_state = onSave() end
-    end)
-    self.setLuaScript(code)              -- WRITE: the only script write, on self
-    once("", version, LABEL .. "updated to v" .. version .. notes)
-    if withReload then
-      self.reload()                  -- self is invalid after this line
-    else
-      report("v" .. version .. " written; it starts on the next load")
-    end
-  end
-  Wait.condition(function() commit(true) end, idle, APPLY_TIMEOUT,
-                 function() commit(false) end)
-end
-
--- The loop guard: writing back what is already running would reload forever.
--- One file is the whole tool now, so one comparison covers it.
-local function install(code, version, notes)
-  if code == self.getLuaScript() then
-    return report("already running this code")
-  end
-  apply(code, version, notes)
-end
-
-local function onPayload(req, version, notes)
-  if req.is_error or req.response_code ~= 200 then return end   -- silently
-  local code = req.text or ""
-  -- Three of the four gates: long enough, signed for this tool, and whole.
-  -- The loop guard is the fourth. Any failure leaves the object as it is.
-  if #code < MIN_BYTES then return report("rejected: shorter than MIN_BYTES") end
-  if not string.find(code, TOOL_SIGNATURE, 1, true) then
-    return report("rejected: TOOL_SIGNATURE missing")
-  end
-  -- The block's last function, named in halves so this line cannot match
-  -- itself: the payload carries this file too, and a search for the whole
-  -- literal would find the search. Finding the real one proves the body
-  -- arrived to its last line rather than stopping somewhere in the middle.
-  if not string.find(code, "function Updater_" .. "stateVersion", 1, true) then
-    return report("rejected: cut short before the end of the block")
-  end
-  install(code, version, notes)
-end
-
--- Answers: the repository is not there (offline, blocked, moved, private, 404),
--- or nothing needs fetching because this copy is the published one.
--- Once per tool per asking, either way. A manifest that arrives but will not
--- parse goes to the host console instead: the repository is alive so it´s on that author.
-local function onManifest(req)
-  if req.is_error or req.response_code ~= 200 then
-    return once("_ANSWER", "offline", LABEL .. "could not reach its repository ("
-                .. tostring(req.error or req.response_code) .. ")")
-  end
-  local ok, m = pcall(JSON.decode, req.text)
-  if not ok or type(m) ~= "table" or type(m.stable) ~= "table" then
-    return report("manifest unreadable")
-  end
-  local version = tostring(m.stable.version)
-  if rank(version) <= rank(TOOL_VERSION) then            -- nothing to fetch
-    return once("_ANSWER", "current", LABEL .. "up to date at v" .. TOOL_VERSION)
-  end
-  local notes = whatsNew(m)
-  WebRequest.get(url("tool.lua"), function(r) onPayload(r, version, notes) end)
-end
-
--- Seconds to hold this object's request for: over 0, under SPREAD, the same
--- number every session for any one object. Folded by hand because this Lua
--- rejects tonumber(guid, 36), and math.random belongs to the tool above.
-local function stagger()
-  local guid, n = tostring(self.getGUID() or ""), 0
-  for i = 1, #guid do n = (n * 31 + string.byte(guid, i)) % 100003 end
-  return (n % (SPREAD * 100 - 1) + 1) / 100
-end
-
--- One check, now. The chat command calls this, and so can the tool above:
--- from its own code, or from Global with obj.call("Updater_check"). The tool
--- needs no call of its own for the command below to work.
-function Updater_check()
-  if not SELF_UPDATE then return end
-  -- A fresh ask, a fresh answer: every copy clears the flag in this frame,
-  -- long before the first reply can come back.
-  pcall(function() Global.setVar(GLOBAL_KEY .. "_ANSWER", "") end)
-  Wait.time(function() WebRequest.get(url("manifest.json"), onManifest) end,
-            stagger())
-end
-
--- The tool's UI, spliced in above this block as TOOL_XML by scripts/validate.py
--- and applied here rather than kept on the object. One file, one write: an
--- update cannot land half a tool, because there are no halves. The tool's own
--- onLoad runs first, so whatever it registers - the custom assets a layout
--- names by image="", for one - is in place before the layout that wants them.
--- A tool with no UI declares no TOOL_XML and this does nothing at all.
-local toolLoad = onLoad
-function onLoad(saved)
-  if type(toolLoad) == "function" then toolLoad(saved) end
-  if not TOOL_XML then return end
-  self.UI.setXml(TOOL_XML)                        -- WRITE: the only UI write
-  -- setXml is queued, and the elements it creates are not addressable in this
-  -- frame or the next: setValue and setAttribute on them do nothing, and say
-  -- nothing. A tool that fills its layout in at load does that from onUIReady
-  -- and never has to guess a delay of its own - this is the only place that
-  -- number lives, so getting it wrong is one edit rather than one per tool.
-  if type(onUIReady) == "function" then Wait.frames(onUIReady, UI_FRAMES) end
-end
-
--- Chat reaches object scripts, not just the Global one, so every copy on the
--- table hears the host's command for itself and checks itself: no object ever
--- speaks to another, and nothing has to be added to the Global script. The
--- only thing read out of chat is whether the line is exactly CHAT_COMMAND from
--- someone with admin. Whatever onChat the tool above defined is captured here
--- and still called with everything, so this cannot eat a tool's own commands.
-local toolChat = onChat
-function onChat(message, player)
-  if SELF_UPDATE and message == CHAT_COMMAND and player and player.admin then
-    Updater_check()
-  end
-  if type(toolChat) == "function" then return toolChat(message, player) end
-end
-
--- Optional migration hook. Returns the version that wrote the saved state and
--- the version running now; do any migrating in the tool above, not here.
-function Updater_stateVersion(saved)
-  local ok, t = pcall(JSON.decode, saved or "")
-  local v = (ok and type(t) == "table") and t.version or nil
-  return v, TOOL_VERSION
 end

@@ -1,5 +1,3 @@
--- TTS-SELFUPDATE:mundane-importer
---
 -- ==============================================================
 --  MUNDANE IMPORTER (N26) by Antares77
 --
@@ -420,9 +418,9 @@ local TEMPLATES_URL = ""
 -- { version =, note =, changes = { "one line each", ... } } -- lines of
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
-    { version = "2.1.3", note = "Minor Update", changes = {"Cover save fix"
+    { version = "2.2.0", note = "Major Update", changes = {"Improvements and accessibility for various actions and rolls", "Added deployment zones / setup helper"
     } },
-    { version = "2.1.2", note = "Minor Update", changes = {"Performance improvements and bug fixes"
+    { version = "2.1.2", note = "Minor Update", changes = {"Cover save fix"
     } },
     { version = "2.1.1", note = "Minor Update", changes = {"Added Knockback(X+) and Bio-Booster support"
     } },
@@ -2149,10 +2147,10 @@ local CFG = {
     -- ACTIVATION.diceView): Shock (N+) -- the hit die that reached N, and the
     -- Wound roll dice it made automatic 6s --, Blaze (N+) -- the Wound
     -- roll dice that made more hits, and every die of those hits -- and
-    -- Knockback (N+) -- the hit dice that reached N.
+    -- Knockback (N+) -- the hit dice that reached N (see knockback).
     shockMark = "🗲",
     blazeMark = "♨",
-    knockMark = "༄",
+    knockMark = "↔",
     -- The cover question's "yes" diamond (see takeSaves); its "no" is X.
     coverYes = "✔",
 
@@ -2288,14 +2286,6 @@ local CFG = {
     -- between the two); any one ray clear will do, and only scenery blocks
     -- them.
     wyrdSight = { from = 0.85, to = { 0.85, 0.35 }, across = { 0, -0.9, 0.9, -0.5, 0.5 } },
-    -- Knockback pushes a model (see knockback) until scenery is in the way:
-    -- rays from its base's middle along the push, at each `up` height (a
-    -- fraction of its bounding box's height) and from each `across` point
-    -- (a fraction of its base's radius to either side), as far as the
-    -- push and the base's front reach; the model stops `gap` inches short
-    -- of the nearest thing they hit. Fighters (importTag) and dice don't
-    -- stop the rays: the bases themselves are kept apart instead.
-    knockRays = { up = { 0.15, 0.5 }, across = { 0, -0.9, 0.9 }, gap = 0.05 },
     -- The Mundane Controller carries this tag: it throws the card's dice
     -- (see throwDice), a fighter going Out of Action tells it (its
     -- Bottle Check), and it keeps the table's own rules (see loadRules).
@@ -2416,9 +2406,9 @@ local COL = {
     diceSerious  = "#FF8C3A",     --     Serious Injury (orange)
     diceOut      = "#FF4040",     --     Out of Action (red)
     -- the signs over a die a weapon trait had a hand in (see CFG.shockMark):
-    diceShock    = "#FFE14A",     --     Shock (electric yellow)
+    diceShock    = "#6FC3FF",     --     Shock (electric blue)
     diceBlaze    = "#FF7A2E",     --     Blaze (fire orange)
-    diceKnock    = "#7FD8FF",     --     Knockback (light blue)
+    diceKnock    = "#FFD54A",     --     Knockback (warm yellow)
 }
 
 --============================================================================
@@ -2652,16 +2642,24 @@ RULES.actionTypes = {
 -- layer, but for four the card knows by their keys: treat_ally,
 -- group_activation, coup_de_grace and reload (see useAction) -- and after
 -- dash no ranged weapon can be fired, but for one with Assault (see the
--- card's TRAIT_RULES.shot). Fight and the Shoot actions pay for the
+-- card's TRAIT_RULES.shot). `distance`: how far the action moves its
+-- fighter, a list of { stat, times } added up -- "D6" for a die thrown for
+-- it -- shown over the stats and said with the action (see the card's
+-- ACTIVATION.moveBy), the bar's title `distanceTitle` or the label with
+-- what it adds up ("Dash (M + I)"). Fight and the Shoot actions pay for the
 -- weapons' attacks: taken from the panel, they light up the weapons they
 -- are for, and the attack after them spends nothing more (see the card's
 -- ACTIVATION.attackCost). `desc`, when filled in, shows over the stats
 -- while the cursor is on the action.
 RULES.actions = {
-    { key = "move",             label = "Move",             cost = "S", type = "movement", desc = "" },
-    { key = "dash",             label = "Dash",             cost = "D", type = "movement", desc = "" },
-    { key = "engage",           label = "Engage",           cost = "S", type = "close",    desc = "" },
-    { key = "charge",           label = "Charge",           cost = "D", type = "close",    desc = "" },
+    { key = "move",             label = "Move",             cost = "S", type = "movement", desc = "",
+      distance = { { "M", 1 } }, distanceTitle = "Movement" },
+    { key = "dash",             label = "Dash",             cost = "D", type = "movement", desc = "",
+      distance = { { "M", 1 }, { "I", 1 } } },
+    { key = "engage",           label = "Engage",           cost = "S", type = "close",    desc = "",
+      distance = { { "D6", 1 } } },
+    { key = "charge",           label = "Charge",           cost = "D", type = "close",    desc = "",
+      distance = { { "M", 1 }, { "D6", 1 } } },
     { key = "coup_de_grace",    label = "Coup de Grace",    cost = "S", type = "close",    desc = "" },
     { key = "interact",         label = "Interact",         cost = "S", type = "utility",  desc = "" },
     { key = "shoot",            label = "Shoot",            cost = "S", type = "shooting", desc = "" },
@@ -2783,8 +2781,9 @@ RULES.conditions = {
 --              the lowest), and an Agility test then saves it from being
 --              Suppressed by the fall (Catfall; see the card's fallingDown);
 --   distance   for a skill that is an action: the inches it moves its
---              fighter, said in chat when it is taken -- a list of { stat,
---              times }, added up (Sprint: M + 2x I);
+--              fighter, shown and said in chat when it is taken -- a list
+--              of { stat, times }, added up (Sprint: M + 2x I), as the
+--              actions' own `distance` is;
 --   fearsome   true: an enemy that starts a fight against it makes a
 --              Willpower check first, and fails into the Feared condition
 --              (see the card's rollAttack) -- unless it is Fearsome itself;
@@ -3123,8 +3122,8 @@ RULES.traits = {
     assault   = "assault",            -- after a Dash, one Shoot with it, for no action
     toxin     = "toxin",              -- Toxin (N+)  (the card's TRAIT_RULES.toxin)
     shock     = "shock",              -- Shock (N+): a hit roll of N+ wounds automatically, as a 6
-    knockback = "knockback",          -- Knockback (N+): a hit roll of N+ pushes the target back (once an attack)
-    blast     = "blast[^,]*",         -- Blast (3") / (5"): a Knockback with it pushes nobody
+    knockback = "knockback",          -- Knockback (N+): a hit roll of N+ knocks the target back (once an attack)
+    blast     = "blast[^,]*",         -- Blast (3") / (5"): a Knockback with it knocks nobody back
     cursed    = "cursed",             -- a target hit makes a Willpower check, failed: Insanity
     flash     = "flash",              -- ranged: no Wound roll; the target hit is Blind and loses its Ready marker
     graviton  = "graviton pulse",     -- ranged: no Wound roll
@@ -3209,9 +3208,9 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   shockNatural  Shock (N+) and Knockback (N+): false -- the hit roll
 --                 with its modifiers must reach N (Shock (6+) with +1 to
 --                 hit: a 5 does); true -- the die's own roll.
---   knockback     Knockback (N+): how many inches the target is pushed
---                 straight away from the attacker, once the attack is over
---                 (see the card's knockback).
+--   knockback     Knockback (N+): how many inches the target is knocked
+--                 back, shown on its card once the attack is over -- the
+--                 players move the model (see the card's knockback).
 --   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
 --                 Firepower dice give shares the hit roll, so every one of
 --                 them wounds automatically; true -- only the first does.
@@ -3713,6 +3712,9 @@ local LAY = {
     midDiamond = 66, midReviveW = 240,
     -- the Nerve Check's "Cl", left of its first diamond (the values colour)
     midStatFont = 44,
+    -- a save's cover bonus ("+2", on its diamond): as big as fits, its
+    -- corners reaching this far toward the diamond's edges (see labelFill)
+    coverFill = 0.92,
     -- A roll's dice (see ACTIVATION.diceXml), in the same panel, black:
     -- the faces -- diceD a side at most, diceSpace apart (both shrinking
     -- together when many dice need the room), a D6's diamond pips dicePip
@@ -3730,10 +3732,11 @@ local LAY = {
     -- to the upper right).
     diceAmmoMark = 1, diceAmmoTurn = 0,
     -- A sign over a die (Shock, Blaze: see CFG.shockMark): diceSym of the
-    -- die's side tall, the die's top diceSymGap of a side below it. While
-    -- any die of a roll has one, the dice shrink and sink as far as their
-    -- signs need the room over them.
-    diceSym = 0.42, diceSymGap = 0.04,
+    -- die's side tall, the die's top diceSymGap of a side below it (never
+    -- past the panel's top edge). A die with a sign sits diceSymDrop of its
+    -- side lower than the others, to give the sign room; the dice keep
+    -- their size and their places along the row either way.
+    diceSym = 0.22, diceSymGap = 0.02, diceSymDrop = 0.08,
 
     -- Health bar. Its width is derived below: A's centre to W2's centre.
     hpY   = 125,  -- centre of the bar: its top at A's / W2's top tips ...
@@ -4852,8 +4855,9 @@ end
 -- keeps its corners inside LAY.labelFill of the diamond, i.e. half its
 -- width plus half its height stay within that much of the half-diagonal.
 -- The text is then laid in a box `side` wide (labelD) so nothing shrinks it.
-function LAY.diamondLabel(label, side)
-    local reach = side / math.sqrt(2) * LAY.labelFill
+-- `fill` (optional) reaches further than labelFill.
+function LAY.diamondLabel(label, side, fill)
+    local reach = side / math.sqrt(2) * (fill or LAY.labelFill)
     return math.floor(2 * reach / (textWidth(label, 1, true) + 0.72))
 end
 
@@ -5182,10 +5186,10 @@ function ACTIVATION.panelXml()
     rowY = select(5, ACTIVATION.geometry(d * math.sqrt(2)))
     local step = d * math.sqrt(2) + LAY.midGap
     local rec = fighter.recovery
-    local function btn(id, i, label, onClick, icon, x)
+    local function btn(id, i, label, onClick, icon, x, size)
         return diamond{ id = id, size = d, x = x or (i - 2) * step, y = rowY, icon = icon, label = label,
-            labelSize = LAY.midBtnFont, iconId = id .. "Txt", frame = "diamond_frame", onClick = onClick,
-            iconPad = icon == "stat_die" and LAY.dieIcon or nil }
+            labelSize = size or LAY.midBtnFont, labelD = size and d or nil, iconId = id .. "Txt",
+            frame = "diamond_frame", onClick = onClick, iconPad = icon == "stat_die" and LAY.dieIcon or nil }
     end
     -- the two rows, each in a clear container of the panel's size (shown in
     -- turn, see ACTIVATION.draw); the dagger over its diamond, in Seriously
@@ -5228,6 +5232,9 @@ function ACTIVATION.panelXml()
     local asking = ACTIVATION.questioning()
     local goW, noW = LAY.midReviveW, d * math.sqrt(2)
     local left = -(goW + LAY.midGap + noW) / 2
+    -- the cover bonus as big as its diamond takes (sized for the most it
+    -- can be, so a change in place still fits)
+    local coverSize = LAY.diamondLabel("+" .. ACTIVATION.coverMax(), d, LAY.coverFill)
     row = group("nerveRow", not asking, btn("nerveVal", 1, nil, "onNerveValue")
         .. btn("nerveRoll", 2, "D", "onNerveRoll", "stat_die")
         .. group("nerveConfirm", ACTIVATION.nerveAsks(), btn("nerveOk", 2, "OK", "onNerveOk"))
@@ -5241,7 +5248,7 @@ function ACTIVATION.panelXml()
                    ACTIVATION.button("nerveGo", left + goW / 2, rowY, goW, "Continue", "onNerveGo")
                 .. btn("nerveNo", 3, "X", "onNerveClose", nil, left + goW + LAY.midGap + noW / 2))
             .. group("nerveQPair", ACTIVATION.asksPair(),
-                   btn("nerveCover", 1, ACTIVATION.coverText(), "onNerveCover")
+                   btn("nerveCover", 1, ACTIVATION.coverText(), "onNerveCover", nil, nil, coverSize)
                 .. btn("nerveYes", 2, CFG.coverYes, "onNerveGo")
                 .. btn("nerveX", 3, "X", "onNerveClose")))
     return out .. panel("nervePanel", ACTIVATION.nerveOpen(), head.text, COL.accent, row, d * math.sqrt(2), "nerveTitle")
@@ -5435,14 +5442,31 @@ function ACTIVATION.ammoState(n, limited)
     return limited and "spent" or n >= 2 and "jam" or "out"
 end
 
+-- What a roll says before its dice (roll `r`'s `lead`: "3 Strength +" for
+-- a Coup de Grace, '5" +' for a Charge, see ACTIVATION.coup / moveBy), or
+-- all it says when it has none ('5"', '5" + 3 = 8"'); nil for none. It
+-- takes the left end's text (ammoSum), and the dice follow it straight
+-- after (see ACTIVATION.diceView, which shrinks it as far as the room
+-- needs). In `leadInk` (else the values' colour), as big as the results.
+-- Its text, ink, size, width and half its height.
+function ACTIVATION.leadView(r)
+    local text = r and not r.rolling and r.lead
+    if not text then return nil end
+    local size = LAY.diceSumFont
+    return { text = text, ink = r.leadInk or COL.value, size = size, w = textWidth(text, size, true), hh = size * 0.45 }
+end
+
 -- What the dice panel shows (ACTIVATION.roll: the roll on show, see
 -- ACTIVATION.showDice), for the builder and ACTIVATION.drawDice alike: on
 -- or not, still rolling or not ("Rolling Dice..."), each slot -- shown,
 -- its size and place, its face -- and the result (see
 -- ACTIVATION.sumView) at the panel's right end and at its left end the
--- best result (the Injury dice action only, `best`) or the Ammo checks
--- (see ACTIVATION.ammoView), each with its corners dicePad clear of the
--- diamonds' slanted edges (which run x = +-(sideX - |y|)). The dice take
+-- best result (the Injury dice action only, `best`), what the roll says
+-- before its dice (`lead`, see ACTIVATION.leadView: lead, dice and -- with
+-- `inline` -- the result after them make one line, centred and shrunk
+-- together as far as the room needs) or the Ammo checks (see ACTIVATION.ammoView), each with its corners
+-- dicePad clear of the diamonds' slanted edges (which run x = +-(sideX -
+-- |y|)). The dice take
 -- the room between them -- an end with nothing at it up to the slanted
 -- edge, less dicePad -- as big as diceD, shrinking (gaps and all) only as
 -- far as that room needs, and keeping diceSumGap clear of the results; in
@@ -5451,10 +5475,8 @@ end
 -- bigger). A roll's dice may be of several kinds (`kinds`, else all
 -- `kind`) and each have its own check colour (`hls`, else `hl`); `spare`
 -- is the die whose Ammo check Reliable ignored. A die may have signs over
--- it (`syms[i]`, see ACTIVATION.signs: Shock, Blaze): while any has, every
--- die is as small as die and signs need to fit the panel's height, and the
--- row sinks by half the signs' room -- its lower corners then reaching that
--- much nearer the slanted edges, which the room at an open end allows for.
+-- it (`syms[i]`, see ACTIVATION.signs: Shock, Blaze): that die alone sits a
+-- little lower (LAY.diceSymDrop); nothing else about the dice changes.
 function ACTIVATION.diceView()
     local r = ACTIVATION.roll
     local W, H = 2 * LAY.sideX, 2 * LAY.sideY
@@ -5464,42 +5486,78 @@ function ACTIVATION.diceView()
     local n = math.min(#faces, ACTIVATION.MAX_SHOWN)
     local D0, pad, gap = LAY.diceD, LAY.dicePad, LAY.diceSumGap
     local syms = (r and not rolling and type(r.syms) == "table") and r.syms or {}
-    local signed = false
-    for i = 1, n do signed = signed or (type(syms[i]) == "table" and #syms[i] > 0) end
-    local room = LAY.diceSymGap + LAY.diceSym           -- the signs' room over a die, in its sides
-    local q = signed and room / 2 or 0                  -- the row's sink, in its dice's sides
-    if signed then D0 = math.min(D0, (H - 2 * pad) / (1 + room)) end
     local b = ACTIVATION.sumView(r)
-    local l = r and not rolling and r.best and ACTIVATION.resultView(r.best) or ACTIVATION.ammoView(r)
-    if b then b.x = LAY.sideX - pad - b.hh - b.w / 2 end
-    if l then l.x = -(LAY.sideX - pad - l.hh - l.w / 2) end
-    -- The room: from the left block's right edge (diceSumGap clear) or,
-    -- with none, the slant -- a die's corner reaches it at x = -(sideX -
-    -- pad) + D / 2 -- to the right block likewise. With `k` open ends the
-    -- room is C - k * D / 2, and n dice of side D (gaps diceSpace * D / D0)
-    -- need D * (n + sp): the biggest D that fits, at most D0. A sunk row
-    -- (signs over it) needs q * D more at each open end.
     local open = LAY.sideX - pad
-    local lo = l and (l.x + l.w / 2 + gap) or -open
-    local hi = b and (b.x - b.w / 2 - gap) or open
-    local k = (l and 0 or 1) + (b and 0 or 1)
-    local sp = math.max(0, n - 1) * LAY.diceSpace / D0
-    local D = D0
-    if n > 0 then D = math.max(D0 * 0.3, math.min(D0, (hi - lo) / (n + sp + k * (0.5 + q)))) end
-    if not l then lo = lo + D / 2 + q * D end
-    if not b then hi = hi - D / 2 - q * D end
-    v.rowY = signed and -q * D or 0
-    local step = D + LAY.diceSpace * D / D0
-    local w    = n * D + math.max(0, n - 1) * (step - D)
-    -- the row's middle: the panel's, moved only as far as the room needs
-    local mid  = lo + w / 2 > hi - w / 2 and (lo + hi) / 2 or clamp(0, lo + w / 2, hi - w / 2)
-    local x0   = mid - w / 2
+    local lead = ACTIVATION.leadView(r)
+    -- `inline`: the result straight after the dice (a text one only)
+    local after = r and not rolling and r.inline and b and b.text and b or nil
+    local l, D, step, w, x0
+    if lead or after then
+        -- One line, centred: the lead text, the dice, the result after
+        -- them (or, not inline, at the right end as usual) -- all shrunk
+        -- together as far as the room between the slants needs.
+        if b and not after then b.x = open - b.hh - b.w / 2 end
+        local hh = LAY.diceSumFont * 0.45
+        local L = -open + hh
+        local R = (b and not after) and (b.x - b.w / 2 - gap) or open - hh
+        local function width()
+            local parts, total = 0, 0
+            for _, x in ipairs({ lead and lead.w or 0, w, after and after.w or 0 }) do
+                if x > 0 then parts, total = parts + 1, total + x end
+            end
+            return total + math.max(0, parts - 1) * gap
+        end
+        D, step = D0, D0 + LAY.diceSpace
+        w = n > 0 and (n * D + (n - 1) * (step - D)) or 0
+        local k = math.min(1, (R - L) / math.max(1, width()))
+        if k < 1 then
+            -- (fonts are whole numbers: shrunk, then measured as drawn)
+            for _, t in ipairs({ lead or false, after or false }) do
+                if t then
+                    t.size = math.max(1, math.floor(t.size * k))
+                    t.w, t.hh = textWidth(t.text, t.size, true), t.size * 0.45
+                end
+            end
+            D, step = D0 * k, (D0 + LAY.diceSpace) * k
+            w = n > 0 and (n * D + (n - 1) * (step - D)) or 0
+        end
+        local x = (L + R) / 2 - width() / 2
+        if lead then lead.x, x = x + lead.w / 2, x + lead.w + gap end
+        x0 = x
+        if n > 0 then x = x + w + gap end
+        if after then after.x = x + after.w / 2 end
+        l = lead
+    else
+        if b then b.x = open - b.hh - b.w / 2 end
+        l = r and not rolling and r.best and ACTIVATION.resultView(r.best) or ACTIVATION.ammoView(r)
+        if l then l.x = -(open - l.hh - l.w / 2) end
+        -- The room: from the left block's right edge (diceSumGap clear) or,
+        -- with none, the slant -- a die's corner reaches it at x = -(sideX -
+        -- pad) + D / 2 -- to the right block likewise. With `k` open ends the
+        -- room is C - k * D / 2, and n dice of side D (gaps diceSpace * D / D0)
+        -- need D * (n + sp): the biggest D that fits, at most D0.
+        local lo = l and (l.x + l.w / 2 + gap) or -open
+        local hi = b and (b.x - b.w / 2 - gap) or open
+        local k = (l and 0 or 1) + (b and 0 or 1)
+        local sp = math.max(0, n - 1) * LAY.diceSpace / D0
+        D = D0
+        if n > 0 then D = math.max(D0 * 0.3, math.min(D0, (hi - lo) / (n + sp + k * 0.5))) end
+        if not l then lo = lo + D / 2 end
+        if not b then hi = hi - D / 2 end
+        step = D + LAY.diceSpace * D / D0
+        w    = n * D + math.max(0, n - 1) * (step - D)
+        -- the row's middle: the panel's, moved only as far as the room needs
+        local mid = lo + w / 2 > hi - w / 2 and (lo + hi) / 2 or clamp(0, lo + w / 2, hi - w / 2)
+        x0 = mid - w / 2
+    end
     for i = 1, ACTIVATION.MAX_SHOWN do
         local kind = r and (r.kinds and r.kinds[i] or r.kind) or "d6"
         local hl = r and (r.hls and r.hls[i] or r.hl)
-        v.slots[i] = { on = i <= n, D = D, x = x0 + (i - 1) * step + D / 2, y = v.rowY,
+        local sign = i <= n and type(syms[i]) == "table" and #syms[i] > 0
+        local y = v.rowY - (sign and LAY.diceSymDrop * D or 0)
+        v.slots[i] = { on = i <= n, D = D, x = x0 + (i - 1) * step + D / 2, y = y,
                        face = ACTIVATION.face(kind, faces[i] or 1, ACTIVATION.markSide(D), hl, r ~= nil and r.spare == i),
-                       syms = ACTIVATION.signView(i <= n and syms[i] or nil, D) }
+                       syms = ACTIVATION.signView(i <= n and syms[i] or nil, D, y) }
     end
     -- the Ammo trait's die (ACTIVATION.roll.ammoDie): a faint cartridge
     -- behind its pips, so it reads apart from the hit dice
@@ -5513,17 +5571,21 @@ end
 -- The signs over a die of side D (`list` = { { text =, ink = }, ... } as
 -- a roll has them, see ACTIVATION.diceView; nil: none): two places, each
 -- shown or not -- side by side while both are -- LAY.diceSym of the side
--- tall, diceSymGap over the die's top: from the die's middle (x, y), the
--- box and the size its sign fits.
-function ACTIVATION.signView(list, D)
+-- tall, diceSymGap over the die's top but kept inside the panel (the
+-- die's middle at `y0` in it, LAY.sideY up to its top edge; a die's frame
+-- art has a clear margin, so a sign brought down onto it still sits over
+-- the die): from the die's middle (x, y), the box and the size its sign
+-- fits.
+function ACTIVATION.signView(list, D, y0)
     local out, h = {}, LAY.diceSym * D
+    local y = math.min(D / 2 + LAY.diceSymGap * D + h / 2, LAY.sideY - (y0 or 0) - h * 0.625)
     local m = math.min(2, type(list) == "table" and #list or 0)
     for k = 1, 2 do
         local s = k <= m and list[k] or nil
         local text = s and tostring(s.text or "") or ""
         out[k] = { on = text ~= "", text = text, ink = s and s.ink or COL.diceShock,
                    x = m == 2 and (k == 1 and -0.55 or 0.55) * h or 0,
-                   y = D / 2 + LAY.diceSymGap * D + h / 2, w = h * 1.1, h = h * 1.25,
+                   y = y, w = h * 1.1, h = h * 1.25,
                    size = fitSize(text ~= "" and text or "W", h * 1.1, h * 1.25, h, true) }
     end
     return out
@@ -5647,7 +5709,8 @@ function ACTIVATION.diceXml()
         text = b.text or "", color = b.ink or COL.value, size = sz,
         extra = string.format(' active="%s" raycastTarget="false"', tostring(b.text ~= nil)) }
     out[#out + 1] = img("diceSumIcon", b.icon ~= nil, b.x or 0, 0, b.d or LAY.diceD * 0.8, b.ink or COL.value, nil, b.icon)
-    -- what the Ammo checks came to, at the left end: ammoSum ("OUT", "JAM", "SPENT")
+    -- what the Ammo checks came to, at the left end: ammoSum ("OUT", "JAM",
+    -- "SPENT") -- or what a roll adds to its dice ("3 Strength +")
     local a = v.ammo
     local asz = a and a.size or LAY.diceSumFont
     out[#out + 1] = textXml{ id = "ammoSum", x = a and a.x or 0, y = 0,
@@ -6514,7 +6577,19 @@ local function actionDimmed(a)
     if a.roll or a.always or fighter.activation ~= "active" then return false end
     return fighter.usedActions[a.key] == true or SKILL.cost(a) > fighter.actionsLeft
 end
-local function actionState(a) return false, a.label, ACTION_TYPES[a.type or ""], actionDimmed(a) end
+-- What an action is called in A's panels: its label -- Coup de Grace and
+-- the Agility Test with what the fighter's gang adds to their roll
+-- (CFG.coupGang: "Coup de Grace (+1)" for Genestealer Cults, see
+-- ACTIVATION.coup; CFG.agilityGang: "Agility Test (+1)" for House Escher,
+-- see ACTIVATION.agility).
+function SKILL.shownLabel(a)
+    local mod = 0
+    if a.key == "coup_de_grace" then mod = ACTIVATION.gangMod(CFG.coupGang)
+    elseif a.roll == "agility" then mod = ACTIVATION.agilityMod() end
+    if mod ~= 0 then return string.format("%s (%+d)", a.label, mod) end
+    return a.label
+end
+local function actionState(a) return false, SKILL.shownLabel(a), ACTION_TYPES[a.type or ""], actionDimmed(a) end
 local function conditionState(c) return conditionCount(c.key) > 0, conditionLabel(c) end
 
 -- A colour `k` of the way toward another ("#RRGGBB[AA]", alpha from `a`).
@@ -7744,8 +7819,9 @@ do
         return R.lowest(p.traits, TRAIT.shock) or (hasTrait(p, TRAIT.shock) and 6) or nil
     end
     -- Knockback (N+): a hit die that hits and reaches N (read as Shock is,
-    -- see ACTIVATION.hitRead) pushes the target back once the attack is
-    -- over -- once an attack, however many dice reach it -- unless the
+    -- see ACTIVATION.hitRead) knocks the target back once the attack is
+    -- over (shown on its card, see knockback) -- once an attack, however
+    -- many dice reach it -- unless the
     -- weapon is Blast (R.blast). N, 6 for a Knockback without one, or nil.
     function R.knockback(p)
         if not TRAIT.knockback then return nil end
@@ -9529,7 +9605,8 @@ function ACTIVATION.drawDice()
         setAttr("diceSumIcon", "offsetXY", xyAttr(b.x, 0))
         size("diceSumIcon", b.d)
     end
-    -- what the Ammo checks came to, at the left end (OUT / JAM / SPENT)
+    -- what the Ammo checks came to, at the left end (OUT / JAM / SPENT), or
+    -- what a roll adds to its dice
     local a = v.ammo
     setAttr("ammoSum", "active", a ~= nil)
     if a then
@@ -9573,7 +9650,9 @@ end
 -- ("∑9", "∑4", "Miss") and ammoState ("out" / "jam" / "spent": at the
 -- left end), or result (an Injury result: its icon; `best` too for the
 -- Injury dice action), ammoDie (the Ammo trait's die), syms (per die, the
--- signs over it: ACTIVATION.signs) -- on every
+-- signs over it: ACTIVATION.signs), lead (said before the dice:
+-- ACTIVATION.leadView), inline (the sum straight after the dice, not at
+-- the right end: '5" + [die] = 8"') -- on every
 -- player's copy, for at least CFG.diceShow seconds (roll.held meanwhile),
 -- whatever the cursor does; only a newer roll replaces it sooner. After
 -- that it goes -- unless the cursor is on the panel or the bar
@@ -11788,85 +11867,6 @@ do
         return false
     end
 
-    -- Knockback (see knockback): how far this model can be pushed, up to
-    -- `dist` inches along (dx, dz) -- a unit vector on the table -- and what
-    -- stopped it short: "terrain" (scenery: CFG.knockRays, the nearest
-    -- thing a ray hits, less the base's front and the gap), "fighter"
-    -- (its base would run into another's) or "enemy" (it would come within
-    -- CFG.engageRange of an enemy's base -- only when it isn't Engaged);
-    -- nil when nothing did. Fighters on another level (CFG.engageLevel)
-    -- are no matter, nor one it would only move away from.
-    function ACTIVATION.knockPath(dx, dz, dist)
-        local pos = positionOf(self)
-        if not pos then return 0, nil end
-        local all, me = ACTIVATION.everyone({ within = (tonumber(dist) or 0) + CFG.engageRange })
-        me = me or tableEntry(self)
-        local r = me and me.r or currentBase().diameter / 2
-        local rays = CFG.knockRays or {}
-        local room, why = dist, nil
-        if Physics and Physics.cast then
-            local bottom, h = pos.y, 1
-            local okB, b = pcall(function() return self.getBounds() end)
-            if okB and type(b) == "table" and b.center and b.size then
-                local cy, sy = tonumber(b.center.y or b.center[2]), tonumber(b.size.y or b.size[2])
-                if cy and sy then bottom, h = cy - sy / 2, sy end
-            end
-            local function passes(o)
-                if o == nil or isSelf(o) then return true end
-                local okT, tagged = pcall(function() return o.hasTag(CFG.importTag) end)
-                if okT and tagged == true then return true end
-                local okD, kind = pcall(function() return o.type end)
-                return okD and kind == "Dice"
-            end
-            for _, f in ipairs(rays.up or { 0.15, 0.5 }) do
-                for _, a in ipairs(rays.across or { 0 }) do
-                    local side = a * r
-                    local front = math.sqrt(math.max(0, r * r - side * side))   -- the base's edge ahead of the ray
-                    local o = { x = pos.x - dz * side, y = bottom + h * f, z = pos.z + dx * side }
-                    local ok, hits = pcall(function()
-                        return Physics.cast({ origin = o, direction = { x = dx, y = 0, z = dz },
-                            type = 1, max_distance = front + dist, debug = false })
-                    end)
-                    for _, hit in ipairs(ok and type(hits) == "table" and hits or {}) do
-                        local d = tonumber(hit.distance)
-                        if d and not passes(hit.hit_object) then
-                            local can = math.max(0, d - front - (rays.gap or 0.05))
-                            if can < room then room, why = can, "terrain" end
-                        end
-                    end
-                end
-            end
-        end
-        local engaged = fighter.status == "engaged"
-        local start = { x = pos.x, z = pos.z, r = r }
-        local slack = CFG.engageSlack or 0
-        local others = {}
-        for _, o in ipairs(all) do
-            if not o.self and math.abs(o.y - pos.y) <= (CFG.engageLevel or 1) + slack then
-                others[#others + 1] = { o = o, g0 = baseGap(start, o) }
-            end
-        end
-        local function blocked(s)
-            local at = { x = pos.x + dx * s, z = pos.z + dz * s, r = r }
-            for _, e in ipairs(others) do
-                local g = baseGap(at, e.o)
-                if g < e.g0 then
-                    if g < 0 then return "fighter" end
-                    if not engaged and me and e.o.gang ~= me.gang and g <= CFG.engageRange + slack then return "enemy" end
-                end
-            end
-            return nil
-        end
-        local s, go = 0, 0
-        while s < room - 1e-9 do
-            s = math.min(room, s + 0.05)
-            local b = blocked(s)
-            if b then return go, b end
-            go = s
-        end
-        return go, why
-    end
-
     -- The Cl a Nerve Check is taken against: this fighter's own (as shown,
     -- changes and all), or -- higher -- the best of the friends whose rank
     -- lends it (CFG.nerveRanges: a Leader within 12", a Champion within
@@ -11953,8 +11953,10 @@ do
     -- Sets a status on a table entry, quietly (the check announces it and
     -- flashes the models): this card's own directly, another's through its
     -- public setStatus -- an older card's with the bare key, all it
-    -- understands. Only the dropped model's card ever calls this, and
-    -- setStatus never starts a check, so cards can't fight or loop.
+    -- understands. Only the card that runs the check (a dropped model's,
+    -- or one just gone Seriously Injured or Out of Action) calls this, and
+    -- it only ever sets Active or Engaged, which start no check, so cards
+    -- can't fight or loop.
     local function setStatusOf(f, key)
         f.status = key
         local arg = f.old and key or { key = key, quiet = true }
@@ -11972,6 +11974,14 @@ do
         local all, me = ACTIVATION.everyone({ within = CFG.engageRange, hops = 2, spots = { engage.spot } })
         if not me then                      -- a gang's card without the import tag
             me = tableEntry(self)
+            local gang, pos = gangOf(self), positionOf(self)
+            if not me and fighter.outOfAction and gang and pos then
+                -- just gone Out of Action: it engages nobody, but the enemies
+                -- it was engaged with are looked at from where it stands
+                me = { obj = self, self = true, gang = gang, name = fighter.name, status = "out",
+                       r = (tonumber(currentBase().diameter) or CFG.baseDefault / MM_PER_INCH) / 2,
+                       x = pos.x, y = pos.y, z = pos.z }
+            end
             if not me then                  -- no gang: nothing to engage
                 engage.spot, engage.pending = positionOf(self), false
                 return 0
@@ -12287,6 +12297,8 @@ function healWounds(n)   return setWounds(fighter.wounds.current + (tonumber(n) 
 -- A change is said in chat and flashed on the model in the status's colour
 -- -- unless called { key =, quiet = true }: then the caller announces it
 -- (the engagement check, whose one line covers every fighter it changed).
+-- Going Seriously Injured runs that check (see checkEngagement): the
+-- enemies left with nobody to fight go back to Active.
 function setStatus(key)
     local quiet = false
     if type(key) == "table" then key, quiet = key.key or key.value, key.quiet == true end
@@ -12304,6 +12316,9 @@ function setStatus(key)
         chat(string.format("%s is now %s", fighter.name, def.label), rgbOf(def.color))
         flash(self, rgbOf(def.color))
     end
+    -- Seriously Injured engages nobody: an enemy it was engaged with and
+    -- no other goes back to Active
+    if def.key == "seriously_injured" and before ~= def.key then checkEngagement() end
     onStatusChanged(def.key, def.label)
     return def.key
 end
@@ -12342,7 +12357,7 @@ function setReady(on)
         fighter.noReady = nil
         if not hand then
             on = false
-            chat(string.format("%s gets no Ready marker this turn (Flash)", fighter.name), rgbOf(COL.valueMod))
+            chat(string.format("%s gets no Ready marker this round (Flash)", fighter.name), rgbOf(COL.valueMod))
         end
     end
     if fighter.activation == "active" then ACTIVATION.wyrdEnd() end   -- an activation cut short
@@ -12488,7 +12503,8 @@ end
 -- Recovery tests leave it out, as if it had left the table. Said in chat
 -- (with `why`, from { value =, why = }) and flashed in Seriously
 -- Injured's red. Going Out of Action also opens the Nerve Check of the
--- friends it shakes (ACTIVATION.shaken) and tells the Mundane Controller
+-- friends it shakes (ACTIVATION.shaken), lets go of the enemies it was
+-- engaged with (checkEngagement) and tells the Mundane Controller
 -- (ACTIVATION.tellController: its gang's Bottle Check). Returns whether
 -- it is Out of Action.
 function setOutOfAction(on)
@@ -12525,6 +12541,7 @@ function setOutOfAction(on)
                 rgbOf(statusDef("suppressed").color))
         end
         for _, o in ipairs(shaken) do ACTIVATION.ask(o.obj, "nerveCheck") end
+        checkEngagement()         -- nobody is engaged with it any more
     end
     ACTIVATION.tellController(not on)
     return on
@@ -12556,9 +12573,11 @@ end
 -- gives a Seriously Injured friend within 1" one more Injury dice in its next
 -- Recovery test (see ACTIVATION.treat), Group Activation opens its Leadership
 -- check (see groupActivation), Coup de Grace rolls off against the enemy (see
--- ACTIVATION.coup). And one that says how far it moves its fighter
--- (`distance`: Sprint) has that worked out and said too (see
--- ACTIVATION.sayDistance); one that hands out ammo (`distribute`:
+-- ACTIVATION.coup). One that moves its fighter (`distance`: Move, Dash,
+-- Engage, Charge, Sprint) has how far worked out -- a die thrown first
+-- for Engage and Charge -- and shown over the stats, its chat line saying
+-- the inches instead of the actions left, 'Kage: Dash (D) - 8"' (see
+-- ACTIVATION.moveBy); one that hands out ammo (`distribute`:
 -- Munitioneer's Distribute Ammo) has the friends within its range that are
 -- out of ammo check for a reload (see ACTIVATION.distribute); one that boosts
 -- the fighter's stats (`boost`: the Stimm-Slug) does so until its next
@@ -12602,7 +12621,9 @@ function useAction(key, player)
         or string.format(", %d action%s left", fighter.actionsLeft, fighter.actionsLeft == 1 and "" or "s")
     local rgb = a.type == "wyrd" and rgbOf(COL.wyrdInk)
         or rgbOf(mixColor(ACTION_TYPES[a.type or ""] or "#E6E6E6ff", "#FFFFFFff", 0.55))
-    chat(string.format("%s: %s (%s)%s", fighter.name, a.label, SKILL.costOf(a) or "", left), rgb)
+    local head = string.format("%s: %s (%s)", fighter.name, a.label, SKILL.costOf(a) or "")
+    -- (a move says its line with the inches, once worked out)
+    if a.distance then ACTIVATION.moveBy(a, player, rgb, head) else chat(head .. left, rgb) end
     if a.key == "treat_ally" then ACTIVATION.treat(player, rgb)
     elseif a.key == "group_activation" then groupActivation(player)
     elseif a.key == "coup_de_grace" then ACTIVATION.coup(player)
@@ -12610,7 +12631,6 @@ function useAction(key, player)
     elseif (a.key == "maintain_control_s" or a.key == "maintain_control_f") and a.type == "wyrd" then
         ACTIVATION.maintain(a, player)
     elseif a.type == "wyrd" and a.kind == "skill" then ACTIVATION.cast(a, player) end
-    if a.distance then ACTIVATION.sayDistance(a, rgb) end
     if a.distribute then ACTIVATION.distribute(a, player) end
     ACTIVATION.pulseWeapons(a.key)    -- Fight / Shoot: the weapons it is for
     if a.once then
@@ -12785,7 +12805,9 @@ end
 -- onDrop) from the dropped model's side only: it and each enemy within
 -- CFG.engageRange base to base become Engaged, and those left with no
 -- enemy in reach -- it, or the enemies it moved away from -- go back to
--- Active (see runEngagement). Returns how many statuses changed.
+-- Active (see runEngagement). Also run as the fighter goes Seriously
+-- Injured or Out of Action (see setStatus, setOutOfAction), so the enemies
+-- it was engaged with are let go. Returns how many statuses changed.
 function checkEngagement()
     if not CFG.autoEngage then return 0 end
     return runEngagement()
@@ -13045,6 +13067,26 @@ function resetReliable()
         drawStats()
     end
     return n
+end
+
+-- The fighter back as it was imported -- the Mundane Controller's Reset
+-- all Fighters calls it for every fighter: wounds full, Active, nothing
+-- activated, no conditions, every weapon's ammo and adjustments as they
+-- came, nothing used up, no Wyrd power in effect (what it did to the
+-- others goes with it) and none of anyone else's on it; skills and wargear
+-- as imported. Its base, its height and the card raised or lowered by hand
+-- stay. Engagement is looked at again afterwards. Returns false for a card
+-- that was never imported (nothing to go back to).
+function resetFighter()
+    local src = ACTIVATION.imported
+    if type(src) ~= "table" then return false end
+    if fighter.wyrd then ACTIVATION.unhex(fighter.wyrd) end
+    local data = RULES.copy(src)
+    data.base, data.height, data.lift = fighter.base, fighter.height, fighter.lift
+    setFighter(data)
+    ACTIVATION.powerMark()
+    if CFG.autoEngage then checkEngagement() end
+    return true
 end
 
 -- What can be taken once a game (an action that says `once`: the
@@ -13451,6 +13493,16 @@ function ACTIVATION.checkInk(test)
     return test.passed and COL.valueUp or COL.valueMod
 end
 
+-- Injury dice as chat says them: every die's result, short, in the order
+-- thrown, then the one that counts (`k`) -- "Inj, S. Inj, OOA = OOA"; one
+-- die's result alone ("S. Inj").
+function ACTIVATION.injuryText(faces, k)
+    local R, each = ACTIVATION.INJURY, {}
+    for i, f in ipairs(faces) do each[i] = R[ACTIVATION.INJURY_DICE[f] or "serious"].short end
+    if #each < 2 then return each[1] or R[k].short end
+    return table.concat(each, ", ") .. " = " .. R[k].short
+end
+
 -- A roll's line in chat: "<name> - <what>: 1 + 4 = 5" -- each die's
 -- reading (`each`) added up to `total` (only the total for one die),
 -- `unit` after it (" Hits"), `more` after that (the Ammo checks), and
@@ -13644,8 +13696,9 @@ function rollFirepower(n, player)
 end
 
 -- `n` Injury dice (A's Special tab's "Roll Injuries"), thrown as the other
--- dice are and read through ACTIVATION.INJURY_DICE: said in chat, the worst
--- result alone ("Roll Injuries: OOA") and shown over
+-- dice are and read through ACTIVATION.INJURY_DICE: said in chat, every
+-- die's result and the best after them ("Roll Injuries: Inj, OOA = Inj",
+-- see ACTIVATION.injuryText) and shown over
 -- the stats -- the worst result's icon at the panel's right end (Out of
 -- Action, then Serious Injury, then Injury), the best one's at its left end.
 -- Only when every die is Out of Action is the fighter taken Out of Action
@@ -13666,7 +13719,7 @@ function rollInjuries(n, player)
         local worst, best                        -- Out of Action the worst, then Serious Injury
         for _, k in ipairs({ "out", "serious", "injured" }) do worst = worst or (count[k] and k) end
         for _, k in ipairs({ "injured", "serious", "out" }) do best = best or (count[k] and k) end
-        ACTIVATION.say("Roll Injuries", {}, R[worst].short,
+        ACTIVATION.say("Roll Injuries", {}, ACTIVATION.injuryText(faces, best),
             { color = color, digital = digital })
         ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = worst, best = best }
         if count.out == #faces and not fighter.outOfAction then
@@ -13927,15 +13980,18 @@ end
 -- automatic 6 -- at RF every hit's, or (CFG.rapidOneHit) the first's.
 -- Knockback (N+): every hit die that reaches N (a ranged attack's hit die
 -- alone, not its Firepower dice) has CFG.knockMark over it, and if any
--- does, the target is pushed back once the attack is over -- once, however
--- many dice did; not with a Blast weapon (see ACTIVATION.knockAfter).
+-- does, the target's card shows it knocked back once the attack is over
+-- -- once, however many dice did; not with a Blast weapon (see
+-- ACTIVATION.knockAfter).
 -- The enemies hit hear what Cursed and Flash do to them (see
 -- ACTIVATION.traitHits); Flash and Graviton Pulse roll no Wound roll. An
 -- Unstable weapon's hit die showing a 1 explodes: "Explosion" at the
 -- panel's right end, the hit die alone shown, and the attack ends there --
--- no hits, no Ammo checks, no Wound roll. A shot at a Seriously Injured
--- enemy (attack.prone, see ACTIVATION.strike) is titled "Autogun (-1 to
--- Hit)".
+-- no hits, no Ammo checks, no Wound roll. The title carries the whole
+-- modifier to hit when it isn't 0 -- the weapon's Hit as shown (Combi,
+-- aim, Assist ...) and -1 for a shot at a Seriously Injured enemy
+-- (attack.prone, see ACTIVATION.strike): "Autogun (+1 to Hit)", "Knife
+-- (x3, -1 to Hit)"; none while only 6s hit (Blind ...).
 function ACTIVATION.attackDice(attack, verb, aimed, player)
     local R, w, p = TRAIT_RULES, weaponAt(attack.weapon), attack.stats
     local UP, MOD = COL.valueUp, COL.valueMod
@@ -13958,9 +14014,9 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
     local tags = {}
     if rf then tags[#tags + 1] = "RF" .. rf end
     if template then tags[#tags + 1] = "Template" end
-    if attack.prone then tags[#tags + 1] = "-1 to Hit" end
-    local title = attack.melee and string.format("%s (x%d)", name, #kinds)
-                  or name .. (#tags > 0 and " (" .. table.concat(tags, ", ") .. ")" or "")
+    if h.mod ~= 0 then tags[#tags + 1] = string.format("%+d to Hit", h.mod) end
+    if attack.melee then table.insert(tags, 1, "x" .. #kinds) end
+    local title = name .. (#tags > 0 and " (" .. table.concat(tags, ", ") .. ")" or "")
     local color = colorOf(player)
     local function landed(faces, digital)
         local hls, syms = {}, {}
@@ -14108,7 +14164,7 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
                 plan.hits = (plan.hits or 0) + 1
             end
         end
-        -- Knockback: the target is pushed once the attack is over -- after
+        -- Knockback: shown on the target once the attack is over -- after
         -- its saves when the Wound roll goes on to them (the plan carries
         -- it), else once these dice have shown
         local knock = kb and not R.blast(p) and struck[1] and ACTIVATION.knockFrom(attack) or nil
@@ -14330,11 +14386,11 @@ function ACTIVATION.jaw()
 end
 
 -- A roll that follows another (`roll`, as shown): `go` throws it
--- CFG.dicePause seconds after that one showed -- whatever the cursor does
--- -- or, when another roll has taken the panel meanwhile, once that one
--- has had its own time (see ACTIVATION.showDice). With no roll to wait
--- for, at once.
-function ACTIVATION.later(roll, go)
+-- CFG.dicePause seconds (or `wait`) after that one showed -- whatever the
+-- cursor does -- or, when another roll has taken the panel meanwhile, once
+-- that one has had its own time (see ACTIVATION.showDice). With no roll to
+-- wait for, at once.
+function ACTIVATION.later(roll, go, wait)
     if not roll then return go() end
     Wait.time(function()
         local function free()
@@ -14343,7 +14399,7 @@ function ACTIVATION.later(roll, go)
         end
         if free() or not Wait.condition then return go() end
         Wait.condition(go, free, CFG.diceWait, go)
-    end, CFG.dicePause or CFG.diceShow)
+    end, wait or CFG.dicePause or CFG.diceShow)
 end
 
 -- The Wound roll after an attack's hit roll (`roll`, as shown; nil: at
@@ -14570,9 +14626,9 @@ end
 -- card is known (plan.guid) is told (takeSaves): each wound with its own AP
 -- and Lethality (as Rending and Shred left them) and Damage, the cover it
 -- would get, what the weapon's traits do to it, and this player's colour to
--- roll in -- and Knockback (plan.knock), which pushes it once its saves
--- are over. One that isn't told (no wound) and is to be knocked back is
--- pushed once the Wound roll (`roll`, as shown) has shown.
+-- roll in -- and Knockback (plan.knock), shown on it once its saves are
+-- over. One that isn't told (no wound) and is to be knocked back is told
+-- so once the Wound roll (`roll`, as shown) has shown.
 function ACTIVATION.toSaves(seq, per, player, roll)
     local plans, keys = seq.plans or {}, {}
     for k in pairs(plans) do keys[#keys + 1] = k end
@@ -14684,14 +14740,15 @@ function ACTIVATION.fromText(t)
 end
 
 -- The attack t (see takeSaves) is over for this fighter: Knockback, if it
--- has one (t.knockback), pushes it (knockback) once `roll` -- the last
--- roll it made of it -- has shown; with none, CFG.dicePause seconds on.
+-- has one (t.knockback), is shown (knockback) once `roll` -- the last roll
+-- it made of it, its saves or Injury dice -- has had the longer wait,
+-- CFG.diceShow; with none, CFG.diceShow seconds on.
 function ACTIVATION.knockSelf(t, roll)
     local kb = type(t) == "table" and t.knockback
     if type(kb) ~= "table" then return end
     local function go() knockback(kb) end
-    if roll then return ACTIVATION.later(roll, go) end
-    Wait.time(go, CFG.dicePause or CFG.diceShow)
+    if roll then return ACTIVATION.later(roll, go, CFG.diceShow) end
+    Wait.time(go, CFG.diceShow)
 end
 
 -- Wound `i` of attack t (see takeSaves): its own entry, else the attack's.
@@ -14933,8 +14990,9 @@ end
 -- `n` Injury dice for wounds taken at 0 wounds (see ACTIVATION.damage),
 -- in one throw (at most MAX_SHOWN): the worst result is applied -- Out of
 -- Action, then Serious Injury (Seriously Injured), then Injury (nothing
--- more). Said, that result alone ("Bob - Injury dice (Kal's Autogun): S.
--- Inj") and shown over the stats, the worst result at the right end.
+-- more). Said, every die and then that result ("Bob - Injury dice (Kal's
+-- Autogun): Inj, S. Inj = S. Inj", see ACTIVATION.injuryText) and shown
+-- over the stats, the worst result at the right end.
 -- o = { best = the item that lets the better be kept (the Bio-Booster's
 -- two dice: "Injury dice (Kal's Autogun, Bio-Booster): Inj"), done(roll)
 -- -- run once the result is applied, unless the fighter is then Out of
@@ -14957,7 +15015,7 @@ function ACTIVATION.injure(n, from, player, o)
         local order = o.best and { "injured", "serious", "out" } or { "out", "serious", "injured" }
         for _, k in ipairs(order) do worst = worst or (count[k] and k) end
         ACTIVATION.say(string.format("Injury dice (%s%s)", from, o.best and ", " .. tostring(o.best) or ""), {},
-            R[worst].short, { color = color, digital = digital })
+            ACTIVATION.injuryText(faces, worst), { color = color, digital = digital })
         ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = worst }
         local shown = ACTIVATION.roll
         if fighter.outOfAction then return end
@@ -15309,9 +15367,9 @@ function rollRecovery(player)
         if rec.helper then why[#why + 1] = rec.helper .. " assists" .. (rec.kit and " with " .. rec.kit or "") end
         if rec.tend then why[#why + 1] = "Tend Wounds" end
         if rec.treated then why[#why + 1] = rec.treated > 1 and ("Treat Ally x" .. rec.treated) or "Treat Ally" end
-        -- "Recovery Test (Mate assists): Inj" -- only the result kept
+        -- "Recovery Test (Mate assists): S. Inj, Inj = Inj" -- every die, then the one kept
         ACTIVATION.say("Recovery Test" .. (#why > 0 and (" (" .. table.concat(why, ", ") .. ")") or ""), {},
-            R[best].short, { color = color, digital = digital })
+            ACTIVATION.injuryText(faces, best), { color = color, digital = digital })
         ACTIVATION.showDice{ title = "Recovery Test", kind = "injury", faces = faces, result = best }
         if best == "out" then setOutOfAction(true)
         elseif best == "injured" and fighter.status ~= "active" then setStatus("active") end
@@ -15338,51 +15396,24 @@ end
 -- Knockback: an enemy's attack has knocked this fighter back (see
 -- ACTIVATION.attackDice; t = { from = the attacker's model's GUID, x, z =
 -- where it stood, by = the attacker's name, weapon = its weapon }, told
--- once the attack is over): it is pushed CFG.knockback inches straight
--- away from the attacker -- less where scenery, another fighter's base or,
--- for a fighter that isn't Engaged, the CFG.engageRange round an enemy's
--- base is in the way (ACTIVATION.knockPath). Said in chat ('Bob is knocked
--- back 1" by Kal's Axe', "... -- scenery in the way"), and once the model
--- stands there its engagement is checked as for a model put down (onDrop):
--- one pushed out of reach of its enemies is no longer Engaged. Nothing for
--- a fighter Out of Action or held by a player. Returns how far it went (0:
--- not at all), or false.
+-- once the attack is over). The model is never moved: the players do that.
+-- Its panel over the stats shows '↔ Knockback: 1"' (CFG.knockMark,
+-- CFG.knockback inches) for as long as a roll is shown, titled "Kal
+-- triggered Knockback" in the skills' bar, chat says 'Bob is
+-- knocked back 1" by Kal's Axe' and the model flashes in the sign's
+-- colour. Nothing for a fighter Out of Action. Returns the inches, or
+-- false.
 function knockback(t)
     t = type(t) == "table" and t or {}
     if fighter.outOfAction then return false end
-    local okH, held = pcall(function() return self.held_by_color end)
-    if okH and held then return false end
-    local pos = positionOf(self)
-    local ax, az = tonumber(t.x), tonumber(t.z)
-    local okA, att = pcall(function() return t.from and getObjectFromGUID(t.from) end)
-    local ap = okA and att and positionOf(att)
-    if ap then ax, az = ap.x, ap.z end
-    if not (pos and ax and az) then return false end
-    local dx, dz = pos.x - ax, pos.z - az
-    local len = math.sqrt(dx * dx + dz * dz)
-    if len <= 0 then return false end
-    dx, dz = dx / len, dz / len
-    local go, why = ACTIVATION.knockPath(dx, dz, tonumber(CFG.knockback) or 1)
-    local from = ACTIVATION.fromText(t)
-    local WHY = { terrain = "scenery in the way", fighter = "another fighter in the way",
-                  enemy = "stopped short of an enemy" }
-    local moved = go >= 0.05
-    local msg = moved
-        and string.format('%s is knocked back %s" by %s', fighter.name, (string.format("%.1f", go):gsub("%.0$", "")), from)
-        or string.format("%s can't be knocked back by %s", fighter.name, from)
-    if why then msg = msg .. " -- " .. WHY[why] end
-    chat(msg, rgbOf(COL.valueMod))
-    if not moved then return 0 end
-    pcall(function() self.setPositionSmooth({ x = pos.x + dx * go, y = pos.y, z = pos.z + dz * go }, false, true) end)
+    local inches = tonumber(CFG.knockback) or 1
+    local d = (string.format("%.1f", inches):gsub("%.0$", ""))
+    local title = t.by and (tostring(t.by) .. " triggered Knockback") or "Knockback"
+    ACTIVATION.showDice{ title = title, faces = {}, leadInk = COL.diceKnock,
+                         lead = string.format('%s Knockback: %s"', CFG.knockMark or "", d):gsub("^ ", "") }
+    chat(string.format('%s is knocked back %s" by %s', fighter.name, d, ACTIVATION.fromText(t)), rgbOf(COL.valueMod))
     flash(self, rgbOf(COL.diceKnock))
-    -- once it stands there: engagement and auras, as for a model put down
-    local function still()
-        local ok, moving = pcall(function() return self.isSmoothMoving() end)
-        return not (ok and moving)
-    end
-    if Wait.condition then Wait.condition(function() onDrop() end, still, 2, function() onDrop() end)
-    else onDrop() end
-    return go
+    return inches
 end
 
 -- A ranged attack has hit this fighter (the attacker's rollAttack tells
@@ -15443,7 +15474,7 @@ function traitHit(t)
             chat(string.format("%s is blinded by %s -- Blind, and loses their Ready marker", name, hit), MOD)
         else
             fighter.noReady = true
-            chat(string.format("%s is blinded by %s -- Blind, and gets no Ready marker next turn", name, hit), MOD)
+            chat(string.format("%s is blinded by %s -- Blind, and gets no Ready marker next round", name, hit), MOD)
         end
         flash(self, MOD)
     end
@@ -15692,8 +15723,9 @@ end
 -- says. o = { why = what it is for (said with the result), done = what
 -- hangs on it: called (passed, test, player) once it is rolled, after = a
 -- roll still on show, which it waits for (see ACTIVATION.later), mod }.
--- Thrown and shown as a stat test's, the total at the panel's right end
--- when something was added; said in the test's colour: "Kage - Agility
+-- Thrown and shown as a stat test's, the bar's title giving what the die
+-- itself needs ("Agility Test (3+)" with House Escher's +1); said in the
+-- test's colour: "Kage - Agility
 -- Test (4+, Spring Up): 3", "Kage - Agility Test (4+, Spring Up, House
 -- Escher +1): 3 + 1 = 4". Then what hangs on it follows, and the
 -- onAgilityRolled stub hears of it. Returns the test (its result comes
@@ -15706,7 +15738,8 @@ function ACTIVATION.agility(o, player)
     local mod = bonus + math.floor(tonumber(o.mod) or 0)
     local test = { need = need, mod = mod, why = o.why, gang = bonus ~= 0 and gang or nil }
     local why = (o.why and ", " .. o.why or "") .. (bonus ~= 0 and string.format(", %s %+d", gang, bonus) or "")
-    local title = string.format("Agility Test (%d+)", need)
+    -- the bar names what the die itself needs, what is added taken off
+    local title = string.format("Agility Test (%d+)", math.max(1, need - mod))
     ACTIVATION.later(o.after, function()
         if fighter.outOfAction then return end
         ACTIVATION.rolling(title)
@@ -15719,8 +15752,7 @@ function ACTIVATION.agility(o, player)
                          or string.format("%d %s %d = %d", f, mod > 0 and "+" or "-", math.abs(mod), test.total)
             chat(string.format("%s - Agility Test (%d+%s): %s%s", fighter.name, need, why, body,
                 digital and " (rolled digitally)" or ""), rgbOf(ink))
-            ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hl = ink,
-                                 sum = mod ~= 0 and ("∑" .. test.total) or nil, sumInk = ink }
+            ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hl = ink }
             if o.done then o.done(test.passed, test, player) end
             onAgilityRolled(player, test)
         end, "d6", title)
@@ -16388,7 +16420,7 @@ function ACTIVATION.manifest(a, player, aim, roll)
     if type(it.area) == "table" then
         local ar, names = it.area, ACTIVATION.areaHex(it)
         local text = ar.oneAction and "one action when activated this round"
-                     or ACTIVATION.modsText(ar.mods) .. " until the end of the turn"
+                     or ACTIVATION.modsText(ar.mods) .. " until the end of the round"
         P(string.format("%s's %s: %s -- %s", name, it.name, text,
             #names > 0 and ACTIVATION.nameList(names)
             or string.format('nobody within %s"', tostring(ar.range or "range"))))
@@ -16397,7 +16429,7 @@ function ACTIVATION.manifest(a, player, aim, roll)
         local key = tostring(it.visions.condition or "insanity")
         local c = CONDITIONS[indexOf(CONDITIONS, key) or 0]
         st.visions = { range = tonumber(it.visions.range) or 3, condition = key, label = it.name }
-        P(string.format('%s\'s %s: an enemy ending their activation within %s" of %s gains %s this turn', name, it.name,
+        P(string.format('%s\'s %s: an enemy ending their activation within %s" of %s gains %s this round', name, it.name,
             tostring(st.visions.range), name, c and c.label or key))
     end
     if type(it.target) == "table" then ACTIVATION.hexTarget(it, aim, player, roll) end
@@ -16448,7 +16480,7 @@ function ACTIVATION.hexTarget(it, aim, player, roll)
                 if n then set[#set + 1] = string.format("%s %d%s", k, n, STAT_ROLLS[k] and not STAT_ROLLS[k].under and "+" or "") end
             end
             P(string.format("%s's %s: %s's %s before modifiers%s", fighter.name, it.name, aim.name, table.concat(set, " and "),
-                live and " while it lasts" or " until the end of the turn"))
+                live and " while it lasts" or " until the end of the round"))
             flash(aim.obj, purple)
             return
         end
@@ -16731,7 +16763,7 @@ end
 
 -- The Injury dice of a fall that left the fighter at 0 wounds (see
 -- ACTIVATION.land): one, thrown and shown as the others, said in chat
--- ("Kage - Falling Down (Injury dice): Serious Injury") and applied -- Out
+-- ("Kage - Falling Down (Injury dice): S. Inj") and applied -- Out
 -- of Action takes the fighter out, Serious Injury makes it Seriously
 -- Injured, Injury does no more. Then the fall ends (ACTIVATION.fallEnd).
 function ACTIVATION.fallInjury(catfall, player)
@@ -16742,7 +16774,7 @@ function ACTIVATION.fallInjury(catfall, player)
     throwDice(1, color, function(faces, digital)
         local k = ACTIVATION.INJURY_DICE[faces[1]] or "serious"
         local R = ACTIVATION.INJURY[k]
-        ACTIVATION.say("Falling Down (Injury dice)", { R.short }, R.label, { color = color, digital = digital })
+        ACTIVATION.say("Falling Down (Injury dice)", {}, R.short, { color = color, digital = digital })
         ACTIVATION.showDice{ title = title, kind = "injury", faces = faces, result = k }
         if fighter.outOfAction then return end
         if k == "out" then
@@ -16774,79 +16806,237 @@ function ACTIVATION.fallEnd(catfall, player)
     end }, player)
 end
 
--- How far an action moves its fighter (`a.distance`: a list of { stat,
--- times }, see RULES.skills), worked out from the stats as shown and said
--- in chat, in the action's colour: 'Kage - Sprint: M 5 + 2x I 4 = 13"'.
--- Returns the inches.
-function ACTIVATION.sayDistance(a, rgb)
-    local parts, total = {}, 0
+-- How far an action moves its fighter (`a.distance`: a list of { what,
+-- times } -- a stat as shown, or "D6": that many dice thrown for it --
+-- added up, see RULES.actions / RULES.skills), shown over the stats as a
+-- roll is: the stats first, M in inches, then the dice, then the total --
+-- Move '5"', Dash '5" + 3 = 8"', Sprint '5" + 2 x 3 = 11"', Charge '5" +
+-- [die] = 8"', Engage the die alone. The bar's title is the action's
+-- `distanceTitle` ("Movement") or its label with what it adds up: "Dash (M
+-- + I)", "Sprint (M + 2 x I)", "Charge (M + D6)", "Engage (D6)". Then,
+-- once any die has landed, `head` (the action's own chat line, "Kage: Dash
+-- (D)") is said with the inches -- 'Kage: Dash (D) - 8"' -- in `rgb`.
+-- Returns the inches, or nil while dice are still to land.
+function ACTIVATION.moveBy(a, player, rgb, head)
+    local stats, names, total, dice, scaled = {}, {}, 0, 0, false
     for _, d in ipairs(type(a.distance) == "table" and a.distance or {}) do
-        local stat, times = tostring(d[1] or d.stat or ""), tonumber(d[2] or d.times) or 1
-        local v = statNumber(stat) or 0
-        total = total + times * v
-        parts[#parts + 1] = string.format("%s%s %g", times ~= 1 and string.format("%gx ", times) or "", stat, v)
+        local what, times = tostring(d[1] or d.stat or ""), tonumber(d[2] or d.times) or 1
+        names[#names + 1] = (times ~= 1 and string.format("%g x ", times) or "") .. what
+        if what:upper() == "D6" then
+            dice = dice + math.max(0, math.floor(times))
+        else
+            local v = statNumber(what) or 0
+            total, scaled = total + times * v, scaled or times ~= 1
+            stats[#stats + 1] = string.format("%s%g%s", times ~= 1 and string.format("%g x ", times) or "", v,
+                what == "M" and '"' or "")
+        end
     end
-    chat(string.format('%s - %s: %s = %g"', fighter.name, a.label, table.concat(parts, " + "), total), rgb)
-    return total
+    local title = a.distanceTitle or string.format("%s (%s)", a.label, table.concat(names, " + "))
+    local function show(faces, digital)
+        local sum = total
+        for _, f in ipairs(faces) do sum = sum + f end
+        local lead = #stats > 0 and table.concat(stats, " + ") or nil
+        local result
+        if #stats + #faces > 1 or scaled or #faces > 0 then
+            if #faces > 0 then lead, result = lead and lead .. " +", string.format('= %g"', sum)
+            else lead = string.format('%s = %g"', lead, sum) end
+        end
+        ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, lead = lead, sum = result, inline = true }
+        chat(string.format('%s - %g"%s', head, sum, digital and " (rolled digitally)" or ""), rgb)
+        return sum
+    end
+    if dice == 0 then return show({}) end
+    ACTIVATION.rolling(title)
+    throwDice(math.min(dice, ACTIVATION.MAX_SHOWN), colorOf(player), show, "d6", title)
+    return nil
 end
 
 -- Coup de Grace (the action in A's panel, see useAction): one D6 plus the
 -- fighter's Strength as shown -- and what its gang adds (CFG.coupGang:
--- Genestealer Cults +1) -- thrown and shown as every roll here, the total
--- at the panel's right end -- "Kage - Coup de Grace: 4 + 3S = 7".
--- With an enemy selected by `player` (ACTIVATION.target: just one) a
--- second D6 is thrown with it, for that fighter, plus its Strength as its
--- own card shows it: when this fighter's total is the same or higher the
--- enemy goes Out of Action (its card's setOutOfAction says so); lower, it
--- holds on. "Kage - Coup de Grace vs Bob: 4 + 3S = 7 against 2 + 3S = 5",
--- green when that takes the enemy out, orange when not, as this fighter's
--- die (the first) and the totals beside the dice ("7 : 5") are.
+-- Genestealer Cults +1, which A's panel and the bar's title show as
+-- "Coup de Grace (+1)") -- thrown and shown as every roll here, what is
+-- added before the die ("3 Strength +", "3 Strength + 1 +", see
+-- ACTIVATION.coupThrow) and the total at the panel's right end -- "Kage -
+-- Coup de Grace: 4 + 3S = 7".
+--   With an enemy selected by `player` (ACTIVATION.target: just one), that
+-- fighter rolls the same once this one's die has had its time
+-- (CFG.dicePause): its own card throws one D6 plus its Strength -- nothing
+-- for its gang: only the fighter that takes the action adds that -- and
+-- answers (coupDefend, coupResult; a card too old to, or one that never
+-- answers, has its die thrown here, see ACTIVATION.coupHere). When this
+-- fighter's total is the same or higher the enemy goes Out of Action (its
+-- card's setOutOfAction says so); lower, it holds on. "Kage - Coup de
+-- Grace vs Bob: 4 + 3S = 7 against 2 + 3S = 5", green when that takes the
+-- enemy out, orange when not.
 --   Cut-Throat (a skill that says `cutThroat`, and works): when the enemy
--- rolled more, this fighter's die is thrown again -- once, the first
--- having had its time over the stats -- against the total the enemy has
--- (`again`: that roll's { aim, foeFace }).
+-- rolled more, this fighter's die is thrown again -- once, the enemy's
+-- having had its time -- against the total the enemy has (`again`: { aim,
+-- foe = the enemy's roll }); this die then green or orange as it came out.
 --   Then the onCoupRolled stub hears of it. Returns whether it rolled (not
 -- when Out of Action).
 function ACTIVATION.coup(player, again)
     if fighter.outOfAction then return false end
     local aim = again and again.aim or ACTIVATION.target(player)
-    local s, foeS = statNumber("S") or 0, aim and tonumber(aim.s) or 0
+    local s = statNumber("S") or 0
     local mod, gang = ACTIVATION.gangMod(CFG.coupGang)
-    local title = again and "Coup de Grace (Cut-Throat)" or "Coup de Grace"
+    local what = again and "Coup de Grace (Cut-Throat)" or "Coup de Grace"
+    local tags = {}
+    if mod ~= 0 then tags[#tags + 1] = string.format("%+d", mod) end
+    if again then tags[#tags + 1] = "Cut-Throat" end
+    local title = "Coup de Grace" .. (#tags > 0 and " (" .. table.concat(tags, ", ") .. ")" or "")
     local color = colorOf(player)
-    ACTIVATION.rolling(title)
-    throwDice((aim and not again) and 2 or 1, color, function(faces, digital)
-        local f = faces[1] or 1
-        local mine = f + s + mod
+    ACTIVATION.coupThrow({ title = title, s = s, mod = mod, color = color, done = function(f, mine, digital, roll)
         local r = { face = f, s = s, mod = mod ~= 0 and mod or nil, total = mine, digital = digital,
                     rerolled = again ~= nil or nil }
         local own = string.format("%d + %dS%s = %d", f, s,
             mod ~= 0 and string.format(" %s %d %s", mod > 0 and "+" or "-", math.abs(mod), gang) or "", mine)
-        local tail = digital and " (rolled digitally)" or ""
+        local duel = { player = player, aim = aim, r = r, own = own, what = what, color = color }
         if not aim then
-            announce(string.format("%s - Coup de Grace: %s%s", fighter.name, own, tail), color)
-            ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, sum = "∑" .. mine }
+            announce(string.format("%s - Coup de Grace: %s%s", fighter.name, own,
+                digital and " (rolled digitally)" or ""), color)
+            ACTIVATION.showDice(roll)
             onCoupRolled(player, r)
-            return
+        elseif again then           -- Cut-Throat: against what the enemy has
+            local ink = mine >= again.foe.total and COL.valueUp or COL.valueMod
+            roll.hls, roll.sumInk = { ink }, ink
+            ACTIVATION.showDice(roll)
+            ACTIVATION.coupEnd(duel, again.foe)
+        else
+            ACTIVATION.showDice(roll)
+            ACTIVATION.later(roll, function() ACTIVATION.coupAsk(duel) end)
         end
-        local ff = again and again.foeFace or faces[2] or 1
-        local theirs = ff + foeS
-        r.target, r.foeFace, r.foeS, r.foeTotal, r.out = aim.name, ff, foeS, theirs, mine >= theirs
-        local reroll = theirs > mine and not again and #SKILL.with("cutThroat") > 0
-        local ink = r.out and COL.valueUp or COL.valueMod
-        chat(string.format("%s - %s vs %s: %s against %d + %dS = %d%s%s", fighter.name, title, aim.name, own,
-            ff, foeS, theirs, r.out and "" or reroll and " -- rolled again with Cut-Throat"
-            or string.format(" -- %s holds on", aim.name), tail), rgbOf(ink))
-        ACTIVATION.showDice{ title = title, kind = "d6", faces = faces, hls = { ink },
-                             sum = mine .. " : " .. theirs, sumInk = ink }
-        if r.out then
-            ACTIVATION.ask(aim.obj, "setOutOfAction", { value = true, why = "Coup de Grace by " .. fighter.name })
+    end })
+    return true
+end
+
+-- One die of a Coup de Grace (see ACTIVATION.coup, coupDefend): o = {
+-- title (the bar's), s = the Strength added, mod = what the gang adds,
+-- color = whose dice, done(face, total, digital, roll) }. Thrown, then
+-- handed to `done` with the roll to show: "∑7" at the right end and before
+-- the die what is added to it, "3 Strength +" / "3 Strength + 1 +".
+function ACTIVATION.coupThrow(o)
+    ACTIVATION.rolling(o.title)
+    throwDice(1, o.color, function(faces, digital)
+        local f = faces[1] or 1
+        local total = f + o.s + o.mod
+        local lead = string.format("%d Strength +", o.s)
+        if o.mod ~= 0 then
+            lead = string.format("%d Strength %s %d +", o.s, o.mod > 0 and "+" or "-", math.abs(o.mod))
         end
-        onCoupRolled(player, r)
-        if reroll then
-            ACTIVATION.later(ACTIVATION.roll, function() ACTIVATION.coup(player, { aim = aim, foeFace = ff }) end)
-        end
-    end, "d6", title)
+        o.done(f, total, digital, { title = o.title, kind = "d6", faces = { f }, sum = "∑" .. total, lead = lead })
+    end, "d6", o.title)
+end
+
+-- The enemy's side of a Coup de Grace (`duel`, see ACTIVATION.coup): its
+-- card is asked to roll (coupDefend), and answers through coupResult
+-- (ACTIVATION.coups holds what waits for it). A card that can't -- too old
+-- -- or doesn't answer in time has the die thrown here instead, said in
+-- orange, so the table knows whose die that is and why.
+function ACTIVATION.coupAsk(duel)
+    if fighter.outOfAction then return end
+    local pending = ACTIVATION.coups
+    if not pending then pending = { n = 0 }; ACTIVATION.coups = pending end
+    pending.n = pending.n + 1
+    local token = pending.n
+    pending[token] = function(foe) ACTIVATION.coupEnd(duel, foe) end
+    local okG, guid = pcall(function() return self.getGUID() end)
+    local aim, warn = duel.aim, rgbOf(COL.valueMod)
+    local can = ACTIVATION.has(aim.obj, "coupDefend")
+    local asked, took = false, nil
+    if can then
+        asked, took = ACTIVATION.ask(aim.obj, "coupDefend", { by = okG and guid or nil, token = token,
+            attacker = fighter.name, total = duel.r.total, color = duel.color })
+    end
+    if not (asked and took) then
+        pending[token] = nil
+        chat(string.format(can and "%s's card couldn't roll -- its die is rolled on %s's card"
+            or "%s's card is out of date and can't roll for itself -- its die is rolled on %s's card"
+            .. " (cards are brought up to date by the Controller's next round, or by importing again)",
+            aim.name, fighter.name), warn)
+        return ACTIVATION.coupHere(duel)
+    end
+    Wait.time(function()
+        if not pending[token] then return end
+        pending[token] = nil
+        chat(string.format("%s's card didn't answer -- its die is rolled on %s's card", aim.name, fighter.name), warn)
+        ACTIVATION.coupHere(duel)
+    end, (tonumber(CFG.diceWait) or 45) + 15)
+end
+
+-- The enemy's die thrown on this card (see ACTIVATION.coupAsk): its
+-- Strength as it told (`aim.s`), the bar's title "Coup de Grace: Bob".
+function ACTIVATION.coupHere(duel)
+    local aim, mine = duel.aim, duel.r.total
+    local s = tonumber(aim.s) or 0
+    ACTIVATION.coupThrow({ title = "Coup de Grace: " .. aim.name, s = s, mod = 0, color = duel.color,
+        done = function(f, theirs, digital, roll)
+            local ink = theirs > mine and COL.valueUp or COL.valueMod   -- as it comes out for the enemy
+            roll.hls, roll.sumInk = { ink }, ink
+            ACTIVATION.showDice(roll)
+            ACTIVATION.coupEnd(duel, { face = f, s = s, total = theirs, digital = digital, roll = roll })
+        end })
+end
+
+-- How a Coup de Grace comes out (`duel`, see ACTIVATION.coup) against the
+-- enemy's roll `foe` = { face, s, total, digital, roll = the roll when
+-- shown here }: said, the enemy told to go Out of Action when it has less
+-- or the same, the stub told -- and Cut-Throat's second roll, once the
+-- enemy's die has had its time (CFG.dicePause).
+function ACTIVATION.coupEnd(duel, foe)
+    local aim, r, player = duel.aim, duel.r, duel.player
+    local ff, foeS, theirs = tonumber(foe.face) or 1, tonumber(foe.s) or 0, tonumber(foe.total) or 0
+    r.target, r.foeFace, r.foeS, r.foeTotal, r.out = aim.name, ff, foeS, theirs, r.total >= theirs
+    local reroll = not r.out and not r.rerolled and #SKILL.with("cutThroat") > 0
+    local ink = r.out and COL.valueUp or COL.valueMod
+    chat(string.format("%s - %s vs %s: %s against %d + %dS = %d%s%s", fighter.name, duel.what, aim.name, duel.own,
+        ff, foeS, theirs, r.out and "" or reroll and " -- rolled again with Cut-Throat"
+        or string.format(" -- %s holds on", aim.name), (r.digital or foe.digital) and " (rolled digitally)" or ""),
+        rgbOf(ink))
+    if r.out then
+        ACTIVATION.ask(aim.obj, "setOutOfAction", { value = true, why = "Coup de Grace by " .. fighter.name })
+    end
+    onCoupRolled(player, r)
+    if reroll then
+        local theirRoll = { face = ff, s = foeS, total = theirs, digital = foe.digital }
+        local function go() ACTIVATION.coup(player, { aim = aim, foe = theirRoll }) end
+        if foe.roll then ACTIVATION.later(foe.roll, go) else Wait.time(go, CFG.dicePause or CFG.diceShow) end
+    end
+end
+
+-- This fighter is the target of an enemy's Coup de Grace (see
+-- ACTIVATION.coup, which asks once its own die has had its time): t = { by
+-- = the attacker's GUID, token, attacker = its name, total = what it
+-- rolled, color = the attacker's player, whose dice these are }. One D6
+-- plus this fighter's Strength as shown -- nothing for its gang -- thrown
+-- and shown here ("3 Strength +", the bar's title "Coup de Grace by Kal"),
+-- green when it holds on (more than the attacker), orange when not, and
+-- the attacker's card told (coupResult), which says how it came out.
+-- Returns whether it rolls (not when Out of Action).
+function coupDefend(t)
+    if type(t) ~= "table" or not tonumber(t.total) or fighter.outOfAction then return false end
+    local s, mine = statNumber("S") or 0, tonumber(t.total)
+    ACTIVATION.coupThrow({ title = "Coup de Grace by " .. tostring(t.attacker or "?"), s = s, mod = 0, color = t.color,
+        done = function(f, total, digital, roll)
+            local ink = total > mine and COL.valueUp or COL.valueMod
+            roll.hls, roll.sumInk = { ink }, ink
+            ACTIVATION.showDice(roll)
+            local okO, by = pcall(function() return t.by and getObjectFromGUID(t.by) end)
+            if okO and by then
+                ACTIVATION.ask(by, "coupResult", { token = t.token, face = f, s = s, total = total, digital = digital })
+            end
+        end })
+    return true
+end
+
+-- The answer of the enemy asked to roll against a Coup de Grace (see
+-- coupDefend): t = { token, face, s, total, digital }. Carries on with the
+-- Coup de Grace that was waiting for it. Returns whether one was.
+function coupResult(t)
+    local pending = ACTIVATION.coups
+    local f = type(t) == "table" and pending and pending[t.token]
+    if not f then return false end
+    pending[t.token] = nil
+    f(t)
     return true
 end
 
@@ -17173,6 +17363,9 @@ function onLoad(savedState)
                   and not (restored and restored.importId == IMPORTED.id)
     local data  = fresh and IMPORTED.fighter or (restored and restored.fighter)
     ui.importId = fresh and IMPORTED.id or (restored and restored.importId)
+    -- the fighter as imported, untouched by play: what resetFighter goes back to
+    ACTIVATION.imported = type(IMPORTED) == "table" and type(IMPORTED.fighter) == "table"
+                          and RULES.copy(IMPORTED.fighter) or nil
 
     -- The looks come from the GM Notes (see LOOKS), before anything is built.
     local okN, notes = pcall(function() return self.getGMNotes() end)
@@ -17222,224 +17415,3 @@ function onDrop(playerColor)
 end
 ]=]
 --@@CARD_END
-
--- ===========================================================================
--- Everything below this line is updater/updater.lua, pasted unchanged.
--- ===========================================================================
-
---[[ =========================================================================
-  SELF-UPDATE BLOCK for keeping tools hosted via Github up to date.
-  Source: https://github.com/Antaresx101/TTS_tools   (MIT)
-
-  When using any of my tools with this functionality, in TabletopSimulator,
-  typing "!update" in the chat as the host will automatically update all such
-  tools in the session with the newest version (if it isn´t on it already).
-
-  A tool is one file. Where it has an on-screen UI, that layout travels
-  inside the script and goes on when the object loads, so an update is one
-  download and one write, and cannot leave half a tool behind.
-
-  Nothing happens until you ask. Loading a mod sends no requests and changes no
-  scripts, it is triggered manually always.
-========================================================================== ]]
-
--- CONFIG -- running someone else's tool and want it left exactly where it is:
--- Stop Updates permanently: set SELF_UPDATE to false and nothing below ever runs.
--- Adopting the block: set the three TOOL_ values.
--- Forking the repo: change REPO_BASE, the only string here that names a host.
-local SELF_UPDATE    = true                    -- false pins this copy for good
-local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
-local TOOL_ID        = "mundane-importer"
-local TOOL_VERSION   = "2.1.3"                 -- bumped with manifest.json
-local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
-
--- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
--- pages and truncated bodies; any file carrying this block is usually bigger
--- than that. scripts/validate.py enforces it at publish time.
-local MIN_BYTES     = 1024
-local APPLY_TIMEOUT = 20                       -- seconds to wait for a safe moment
-local UI_FRAMES     = 5                        -- frames a layout takes to go live
-local SPREAD        = 8                        -- seconds to smear checks across
-local CHAT_COMMAND  = "!update"                -- host types it, every copy hears
-local LABEL         = "[" .. TOOL_ID .. "] "   -- four tools, four named voices
-
-local function report(msg)   -- host console only; never chat for everyone
-  print("[" .. TOOL_ID .. " " .. TOOL_VERSION .. "] " .. msg)
-end
-
-local function url(file)     -- ?ts= defeats the ~5 minute raw.github cache
-  return REPO_BASE .. "/tools/" .. TOOL_ID .. "/" .. file .. "?ts=" .. os.time()
-end
-
--- Plain X.Y.Z only; a suffix such as "-rc1" is ignored. Each part has to stay
--- under 1000, which holds for every version this repo will ever publish.
-local function rank(v)
-  local a, b, c = string.match(tostring(v), "^(%d+)%.(%d+)%.(%d+)")
-  return (tonumber(a) or 0) * 1000000 + (tonumber(b) or 0) * 1000 + (tonumber(c) or 0)
-end
-
--- Every release newer than this copy, newest first, as the lines that hang
--- under the update message: a copy that sat out three releases sees all
--- three on update, thats why the manifest carries a history. Notes are one string
--- or a list of them; anything else renders as nothing.
-local function whatsNew(m)
-  local out = ""
-  local function add(r)
-    if type(r) ~= "table" or rank(r.version) <= rank(TOOL_VERSION) then return end
-    local notes = type(r.notes) == "string" and { r.notes } or r.notes
-    if type(notes) ~= "table" then return end
-    for _, n in ipairs(notes) do out = out .. "\n  - " .. tostring(n) end
-  end
-  add(m.stable)
-  for _, r in ipairs(type(m.history) == "table" and m.history or {}) do add(r) end
-  return out
-end
-
--- One message per tool: three dice rollers on a table are three scripts that
--- cannot see each other, so the first to speak leaves what it said here and
--- the rest read it and keep quiet. Two strings named after this tool are all
--- the block does with Global: one for an install, one for whichever answer.
-local GLOBAL_KEY = "SELFUPDATE_" .. string.gsub(TOOL_ID, "%W", "_")
-local function once(suffix, value, msg)
-  local key = GLOBAL_KEY .. suffix
-  local ok, said = pcall(function() return Global.getVar(key) end)
-  if ok and said == value then return end
-  pcall(function() Global.setVar(key, value) end)
-  broadcastToAll(msg, {0.6, 0.9, 0.6})
-end
-
--- Writes the new script and reloads only while the object is idle. If it never
--- goes idle we still write, and the new script starts on the next load. The
--- tool's UI rides inside the script, so there is nothing else here to write.
-local function apply(code, version, notes)
-  local function idle()
-    return self.held_by_color == nil and not self.isSmoothMoving()
-       and not self.spawning
-  end
-  local function commit(withReload)
-    -- Carry the tool's own saved state across the reload, if it keeps any.
-    pcall(function()
-      if type(onSave) == "function" then self.script_state = onSave() end
-    end)
-    self.setLuaScript(code)              -- WRITE: the only script write, on self
-    once("", version, LABEL .. "updated to v" .. version .. notes)
-    if withReload then
-      self.reload()                  -- self is invalid after this line
-    else
-      report("v" .. version .. " written; it starts on the next load")
-    end
-  end
-  Wait.condition(function() commit(true) end, idle, APPLY_TIMEOUT,
-                 function() commit(false) end)
-end
-
--- The loop guard: writing back what is already running would reload forever.
--- One file is the whole tool now, so one comparison covers it.
-local function install(code, version, notes)
-  if code == self.getLuaScript() then
-    return report("already running this code")
-  end
-  apply(code, version, notes)
-end
-
-local function onPayload(req, version, notes)
-  if req.is_error or req.response_code ~= 200 then return end   -- silently
-  local code = req.text or ""
-  -- Three of the four gates: long enough, signed for this tool, and whole.
-  -- The loop guard is the fourth. Any failure leaves the object as it is.
-  if #code < MIN_BYTES then return report("rejected: shorter than MIN_BYTES") end
-  if not string.find(code, TOOL_SIGNATURE, 1, true) then
-    return report("rejected: TOOL_SIGNATURE missing")
-  end
-  -- The block's last function, named in halves so this line cannot match
-  -- itself: the payload carries this file too, and a search for the whole
-  -- literal would find the search. Finding the real one proves the body
-  -- arrived to its last line rather than stopping somewhere in the middle.
-  if not string.find(code, "function Updater_" .. "stateVersion", 1, true) then
-    return report("rejected: cut short before the end of the block")
-  end
-  install(code, version, notes)
-end
-
--- Answers: the repository is not there (offline, blocked, moved, private, 404),
--- or nothing needs fetching because this copy is the published one.
--- Once per tool per asking, either way. A manifest that arrives but will not
--- parse goes to the host console instead: the repository is alive so it´s on that author.
-local function onManifest(req)
-  if req.is_error or req.response_code ~= 200 then
-    return once("_ANSWER", "offline", LABEL .. "could not reach its repository ("
-                .. tostring(req.error or req.response_code) .. ")")
-  end
-  local ok, m = pcall(JSON.decode, req.text)
-  if not ok or type(m) ~= "table" or type(m.stable) ~= "table" then
-    return report("manifest unreadable")
-  end
-  local version = tostring(m.stable.version)
-  if rank(version) <= rank(TOOL_VERSION) then            -- nothing to fetch
-    return once("_ANSWER", "current", LABEL .. "up to date at v" .. TOOL_VERSION)
-  end
-  local notes = whatsNew(m)
-  WebRequest.get(url("tool.lua"), function(r) onPayload(r, version, notes) end)
-end
-
--- Seconds to hold this object's request for: over 0, under SPREAD, the same
--- number every session for any one object. Folded by hand because this Lua
--- rejects tonumber(guid, 36), and math.random belongs to the tool above.
-local function stagger()
-  local guid, n = tostring(self.getGUID() or ""), 0
-  for i = 1, #guid do n = (n * 31 + string.byte(guid, i)) % 100003 end
-  return (n % (SPREAD * 100 - 1) + 1) / 100
-end
-
--- One check, now. The chat command calls this, and so can the tool above:
--- from its own code, or from Global with obj.call("Updater_check"). The tool
--- needs no call of its own for the command below to work.
-function Updater_check()
-  if not SELF_UPDATE then return end
-  -- A fresh ask, a fresh answer: every copy clears the flag in this frame,
-  -- long before the first reply can come back.
-  pcall(function() Global.setVar(GLOBAL_KEY .. "_ANSWER", "") end)
-  Wait.time(function() WebRequest.get(url("manifest.json"), onManifest) end,
-            stagger())
-end
-
--- The tool's UI, spliced in above this block as TOOL_XML by scripts/validate.py
--- and applied here rather than kept on the object. One file, one write: an
--- update cannot land half a tool, because there are no halves. The tool's own
--- onLoad runs first, so whatever it registers - the custom assets a layout
--- names by image="", for one - is in place before the layout that wants them.
--- A tool with no UI declares no TOOL_XML and this does nothing at all.
-local toolLoad = onLoad
-function onLoad(saved)
-  if type(toolLoad) == "function" then toolLoad(saved) end
-  if not TOOL_XML then return end
-  self.UI.setXml(TOOL_XML)                        -- WRITE: the only UI write
-  -- setXml is queued, and the elements it creates are not addressable in this
-  -- frame or the next: setValue and setAttribute on them do nothing, and say
-  -- nothing. A tool that fills its layout in at load does that from onUIReady
-  -- and never has to guess a delay of its own - this is the only place that
-  -- number lives, so getting it wrong is one edit rather than one per tool.
-  if type(onUIReady) == "function" then Wait.frames(onUIReady, UI_FRAMES) end
-end
-
--- Chat reaches object scripts, not just the Global one, so every copy on the
--- table hears the host's command for itself and checks itself: no object ever
--- speaks to another, and nothing has to be added to the Global script. The
--- only thing read out of chat is whether the line is exactly CHAT_COMMAND from
--- someone with admin. Whatever onChat the tool above defined is captured here
--- and still called with everything, so this cannot eat a tool's own commands.
-local toolChat = onChat
-function onChat(message, player)
-  if SELF_UPDATE and message == CHAT_COMMAND and player and player.admin then
-    Updater_check()
-  end
-  if type(toolChat) == "function" then return toolChat(message, player) end
-end
-
--- Optional migration hook. Returns the version that wrote the saved state and
--- the version running now; do any migrating in the tool above, not here.
-function Updater_stateVersion(saved)
-  local ok, t = pcall(JSON.decode, saved or "")
-  local v = (ok and type(t) == "table") and t.version or nil
-  return v, TOOL_VERSION
-end
