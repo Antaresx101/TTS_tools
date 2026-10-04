@@ -1263,9 +1263,9 @@ local DIE_ICON = "https://steamusercontent-a.akamaihd.net/ugc/120017385515175737
 local DEPLOY = {
     SIZES = { 36, 48 },
     MESH = {
-        { "https://steamusercontent-a.akamaihd.net/ugc/9465755442651241131/390F4CE0CDC31319D057EA10E172162A1488D256/", stretch = true },         -- 1 Sniping Range
-        { "https://steamusercontent-a.akamaihd.net/ugc/9465755442651241131/390F4CE0CDC31319D057EA10E172162A1488D256/", stretch = true },         -- 2 Face Off
-        { "https://steamusercontent-a.akamaihd.net/ugc/9465755442651241131/390F4CE0CDC31319D057EA10E172162A1488D256/", stretch = true },         -- 3 Stand Off
+        { "https://steamusercontent-a.akamaihd.net/ugc/10974335390482002701/A93B7353D4420B5D9AC736ADF013DDC05F01E533/", stretch = true },         -- 1 Sniping Range
+        { "https://steamusercontent-a.akamaihd.net/ugc/14993753071562012643/6DD044D03216E91BE9CEEFEBCB9BA60D3F2EE393/", stretch = true },         -- 2 Face Off
+        { "https://steamusercontent-a.akamaihd.net/ugc/14320186872023997195/3CAB82657ECAF318784193E611A9B11E06760AB2/", stretch = true },         -- 3 Stand Off
         { "https://steamusercontent-a.akamaihd.net/ugc/11891530078336619171/3F73632BB82474CB818688E2AF2B0080B726354D/" },                         -- 4 Ambush
         { [36] = "https://steamusercontent-a.akamaihd.net/ugc/17867774420708299133/10A0F962A14186C96646CA6F25A87194272F8D2E/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/17929910256943798418/A327586A2CD4B113197323620CFE2C157DEF2352/" },       -- 5 Free for All
         { [36] = "https://steamusercontent-a.akamaihd.net/ugc/15512193714167926411/4AFE70845D320E07D87041B2CC95B5E87A7EFDE0/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/14713276897348078853/B3B86E458A793322E22F8D4A93D0E3182D5B0E8D/" },       -- 6 Chance Encounter
