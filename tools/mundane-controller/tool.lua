@@ -1269,9 +1269,9 @@ local DEPLOY = {
         { apart = 12 },                 -- 1 Sniping Range (ZONE, twice)
         { apart = 9 },                  -- 2 Face Off (ZONE, twice)
         { apart = 6 },                  -- 3 Stand Off (ZONE, twice)
-        { "https://steamusercontent-a.akamaihd.net/ugc/11891530078336619171/3F73632BB82474CB818688E2AF2B0080B726354D/" },                         -- 4 Ambush
-        { [36] = "https://steamusercontent-a.akamaihd.net/ugc/17867774420708299133/10A0F962A14186C96646CA6F25A87194272F8D2E/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/17929910256943798418/A327586A2CD4B113197323620CFE2C157DEF2352/" },       -- 5 Free for All
-        { [36] = "https://steamusercontent-a.akamaihd.net/ugc/15512193714167926411/4AFE70845D320E07D87041B2CC95B5E87A7EFDE0/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/14713276897348078853/B3B86E458A793322E22F8D4A93D0E3182D5B0E8D/" },       -- 6 Chance Encounter
+        { "https://steamusercontent-a.akamaihd.net/ugc/10092366485938643157/EC4AE7C3A22A7992247C69CB6DACFEDC84E9D9D1/" },                         -- 4 Ambush
+        { [36] = "https://steamusercontent-a.akamaihd.net/ugc/11206213002289756367/4DF70CBC090DC00C5E9D858DECDC1596D1AC6DC7/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/14901986283498053462/860B9F2091FEC5F9F208A65E4283AE2E44B59C26/" },       -- 5 Free for All
+        { [36] = "https://steamusercontent-a.akamaihd.net/ugc/13098037441717208909/3DC8C380D146624771AFEFDDAAFECB2BF927589D/", [48] = "https://steamusercontent-a.akamaihd.net/ugc/14622491162696696273/939F03CD3519AB9EB6CE1AC54A7D3473C80C4343/" },       -- 6 Chance Encounter
     },
     ZONE = "https://steamusercontent-a.akamaihd.net/ugc/17711522206232040145/473C795DE47225D6B3AE455CD0DAE400D1BF1AD7/",                          -- Sniping Range, Face Off, Stand Off: the one zone, put down twice
     BASE = 36,
