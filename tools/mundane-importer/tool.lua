@@ -420,6 +420,8 @@ local TEMPLATES_URL = ""
 -- { version =, note =, changes = { "one line each", ... } } -- lines of
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
+    { version = "2.2.1", note = "Minor Update", changes = {"UI-Overhaul for the Mundane Controller"
+    } },
     { version = "2.2.0", note = "Major Update", changes = {"Improvements and accessibility for various actions and rolls", "Added deployment zones / setup helper"
     } },
     { version = "2.1.2", note = "Minor Update", changes = {"Cover save fix"
@@ -17445,7 +17447,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-importer"
-local TOOL_VERSION   = "2.2.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.2.1"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error

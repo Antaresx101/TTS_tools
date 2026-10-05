@@ -1,12 +1,18 @@
 {
   "stable": {
+    "version": "2.2.1",
+    "notes": [
+      "UI-Overhaul for the Mundane Controller."
+    ]
+  },
+  "history": [
+    {
     "version": "2.2.0",
     "notes": [
       "Improvements and accessibility for various actions and rolls.",
       "Added deployment zones / setup helper."
     ]
-  },
-  "history": [
+    },
     {
       "version": "2.1.3",
       "notes": [

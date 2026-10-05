@@ -3,13 +3,14 @@
 -- ==============================================================
 --  MUNDANE CONTROLLER (N26) by Antares77
 --
---  The table's game: before it, the setup (the scenario, objective and
---  crews rolled, Attacker and Defender, then "Start Game"); the turn -- a
---  click on it readies every fighter for the next -- the two players'
---  victory points and gangs, and each gang's Bottle Check, due once one
---  of its fighters has gone Out of Action this turn. Every roll the fighter cards make (and
---  its own Roll Dice / Roll Firepower / Roll Injuries buttons) falls in a
---  line under its panel (see DICE).
+--  The table's game, on one panel: in the middle column, before the game
+--  the setup (the scenario, objective and crews rolled, Attacker and
+--  Defender, then "Start Game"), then the round -- End Round readies every
+--  fighter for the next; either side a player's panel with their gang, their
+--  victory points and the gang's Bottle Check, due once one of its fighters
+--  has gone Out of Action this round. Every roll the fighter cards make (and
+--  its own Roll Dice / Roll Firepower / Roll Injuries buttons, under the
+--  side panels) falls in a line under the panel (see DICE).
 --
 --  The fighter cards find it by its tag (CONTROLLER_TAG): they have it
 --  throw their dice (throwDice), tell it when a fighter goes Out of
@@ -1203,7 +1204,9 @@ for part in pairs(RULES.PARTS) do RULES.DEFAULT[part] = RULES.copy(RULES[part]) 
 -- dropped from DROP (world units) above the table, tumbling (SPIN radians
 -- a second, at least half of it about every axis) and pushed up to PUSH
 -- (world units a second) sideways, any way, in a line BELOW panel units
--- under the panel (worked out like the plates: BOTTLE.spot).
+-- out from the panel's bottom edge, on the table (see DICE.line): under
+-- the column's middle -- the Roll Dice / Firepower / Injuries buttons'
+-- under the side panel they were clicked on, each line on its own.
 -- Once they rest they are lined up side by side, STEP apart, in the order
 -- they were thrown (SORT "thrown"; "up" / "down" line them up by face
 -- instead -- only on the table: the card and chat always get them in the
@@ -1227,7 +1230,7 @@ for part in pairs(RULES.PARTS) do RULES.DEFAULT[part] = RULES.copy(RULES[part]) 
 local DICE = {
     URL   = { d6 = "https://steamusercontent-a.akamaihd.net/ugc/14438694407390139777/F5A3307604C00D6896ACC7B82B6735BD024137EA/", firepower = "https://steamusercontent-a.akamaihd.net/ugc/14511214079636238699/82E750A272596F79249868C7DD4611B69FF6D099/", injury = "https://steamusercontent-a.akamaihd.net/ugc/14681495304683522636/208E2C4C0EF8613F91ACC93C75BDDF1493D6926E/" },
     PLAIN = "Die_6",
-    BELOW = 100, DROP = 4, SPIN = 18, PUSH = 3, STEP = 1.4, SCALE = 1,
+    BELOW = 150, DROP = 4, SPIN = 18, PUSH = 3, STEP = 1.4, SCALE = 1,
     SORT  = "thrown", TURN = { d6 = 0, firepower = 180, injury = 180 },
     APART = 4,              -- a roll-off's two dice: this far apart, each on its side's side
     JOIN = 1, NEXT = 1.5, WAIT = 12, MAX = 20,
@@ -1237,14 +1240,83 @@ local DICE = {
     CHART = { firepower = RULES.firepower, injury = RULES.injuryDice },
 }
 
--- The Controller's panel on this object: where it sits (its size: see
--- PANEL_W / PLAY_BASE) -- on the object's +z side, turned half round so
--- it reads the right way up from there (see panelLocal).
-local PANEL = { position = "0 335 -5", rotation = "0 0 180", scale = "1 1 1" }
+-- The Controller's panel on this object: how big it shows (its panel
+-- units at 0.65 of the object's UI units; its size: see PANEL_W / PANEL_H)
+-- -- and where it sits and how it is turned, worked out from STAND (see
+-- STAND.place, after the layout).
+local PANEL = { scale = "0.65 0.65 0.65" }
+
+-- How the panel stands: inclined ANGLE degrees, so the players see it
+-- better -- its bottom edge on the near side (the object's +z side, where it
+-- reads the right way up: turned half round), its top edge raised further
+-- off. The object's origin lies on the table right under the middle of the
+-- bottom edge, which is EDGE local units over it: the panel tilts, and the
+-- object turns, about that edge. The panel itself lies UP local units off
+-- that face (STAND.point's `up`), just clear of the frame's floor. The frame
+-- the panel lies in (the object's model) is made for the same numbers.
+local STAND = { ANGLE = 30, EDGE = 0.1, UP = 0.08 }
+
+-- How many texels the panel's text gets: every text is made at this many
+-- times its size and shown scaled back to it (font sizes are whole numbers,
+-- so the scale takes up the rest -- it always shows at its own size). TTS
+-- draws text from a picture of its letters made at that size, with no
+-- smaller copies for the distance: text made big is crisp close up but
+-- thins out and shimmers from across the table; made small it is softer
+-- close up and steadier and easier to read further away. 1: made at its
+-- own size; 2: twice (sharp up close only); 0.5: half.
+local TEXT_DETAIL = 0.625
 
 -- The die on the Bottle Check's roll button -- the fighter card's own
 -- (its ASSETS stat_die), so both look alike. Empty: a "D" instead.
 local DIE_ICON = "https://steamusercontent-a.akamaihd.net/ugc/12001738551517573707/F2E806437431BEE65DD78832C9C5A286D327A301/"
+
+-- The panel's other pictures, as its own UI assets. EDGE and FRAME are the
+-- fighter card's (its ASSETS edge_line and diamond_frame), which every
+-- player has loaded already: EDGE is every line on the panel -- a white
+-- line with soft, clear margins, EDGE_ART times as tall as the line it
+-- draws, which the GPU draws smoothly at any distance where a thin plain
+-- panel would break up and shimmer -- and FRAME the border round each of
+-- the Bottle Check's diamonds, FRAME_SIZE times the diamond (the card's
+-- LAY.frameArt). GEAR is the gear round the round's number (its outline,
+-- a thin ring inside and a faint disc, white) and GLOW the soft glow
+-- behind it (white); both are tinted. An empty link: drawn without it --
+-- the lines as thin plain panels, the diamonds with plain lines round
+-- them, no gear and no glow (the round's number still shows).
+local ART = {
+    EDGE  = "https://steamusercontent-a.akamaihd.net/ugc/13432909356284909624/B129FFCF81BACF983676DFEE7F7E71473280818C/",
+    FRAME = "https://steamusercontent-a.akamaihd.net/ugc/14782607483565015523/5A66DA23DFB6BD38FFD1692D8E5F435717D1134D/",
+    GEAR  = "https://steamusercontent-a.akamaihd.net/ugc/15954717134150489158/6BDE2A9CBC8AAB39A1F736EC3D0FE7F48135CB60/",
+    GLOW  = "https://steamusercontent-a.akamaihd.net/ugc/10558683540636189568/3D8BEC2610F94004B0610B97A0918B132C8CC70F/",
+    EDGE_ART = 2, FRAME_SIZE = 1.25,
+}
+
+-- The panel's look: gold lines on near-black panels. LINE, ACCENT and THIN
+-- are the weights (panel units) of an outline, of the heavier accent on a
+-- panel's cut corners and of a thin rule; EDGE a button's outline. A
+-- button looks like one of BUTTONS: its fill, its outline and its label's
+-- ink. Every fill is opaque: a shape is pieced together from parts that
+-- overlap (see SHAPE.fill), which a see-through colour would show.
+local LOOK = {
+    GOLD   = "#D6AC5E",
+    FILL   = "#141312",     -- every panel
+    TEXT   = "#ECE6D8",
+    DIM    = "#AAA08C",     -- what only explains: how to name a side, a homebrew set
+    NOTE   = "#D4CAB2",     -- the reminder of reinforcements under End Round
+    HEAD   = "#FFD696",     -- "ROUND", "GAME SETUP", "HOMEBREW RULES"
+    NUMBER = "#FFC46E",     -- the round
+    GLOW   = "#FFAA3C8C",   -- behind the round
+    DIAMOND = "#2C2F31|#3A3E41|#232527|#2C2F31",   -- the Bottle Check's diamonds (resting, hovered, pressed)
+    RULE   = "#D6AC5EA0",   -- the thin rule under a gang's name
+    RULE_TEXT = "#ECE6D88C",   -- ... and over its part (Attacker / Defender)
+    SEP    = "#D6AC5E5A",   -- ... and between two homebrew sets
+    LINE = 3, ACCENT = 6, THIN = 1.5, EDGE = 2,
+    HOVER  = "#00000000|#FFFFFF14|#FFFFFF26|#00000000",   -- a clear button over a shape: a light tint on hover
+}
+LOOK.BUTTONS = {
+    plain = { fill = "#18191A", line = LOOK.GOLD, ink = LOOK.TEXT },
+    gold  = { fill = LOOK.GOLD, line = LOOK.GOLD, ink = "#181614" },   -- a choice made, Start Game, Apply
+    red   = { fill = "#461210", line = "#E65040", ink = "#FFE2D6" },   -- End Round, a Bottle Check to take
+}
 
 -- The deployment's model: rolled on the setup's Roll for Deployment, a
 -- see-through custom model of the deployment zones is put on the table
@@ -1256,7 +1328,7 @@ local DIE_ICON = "https://steamusercontent-a.akamaihd.net/ugc/120017385515175737
 -- { [36] = link, [48] = link } -- one per map size, in the middle.
 -- COLLIDER is the one collider every model shares (stretched with a
 -- stretched one). Empty link: no model for it; chat says so.
--- It is tinted TINT (8100FF at alpha 150), turned TURN degrees at a time
+-- It is Cardboard (MATERIAL) tinted TINT (8100FF at alpha 100), turned TURN degrees at a time
 -- about the middle of the table and stretched up / down by STEP (of its
 -- own height, never below STEP) by the small buttons beside the row --
 -- kept for the next one (saved). A right click on the row takes it away,
@@ -1276,7 +1348,8 @@ local DEPLOY = {
     ZONE = "https://steamusercontent-a.akamaihd.net/ugc/17711522206232040145/473C795DE47225D6B3AE455CD0DAE400D1BF1AD7/",                          -- Sniping Range, Face Off, Stand Off: the one zone, put down twice
     BASE = 36,
     COLLIDER = "https://steamusercontent-a.akamaihd.net/ugc/9590185350319248742/E1ACACACB191CDC4F0211AC33E42B34B043DBD19/",
-    TINT = { r = 0x81 / 255, g = 0, b = 1, a = 150 / 255 },
+    TINT = { r = 0x81 / 255, g = 0, b = 1, a = 100 / 255 },
+    MATERIAL = 3,           -- TTS's custom model materials: 0 Plastic, 1 Wood, 2 Metal, 3 Cardboard
     TURN = 90, STEP = 0.5,
     TAG  = "Mundane Deployment",
     turn = 0, tall = 1,     -- how the last one stood: turned, and stretched up (saved)
@@ -1285,11 +1358,12 @@ local DEPLOY = {
 
 -- Homebrew: the table's own rules, as named sets, each a choice between
 -- the rules as written and the set's -- two radio buttons on the panel's
--- second page, Homebrew Rules (the main page's button opens it, Back
--- leaves it as it was), where "Apply selected Rules to all Models" puts every choice in
+-- second page, Homebrew Rules (the button under the column opens it, Back
+-- leaves it as it was), where "Apply Selected Rules" puts every choice in
 -- force at once -- kept with the Controller. Each of SETS:
 --   id     what a save knows it by (the same however the set is renamed)
---   off    the first button: the rules as written -- about 24 letters fit
+--   off    the first button: the rules as written -- about 28 letters fit
+--          at full size (a longer label shrinks)
 --   name   the second: the set's rules
 --   offDesc  under them while the first is chosen: what the rules as
 --          written do, a line or two
@@ -1326,66 +1400,443 @@ local HOMEBREW = {
           rules = { cfg = { dicePause = 4.5 } } },
     },
     on = {},                -- id -> true, for the sets that are on (saved)
-    SEP_H = 2,              -- the line between two sets on the page
     pick = {},              -- id -> true: the page's choice, until applied
     page = false,           -- the Homebrew Rules page shows (not saved)
+    -- the page (see homebrewXml), in panel units: the whole of the main
+    -- page's outline, as one shape (HOMEBREW.outline: both side panels, the
+    -- column's top rising between them, the buttons' row under them, nothing
+    -- between) -- the sets from HEAD under the side panels' top to FOOT over
+    -- the page's bottom, sharing that out (each set's step, see
+    -- HOMEBREW.step); the cut corners accented ACCENT along the edges; the
+    -- title in the column's top (TITLE down from it, TITLE_FONT or smaller to
+    -- fit) and Back (BACK: from the page's right edge and the side panels'
+    -- top); each set's radio buttons (RADIO_W x RADIO_H, RADIO_GAP apart)
+    -- over its description (DESC down from the buttons' top, DESC_W x
+    -- DESC_H, up to DESC_FONT) and a thin rule (SEP_UP over the next set's
+    -- buttons, SEP_W wide) before the next; Apply (APPLY_W x APPLY_H, its
+    -- bottom APPLY_UP over the page's).
+    HEAD = 84, FOOT = 88, ACCENT = 46,
+    TITLE = 50, TITLE_FONT = 30, BACK = { -150, 24, -46, 64 }, BACK_FONT = 18,
+    RADIO_W = 440, RADIO_H = 42, RADIO_GAP = 20, RADIO_FONT = 19,
+    DESC = 62, DESC_W = 1040, DESC_H = 36, DESC_FONT = 17, SEP_UP = 8, SEP_W = 1000,
+    APPLY_W = 520, APPLY_H = 48, APPLY_UP = 24, APPLY_FONT = 22,
 }
 
--- The panel's size (the importer's, so the two look alike side by side)
--- and what follows from it: a row's width inside the border (3) and the
--- padding (9), and the play section under the header (40, then 6) --
--- two bars of buttons, the victory points and the turn, the gangs' names
--- and their Bottle Checks, 6 apart. The Homebrew Rules page takes the
--- play section's place, as tall: its heading, a rule (3), for each set a
--- row of radio buttons over its description, and at the bottom the Apply
--- button, 6 apart.
-local PANEL_W   = 600
-local PLAY_BASE = 664
-local ROW_W     = PANEL_W - 2 * 9 - 2 * 3
-local PLAY_H    = PLAY_BASE - 2 * 9 - 2 * 3 - 40 - 6
-local BAR_H     = 30                   -- each row of buttons on top (two rows)
-local HB_HEAD_H = 28                   -- the Homebrew Rules heading
-local HB_ROW_H  = 34                   -- each set's radio buttons ...
-local HB_DESC_H = 34                   -- ... and its description under them
-local HB_APPLY_H = 40                  -- Apply selected Rules to all Models
-local PANEL_H   = PLAY_BASE
-local BOTTLE_H  = 120                  -- the two Bottle Checks, under the victory points
-local NAME_H    = 32                   -- the gangs' names, over the Bottle Checks
-local VP_ROW_H  = PLAY_H - 2 * (BAR_H + 6) - 6 - NAME_H - 6 - BOTTLE_H   -- the victory points and the turn
+-- Where everything lies on the panel, in panel units from its top left
+-- corner -- x across, y down, as it reads (SHAPE.at turns a point into an
+-- offset from the panel's middle). A box is { x0, y0, x1, y1 }; a shape's
+-- corners are cut off (chamfered) by `cut` = { top left, top right, bottom
+-- right, bottom left } (0: square). The panel: the two players' side
+-- panels (SIDES, left and right) either side of the column (MID), which
+-- shows the round -- or, before round 1, the game's setup (SETUP) -- every
+-- panel's corners cut and the cuts accented (ACCENT along the edges either
+-- side); the column joined to each side panel by two links (LINKS: their
+-- y; a small diamond in each one's middle, LINK_DOT from its middle to a
+-- tip); and under each of the three a row of buttons (RAIL: their top and
+-- bottom; RAIL_GAP apart, RAIL_FONT, the outer corners cut RAIL_CUT; the
+-- Feedback button FEEDBACK_W wide, its envelope MARK at MARK_FONT, made at
+-- MARK_DETAIL whatever TEXT_DETAIL is -- the bare sign, without the
+-- text-style selector the shared FEEDBACK.MARK carries, and with TTS's own
+-- text overflow: so it sits in the button's middle). The Homebrew Rules
+-- page takes the place of all of it (see HOMEBREW).
+local PANEL_W, PANEL_H = 1480, 714
+local LAYOUT = {
+    SIDES = { { 10, 70, 500, 642 }, { 980, 70, 1470, 642 } },
+    MID   = { 554, 10, 926, 642 },
+    SIDE_CUT = { 40, 40, 40, 40 }, SIDE_ACCENT = 46,
+    MID_CUT  = { 56, 56, 20, 20 }, MID_ACCENT = 40,       -- only the column's top two corners accented
+    LINKS = { 210, 470 }, LINK_DOT = 7,
+    RAIL = { 656, 704 }, RAIL_GAP = 8, RAIL_CUT = 16, RAIL_FONT = 18, FEEDBACK_W = 44, MARK = "✉", MARK_FONT = 24, MARK_DETAIL = 2,
+    -- in a side panel, down from its top and across from its middle: the
+    -- gang's name (NAME_W x NAME_H, NAME_FONT or smaller to fit, never
+    -- below NAME_MIN) over a thin rule (NAME_RULE, RULE_W wide); "VICTORY
+    -- POINTS" (VP_HEAD) and the points (VP; VP_HIT: the top and bottom of
+    -- what a click on them takes) -- or, while the side has no gang, how to
+    -- give it one (HINT: the middle of its two lines, HINT_GAP apart); a
+    -- thin rule (VP_RULE); the side's part (ROLE, cut ROLE_CUT); "BOTTLE
+    -- CHECK" (BOTTLE, HEAD_W wide to click) over "Ld" and the two diamonds
+    -- (DICE: their middle; LD_X, VAL_X, ROLL_X across), on a dark red plate
+    -- while the check is to be taken (PLATE, cut PLATE_CUT)
+    SIDE = {
+        NAME = 44, NAME_W = 380, NAME_H = 64, NAME_FONT = 32, NAME_MIN = 14,
+        NAME_RULE = 78, RULE_W = 300,
+        VP_HEAD = 118, VP = 218, VP_FONT = 150, VP_HIT = { 90, 300 }, HEAD_FONT = 24,
+        HINT = 200, HINT_GAP = 44, HINT_FONT = 30,
+        VP_RULE = 308,
+        ROLE = { -95, 328, 95, 366 }, ROLE_CUT = 10, ROLE_FONT = 22,
+        BOTTLE = 424, HEAD_W = 240,
+        DICE = 496, LD_X = -112, LD_FONT = 30, VAL_X = -32, ROLL_X = 58,
+        PLATE = { -170, 396, 170, 552 }, PLATE_CUT = 14,
+    },
+    -- in the column from round 1, down from the panel's top: "ROUND"
+    -- (CAPTION) between two thin rules (from RULE_IN inside the column's
+    -- edges to RULE_GAP from its middle); the gear (GEAR: its middle,
+    -- GEAR_SIZE square) on its glow (GLOW_SIZE) with the round's number in
+    -- it (FONT, smaller for more digits so they stay inside the gear's
+    -- inner ring, RING from its middle; DROP above the gear's middle; HIT:
+    -- the square a right click on it takes); End Round (END: across from
+    -- the middle, and down); the reminder of reinforcements (NOTE: its
+    -- middle, NOTE_W x NOTE_H, up to NOTE_FONT)
+    ROUND = {
+        CAPTION = 94, CAPTION_FONT = 46, RULE_IN = 32, RULE_GAP = 92,
+        GEAR = 342, GEAR_SIZE = 320, GLOW_SIZE = 260, RING = 116, FONT = 222, DROP = 6, HIT = 240,
+        END = { -100, 542, 100, 590 }, END_CUT = 12, END_FONT = 24,      -- its middle level with the Bottle Checks' "Ld"
+        NOTE = 616, NOTE_W = 320, NOTE_H = 46, NOTE_FONT = 21,
+    },
+}
 
--- The turn it counts (0: the game hasn't started -- the plate shows the
+-- A point of the panel in this object's own space: `x`, `y` panel units
+-- from the panel's middle along its own axes (x to the right, y up as it
+-- reads), `up` local units off its face (towards whoever looks at it) --
+-- local x, y (up) and z. The panel's up runs to -z and rises ANGLE
+-- degrees; its x runs to -x (turned half round).
+function STAND.point(x, y, up)
+    local k = (tonumber(tostring(PANEL.scale):match("[%d.]+")) or 1) / 100
+    local a = math.rad(STAND.ANGLE)
+    local along = (y + PANEL_H / 2) * k                  -- up the panel from its bottom edge
+    up = up or 0
+    return -x * k, STAND.EDGE + along * math.sin(a) + up * math.cos(a), -along * math.cos(a) + up * math.sin(a)
+end
+
+-- PANEL's position and rotation from STAND: its middle where STAND.point
+-- puts it (object UI: x / y along local x / z, 100 UI units to a local
+-- unit, negative z up), inclined ANGLE about its own x after the half turn.
+function STAND.place()
+    local x, y, z = STAND.point(0, 0, STAND.UP)
+    PANEL.position = string.format("%.6g %.6g %.6g", x * 100, z * 100, -y * 100)
+    PANEL.rotation = string.format("%g 0 180", STAND.ANGLE)
+end
+STAND.place()
+
+-- The turn it counts (0: the game hasn't started -- the column shows the
 -- game's setup, see SETUP), and the two players' victory points and names.
 local turn = 0
 local vp, vpNames = { 0, 0 }, { "Player 1", "Player 2" }
 
--- A clear button over a whole plate, so the plate itself is clicked: a
--- light tint on hover.
-local function plateButton(id, fn)
-    return string.format('<Button id="%s" colors="#00000000|#FFFFFF14|#FFFFFF26|#00000000" outline="#00000000"' ..
-        ' onClick="%s" />', id, fn)
+-- ── Drawing the panel ────────────────────────────────────────────
+-- TTS draws rectangles and turned squares only, so every shape on the panel
+-- is pieced together from them (SHAPE.fill) and outlined with straight
+-- lines (SHAPE.lines). A shape that changes colour in place has its pieces
+-- named and noted in SHAPE.parts (see SHAPE.paint). Every size it writes is
+-- in panel units; text is made at TEXT_DETAIL times its size (see
+-- SHAPE.font).
+local SHAPE = {
+    parts = {},             -- id -> its pieces' count, label and colours as last drawn (see SHAPE.paint)
+    CUT = { 12, 0, 12, 0 }, -- a button's corners: cut top left and bottom right
+    MIN = 9,                -- the smallest a fitted text shrinks to
+}
+
+-- A point of the layout as the offsetXY of an element centred there.
+function SHAPE.at(x, y)
+    return string.format('offsetXY="%g %g"', x - PANEL_W / 2, PANEL_H / 2 - y)
 end
 
--- Reset all Fighters: every fighter's card back to the fighter as
--- imported (see onResetFighters) -- after a second click, within WAIT
--- seconds, while the button asks.
+-- One straight line from point `a` to point `b` ({ x, y } of the layout),
+-- `w` thick, in `color`: the edge art (ART.EDGE) stretched along it --
+-- an image EDGE_ART times as tall as the line, the line along its middle --
+-- and turned to lie along it; without the art a plain panel `w` tall. `e0`
+-- and `e1` lengthen it past a and past b (to close a corner with the next
+-- line); `id` names it.
+function SHAPE.line(a, b, w, color, e0, e1, id)
+    local dx, dy = b[1] - a[1], b[2] - a[2]
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len < 1e-6 then return "" end
+    e0, e1 = e0 or 0, e1 or 0
+    local x = (a[1] + b[1]) / 2 + dx / len * (e1 - e0) / 2
+    local y = (a[2] + b[2]) / 2 + dy / len * (e1 - e0) / 2
+    local deg = math.deg((math.atan2 or math.atan)(-dy, dx))       -- the panel's y runs up, the layout's down
+    if deg > 90 then deg = deg - 180 elseif deg <= -90 then deg = deg + 180 end
+    local art = ART.EDGE ~= ""
+    return string.format('<%s%s %s width="%g" height="%g"%s%s color="%s" raycastTarget="false" />',
+        art and "Image" or "Panel", id and (' id="' .. id .. '"') or "", SHAPE.at(x, y), len + e0 + e1,
+        art and w * ART.EDGE_ART or w, math.abs(deg) > 1e-6 and string.format(' rotation="0 0 %g"', deg) or "",
+        art and ' image="mundaneEdge"' or "", color)
+end
+
+-- Lines through the points `pts`, `w` thick -- back to the first with
+-- `closed` -- each corner closed: the two lines meeting there run on past
+-- it as far as half the line's width times the tangent of half the turn,
+-- where each just meets the other's outer edge (and a little more, so no
+-- seam shows). With `id` the lines are named <id>Line_<k>. Returns the XML
+-- and how many lines.
+function SHAPE.lines(pts, w, color, closed, id)
+    local n = #pts
+    local function past(i)
+        if not closed and (i == 1 or i == n) then return 0 end
+        local p, q, r = pts[(i - 2) % n + 1], pts[i], pts[i % n + 1]
+        local ax, ay, bx, by = q[1] - p[1], q[2] - p[2], r[1] - q[1], r[2] - q[2]
+        local cos = (ax * bx + ay * by) / math.max(1e-9, math.sqrt((ax * ax + ay * ay) * (bx * bx + by * by)))
+        local turn = math.min(math.acos(math.max(-1, math.min(1, cos))), math.rad(120))
+        return w / 2 * math.tan(turn / 2) + 0.1 * w
+    end
+    local out = {}
+    for i = 1, closed and n or n - 1 do
+        local j = i % n + 1
+        out[#out + 1] = SHAPE.line(pts[i], pts[j], w, color, past(i), past(j), id and (id .. "Line_" .. (#out + 1)))
+    end
+    return table.concat(out), #out
+end
+
+-- The outline of `box` with its corners cut by `cut`, as points round
+-- from the top left (a corner not cut is one point).
+function SHAPE.path(box, cut)
+    local x0, y0, x1, y1 = box[1], box[2], box[3], box[4]
+    local tl, tr, br, bl = cut[1], cut[2], cut[3], cut[4]
+    local pts = {}
+    for _, p in ipairs({ { x0 + tl, y0 }, { x1 - tr, y0 }, { x1, y0 + tr }, { x1, y1 - br },
+                         { x1 - br, y1 }, { x0 + bl, y1 }, { x0, y1 - bl }, { x0, y0 + tl } }) do
+        local last = pts[#pts]
+        if not (last and last[1] == p[1] and last[2] == p[2]) then pts[#pts + 1] = p end
+    end
+    if pts[1][1] == pts[#pts][1] and pts[1][2] == pts[#pts][2] then pts[#pts] = nil end
+    return pts
+end
+
+-- The fill of `box` with its corners cut by `cut`, in `color`: the
+-- rectangles that make it up and, at each cut corner, a square turned half
+-- a right angle whose edge is the cut (its middle as far in from the
+-- corner both ways as the cut is long, and as far from each of its tips)
+-- -- the outline over the cut hides the square's hard edge. The rectangles
+-- overlap a little so no seam shows. With `id` each piece is named
+-- <id>Fill_<k>. Returns the XML and how many pieces.
+function SHAPE.fill(box, cut, color, id)
+    local x0, y0, x1, y1 = box[1], box[2], box[3], box[4]
+    local top, bottom = math.max(cut[1], cut[2]), math.max(cut[3], cut[4])
+    local out = {}
+    local function piece(at, w, h, turned)
+        out[#out + 1] = string.format('<Panel%s %s width="%g" height="%g"%s color="%s" />',
+            id and string.format(' id="%sFill_%d"', id, #out + 1) or "", at, w, h,
+            turned and ' rotation="0 0 45"' or "", color)
+    end
+    local function rect(a, b, c, d)
+        if c - a > 0 and d - b > 0 then piece(SHAPE.at((a + c) / 2, (b + d) / 2), c - a, d - b) end
+    end
+    rect(x0, y0 + math.max(0, top - 0.5), x1, y1 - math.max(0, bottom - 0.5))   -- the middle, the whole width
+    rect(x0 + cut[1], y0, x1 - cut[2], y0 + top)                                   -- the top, between its corners
+    rect(x0 + cut[4], y1 - bottom, x1 - cut[3], y1)                                -- the bottom
+    for k, c in ipairs(cut) do
+        if c > 0 then
+            local x = (k == 1 or k == 4) and x0 + c or x1 - c
+            local y = k <= 2 and y0 + c or y1 - c
+            piece(SHAPE.at(x, y), c * math.sqrt(2), c * math.sqrt(2), true)
+        end
+    end
+    return table.concat(out), #out
+end
+
+-- The accent on the cut corners `which` of `box` (as `cut`'s order): a
+-- heavier line along the cut and `len` on along the edges either side.
+-- A corner is its point, and the two ways along its edges away from it.
+SHAPE.CORNERS = {
+    function(b) return b[1], b[2], 0, 1, 1, 0 end,      -- top left: down the left edge, along the top
+    function(b) return b[3], b[2], -1, 0, 0, 1 end,     -- top right
+    function(b) return b[3], b[4], 0, -1, -1, 0 end,    -- bottom right
+    function(b) return b[1], b[4], 1, 0, 0, -1 end,     -- bottom left
+}
+function SHAPE.accents(box, cut, which, len)
+    local out = {}
+    for _, k in ipairs(which) do
+        local px, py, ux, uy, vx, vy = SHAPE.CORNERS[k](box)
+        local c = cut[k]
+        out[#out + 1] = SHAPE.lines({ { px + (c + len) * ux, py + (c + len) * uy }, { px + c * ux, py + c * uy },
+            { px + c * vx, py + c * vy }, { px + (c + len) * vx, py + (c + len) * vy } }, LOOK.ACCENT, LOOK.GOLD, false)
+    end
+    return table.concat(out)
+end
+
+-- A shape: `box`, its corners cut by `cut`, filled and outlined (`look`:
+-- { fill, line }; `w` the line's weight -- none: no outline). With `id`
+-- its pieces are named and noted in SHAPE.parts.
+function SHAPE.shape(box, cut, look, w, id)
+    local fill, fills = SHAPE.fill(box, cut, look.fill, id)
+    local line, lines = "", 0
+    if w then line, lines = SHAPE.lines(SHAPE.path(box, cut), w, look.line, true, id) end
+    if id then SHAPE.parts[id] = { fills = fills, lines = lines, fill = look.fill, line = look.line } end
+    return fill .. line
+end
+
+-- A panel: the shape of `box` in the panel's fill, outlined in gold, the
+-- cut corners `which` accented (`len` along the edges).
+function SHAPE.panel(box, cut, which, len)
+    return SHAPE.shape(box, cut, { fill = LOOK.FILL, line = LOOK.GOLD }, LOOK.LINE) ..
+        SHAPE.accents(box, cut, which, len)
+end
+
+-- A small solid diamond: `r` from its middle (x, y) to each tip.
+function SHAPE.dot(x, y, r, color)
+    return string.format('<Panel %s width="%g" height="%g" rotation="0 0 45" color="%s" />',
+        SHAPE.at(x, y), r * math.sqrt(2), r * math.sqrt(2), color)
+end
+
+-- How wide a character of Arial Bold is, in ems (any other: as wide as an
+-- "n") -- to wrap and size the texts (see SHAPE.fit) -- and the few signs
+-- the panel shows that aren't plain letters, each counted as a letter
+-- about as wide (the selector after the envelope takes no room).
+SHAPE.EM = {}
+for chars, em in pairs({ [" ijlI.,|'"] = 0.278, ["ft():-!;[]/"] = 0.333, r = 0.389, ['"'] = 0.474, z = 0.5,
+                         ["acekpsvxy0123456789J"] = 0.556, ["+"] = 0.584, ["bdghnopquFLTZ?"] = 0.611,
+                         ["EPSVXY"] = 0.667, ["ABCDHKNRU&"] = 0.722, ["wGOQ"] = 0.778, M = 0.833, ["m%"] = 0.889,
+                         W = 0.944, ["@"] = 0.975 }) do
+    for c in chars:gmatch(".") do SHAPE.EM[c] = em end
+end
+SHAPE.SIGNS = { { "︎", "" }, { "✉", "G" }, { "●", "n" }, { "○", "n" }, { "°", "r" }, { "▲", "W" }, { "▼", "W" } }
+
+-- `s`'s width at font size `size` (none: in ems).
+function SHAPE.width(s, size)
+    s = tostring(s or "")
+    for _, sign in ipairs(SHAPE.SIGNS) do s = s:gsub(sign[1], sign[2]) end
+    local n = 0
+    for c in s:gmatch(".") do n = n + (SHAPE.EM[c] or 0.611) end
+    return n * (size or 1)
+end
+
+-- `text` wrapped at its spaces (and its own line breaks) and sized to fit
+-- `w` x `h`: the lines (joined by line breaks) and the font size -- `max`,
+-- or as much smaller as it needs (never below `min`, SHAPE.MIN).
+function SHAPE.fit(text, w, h, max, min)
+    min = min or SHAPE.MIN
+    local lines
+    for size = max, min, -1 do
+        lines = {}
+        for given in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+            local first = #lines + 1
+            for word in given:gmatch("%S+") do
+                local cur = #lines >= first and lines[#lines]
+                if cur and SHAPE.width(cur .. " " .. word, size) <= w then lines[#lines] = cur .. " " .. word
+                else lines[#lines + 1] = word end
+            end
+        end
+        local fits = #lines * size * 1.2 <= h
+        for _, l in ipairs(lines) do fits = fits and SHAPE.width(l, size) <= w end
+        if fits then return table.concat(lines, "\n"), size end
+    end
+    return table.concat(lines, "\n"), min
+end
+
+-- `text` on one line, as big as fits `w`: `max`, or smaller (never below
+-- `min`, SHAPE.MIN) -- a button's label.
+function SHAPE.fitLine(text, w, max, min)
+    local em = SHAPE.width(text)
+    if em <= 0 then return text, max end
+    return text, math.max(min or SHAPE.MIN, math.min(max, math.floor(w / em)))
+end
+
+-- A text as a Text holds it: "&" as "and", no "<" or ">" -- inch marks and
+-- apostrophes as they are (a Text would show an entity as it is written).
+function SHAPE.esc(s)
+    return (tostring(s or ""):gsub("&", "and"):gsub("[<>]", ""))
+end
+
+-- Text that shows at `size`, made at TEXT_DETAIL (or `detail`) times it:
+-- the whole font size it is made at, and the scale that brings it back to
+-- `size`.
+function SHAPE.font(size, detail)
+    local fs = math.max(1, math.floor(size * (detail or TEXT_DETAIL) + 0.5))
+    return fs, size / fs
+end
+
+-- The attributes that make an element's text show at `size` (see
+-- SHAPE.font) in a box `w` x `h` as it shows: font size, scale, and the
+-- box as it is made (so that scaled it is `w` x `h` again); `detail` as
+-- SHAPE.font's.
+function SHAPE.sized(size, w, h, detail)
+    local fs, sc = SHAPE.font(size, detail)
+    return string.format('width="%.6g" height="%.6g" fontSize="%d" scale="%.9g %.9g 1"', w / sc, h / sc, fs, sc, sc)
+end
+
+-- Text `id` set to show at `size` in place (its box scales with it: text
+-- overflows its box, which only places it).
+function SHAPE.size(id, size)
+    local fs, sc = SHAPE.font(size)
+    self.UI.setAttribute(id, "fontSize", string.format("%d", fs))
+    self.UI.setAttribute(id, "scale", string.format("%.9g %.9g 1", sc, sc))
+end
+
+-- Bold text centred at x, y in a box `w` x `h`, `size`, in `ink` (`extra`:
+-- more attributes; `detail` as SHAPE.font's), free to overflow its box both
+-- ways -- unless `bare`: then as TTS lays out a text by default.
+function SHAPE.text(x, y, w, h, text, size, ink, id, extra, detail, bare)
+    return string.format('<Text%s%s %s %s fontStyle="Bold" alignment="MiddleCenter"%s color="%s" raycastTarget="false">%s</Text>',
+        id and (' id="' .. id .. '"') or "", extra or "", SHAPE.at(x, y), SHAPE.sized(size, w, h, detail),
+        bare and "" or ' horizontalOverflow="Overflow" verticalOverflow="Overflow"', ink, SHAPE.esc(text))
+end
+
+-- A clear button `w` x `h` centred at x, y, calling `fn`: what is under it
+-- takes the click, lit a little on hover.
+function SHAPE.hit(id, fn, x, y, w, h)
+    return string.format('<Button id="%s" %s width="%g" height="%g" colors="%s" onClick="%s" />',
+        id, SHAPE.at(x, y), w, h, LOOK.HOVER, fn)
+end
+
+-- A button: its shape in `look` (a name of LOOK.BUTTONS, or { fill, line,
+-- ink }), outlined EDGE (unless `line` is false), its label over it
+-- (fitted on one line, see SHAPE.fitLine, unless `fit` is false) and a
+-- clear button over it all that takes the click (none without `fn`). t = {
+-- box, cut (none: SHAPE.CUT), look (none: "plain"), line, label, size, fit,
+-- fn, btn (the clear button's id), id (the pieces' -- for a button
+-- recoloured in place, see SHAPE.paint -- else none), txt (the label's
+-- id), detail, bare (the label's, as SHAPE.text's) }.
+function SHAPE.button(t)
+    local b = t.box
+    local x, y, w, h = (b[1] + b[3]) / 2, (b[2] + b[4]) / 2, b[3] - b[1], b[4] - b[2]
+    local look = type(t.look) == "table" and t.look or LOOK.BUTTONS[t.look or "plain"]
+    local text, size = t.label or "", t.size
+    if t.fit ~= false then text, size = SHAPE.fitLine(text, w - 16, t.size) end
+    local out = SHAPE.shape(b, t.cut or SHAPE.CUT, look, t.line ~= false and LOOK.EDGE or nil, t.id)
+    if t.id then
+        local p = SHAPE.parts[t.id]
+        p.box, p.txt, p.w, p.h, p.size, p.fit = b, t.txt, w - 16, h - 4, t.size, t.fit ~= false
+    end
+    return out .. SHAPE.text(x, y, w - 8, h, text, size, look.ink, t.txt, nil, t.detail, t.bare) ..
+        (t.fn and SHAPE.hit(t.btn, t.fn, x, y, w, h) or "")
+end
+
+-- Shape `id` (built with its id, see SHAPE.shape) recoloured in place:
+-- `look` a name of LOOK.BUTTONS or { fill, line, ink } (what it leaves out
+-- stays as it is). Its label is first set to `text`, when given (fitted
+-- again): TTS can undo colours set before a label changes. Only the
+-- pieces whose colour changes are sent.
+function SHAPE.paint(id, look, text)
+    local p = SHAPE.parts[id]
+    if not p then return end
+    look = type(look) == "table" and look or LOOK.BUTTONS[look] or {}
+    if text and p.txt then
+        local shown, size = text, p.size
+        if p.fit then shown, size = SHAPE.fitLine(text, p.w, p.size) end
+        setLabel(p.txt, shown)
+        SHAPE.size(p.txt, size)
+    end
+    if look.fill and look.fill ~= p.fill then
+        for k = 1, p.fills do self.UI.setAttribute(id .. "Fill_" .. k, "color", look.fill) end
+        p.fill = look.fill
+    end
+    if look.line and look.line ~= p.line then
+        for k = 1, p.lines do self.UI.setAttribute(id .. "Line_" .. k, "color", look.line) end
+        p.line = look.line
+    end
+    if look.ink and p.txt then self.UI.setAttribute(p.txt, "color", look.ink) end
+end
+
+-- Reset Fighters: every fighter's card back to the fighter as imported
+-- (see onResetFighters) -- after a second click, within WAIT seconds,
+-- while the button asks (in the ASKING look, see LOOK.BUTTONS).
 local RESET = {
-    LABEL = "Reset all Fighters",
+    LABEL = "Reset Fighters",
     ASK   = "Click again to reset",
     WAIT  = 4,
-    ASKING = "#B03030E6|#C04040E6|#8A2020E6|#B0303066",   -- brighter than RED while it asks
+    ASKING = "red",
     asking = false, token = 0,
 }
 
--- The game's setup, on the round plate until the game starts: a column
--- of buttons (ROWS, top to bottom, all as tall) -- the map size (a click
--- goes on to the next of DEPLOY.SIZES), three that roll a D6 in the dice
--- line for the battle's deployment, objective and crews (said on
+-- The game's setup, in the column until the game starts: "GAME SETUP" over
+-- a column of buttons (ROWS, top to bottom, all as tall) -- the map size (a
+-- click goes on to the next of DEPLOY.SIZES), three that roll a D6 in the
+-- dice line for the battle's deployment, objective and crews (said on
 -- everyone's screen, and the result is the button's text from then on; a
 -- click rolls again -- the deployment also puts its model on the table,
--- see DEPLOY), the roll-off for who chooses Attacker and Defender,
--- three that do nothing yet, and Start Game (the round plate's own left
--- click: round 1, and the plate shows the round from then on). Each row of
--- ROWS:
+-- see DEPLOY), the roll-off for who chooses Attacker and Defender, three
+-- that do nothing yet, and Start Game (round 1: the column shows the round
+-- from then on). Each row of ROWS:
 --   label    what the button reads until it has rolled
 --   start    Start Game
 --   key      what a save knows its roll by
@@ -1397,12 +1848,16 @@ local RESET = {
 --            left side's on the left): the higher one chooses -- a tie
 --            is thrown again
 --   map      the map size
---   deploy   the deployment: its model, and the small buttons beside it
---            (TOOL_W wide each, GAP apart) that turn it, and raise and
---            lower it
--- Which side attacks shows at the bottom of each victory points plate
--- (the left one is the Attacker until swapped there). Crews with
--- reinforcements are remembered on the round plate (SETUP.reminder).
+--   deploy   the deployment: its model, and the small buttons right of it
+--            (TOOL_W wide each, TOOL_GAP apart) that turn it, and raise
+--            and lower it
+-- Which side attacks shows on each side panel, under its points (the left
+-- one is the Attacker until swapped there). Crews with reinforcements are
+-- remembered under the round (SETUP.reminder).
+--   Where the rows lie, in the layout's units (see LAYOUT): the heading
+-- HEAD down (HEAD_FONT), the rows from TOP down to BOTTOM over the
+-- column's bottom, INSET inside its edges, GAP apart, cut CUT; a row's text
+-- FONT (Start Game's START_FONT) or as much smaller as it needs.
 local SETUP = {
     ROWS = {
         { label = "Map Size", map = true },
@@ -1426,63 +1881,30 @@ local SETUP = {
     map      = 36,          -- the map size, in inches a side (saved)
     rolled   = {},          -- a roll's key -> the face it came up (saved)
     rolling  = {},          -- a row -> true while its die is falling
-    W = ROW_W - 2 * 130 - 12,   -- the round plate's width
-    GAP = 4, PAD = 6,       -- the rows: apart, and clear of the plate's edge (each as tall: the rest)
-    FONT = 17, MIN = 9,     -- a row's text: its size, and the smallest it shrinks to
-    TOOL_W = 36,            -- the deployment's small buttons: each column's width
-    FILL  = "#4D5A5EE6",    -- a row: lighter than the plate, so it reads as a button
-    START = "#E6E5E1E6",    -- Start Game: parchment, with anthracite type
-    ATTACKER = "#E0B830E6", DEFENDER = "#2BB3ADE6",   -- yellow and turquoise, with anthracite type
+    HEAD = 48, HEAD_FONT = 30,
+    TOP = 76, BOTTOM = 18, INSET = 26, GAP = 7, CUT = 12,
+    FONT = 18, START_FONT = 22,
+    TOOL_W = 34, TOOL_GAP = 6, TOOL_CUT = 6, TOOL_FONT = 13, ARROW_FONT = 10,
+    ATTACKER = "#E0B830", DEFENDER = "#2BB3AD",   -- yellow and turquoise, with dark type
     SAY = { 1, 0.85, 0.4 }, -- what the rolls and swaps say
 }
 
--- How wide a character of Arial Bold is, in ems (any other: as wide as
--- an "n") -- to wrap and size a row's text (see SETUP.fit).
-SETUP.EM = {}
-for chars, em in pairs({ [" ijlI.,;!|'"] = 0.278, ["ft():-"] = 0.333, r = 0.389, z = 0.5,
-                         ["acekpsvxy0123456789J"] = 0.556, ["+"] = 0.584, ["bdghnopquFLTZ"] = 0.611,
-                         ["EPSVXY"] = 0.667, ["ABCDHKNRU"] = 0.722, ["wGOQ"] = 0.778, M = 0.833, m = 0.889,
-                         W = 0.944 }) do
-    for c in chars:gmatch(".") do SETUP.EM[c] = em end
-end
-function SETUP.em(c) return SETUP.EM[c] or 0.611 end
-
--- `text` wrapped at its spaces (and its own line breaks) and sized to fit
--- `w` x `h`: the lines (joined by line breaks) and the font size -- FONT,
--- or as much smaller as it needs (never below MIN).
-function SETUP.fit(text, w, h)
-    local function width(s, size)
-        local n = 0
-        for c in s:gmatch(".") do n = n + SETUP.em(c) end
-        return n * size
-    end
-    local lines
-    for size = SETUP.FONT, SETUP.MIN, -1 do
-        lines = {}
-        for given in (text .. "\n"):gmatch("([^\n]*)\n") do
-            local first = #lines + 1
-            for word in given:gmatch("%S+") do
-                local cur = #lines >= first and lines[#lines]
-                if cur and width(cur .. " " .. word, size) <= w then lines[#lines] = cur .. " " .. word
-                else lines[#lines + 1] = word end
-            end
-        end
-        local fits = #lines * size * 1.2 <= h
-        for _, l in ipairs(lines) do fits = fits and width(l, size) <= w end
-        if fits then return table.concat(lines, "\n"), size end
-    end
-    return table.concat(lines, "\n"), SETUP.MIN
-end
-
--- Row `k`'s middle (up from the plate's) and height, and its button's
--- width and middle across -- the plate's height shared out evenly between
--- the rows; the deployment's button leaves room for its small buttons on
--- the right.
+-- Row `k`'s button as a box of the layout (see LAYOUT) -- the rows share
+-- the column's height under the heading evenly -- and, for the
+-- deployment's row, the boxes of its small buttons right of it: the one
+-- that turns the model (turn, as tall as the row) and the ones that raise
+-- and lower it (up over down).
 function SETUP.place(k)
-    local n = #SETUP.ROWS
-    local h = (VP_ROW_H - 6 - 2 * SETUP.PAD - (n - 1) * SETUP.GAP) / n
-    local w, tools = SETUP.W - 6 - 2 * SETUP.PAD, SETUP.ROWS[k].deploy and 2 * (SETUP.TOOL_W + SETUP.GAP) or 0
-    return (VP_ROW_H - 6) / 2 - SETUP.PAD - (k - 1) * (h + SETUP.GAP) - h / 2, h, w - tools, -tools / 2
+    local col, n = LAYOUT.MID, #SETUP.ROWS
+    local x0, x1 = col[1] + SETUP.INSET, col[3] - SETUP.INSET
+    local h = (col[4] - SETUP.BOTTOM - SETUP.TOP - (n - 1) * SETUP.GAP) / n
+    local y0 = SETUP.TOP + (k - 1) * (h + SETUP.GAP)
+    if not SETUP.ROWS[k].deploy then return { x0, y0, x1, y0 + h } end
+    local tw, g = SETUP.TOOL_W, SETUP.TOOL_GAP
+    return { x0, y0, x1 - 2 * (tw + g), y0 + h },
+        { turn = { x1 - 2 * tw - g, y0, x1 - tw - g, y0 + h },
+          up   = { x1 - tw, y0, x1, y0 + h / 2 - 2 },
+          down = { x1 - tw, y0 + h / 2 + 2, x1, y0 + h } }
 end
 
 -- Side `n`'s name as the setup says it: its gang's, or "Player <n>".
@@ -1491,11 +1913,10 @@ function SETUP.side(n)
     return name ~= "" and name or ("Player " .. n)
 end
 
--- The reminder at the bottom of the round plate once the game is under
--- way: what each part of the crews rolled that brings reinforcements
--- brings every round, as "Reinforcements - D3" -- "Defender:
--- Reinforcements - D3" when only one side's part of it does. Nil when none
--- does (or no crews were rolled).
+-- The reminder under the round once the game is under way: what each part
+-- of the crews rolled that brings reinforcements brings every round, as
+-- "Reinforcements - D3" -- "Defender: Reinforcements - D3" when only one
+-- side's part of it does. Nil when none does (or no crews were rolled).
 function SETUP.reminder()
     for _, row in ipairs(SETUP.ROWS) do
         local text = row.key == "crews" and row.results[SETUP.rolled.crews or 0]
@@ -1513,7 +1934,7 @@ function SETUP.reminder()
     end
 end
 
--- What row `k` reads, fitted: its text and font size.
+-- What row `k` reads, fitted to its button: its text and font size.
 function SETUP.view(k)
     local row = SETUP.ROWS[k]
     local text = row.label
@@ -1522,81 +1943,55 @@ function SETUP.view(k)
     elseif SETUP.rolling[k] then text = "Rolling..."
     elseif face and row.rollOff then text = SETUP.side(face) .. " chooses"
     elseif face then text = row.say .. ": " .. (row.button and row.button[face] or row.results[face])
+    elseif row.start then text = text:upper()
     end
-    local _, h, w = SETUP.place(k)
-    return SETUP.fit(text, w - 6, h - 4)
+    local b = SETUP.place(k)
+    return SHAPE.fit(text, b[3] - b[1] - 16, b[4] - b[2] - 4, row.start and SETUP.START_FONT or SETUP.FONT)
 end
 
--- The reminder (SETUP.reminder) as the round plate shows it: its text,
--- font size, and whether it shows -- at the bottom, in the last row's
--- place, as big as a row's text.
+-- The reminder (SETUP.reminder) as it shows under End Round: its text,
+-- font size, and whether it shows.
 function SETUP.note()
-    local text = SETUP.reminder()
-    local _, h, w = SETUP.place(#SETUP.ROWS)
-    local fitted, size = SETUP.fit(text or "", w - 6, h - 4)
+    local R, text = LAYOUT.ROUND, SETUP.reminder()
+    local fitted, size = SHAPE.fit(text or "", R.NOTE_W, R.NOTE_H, R.NOTE_FONT)
     return fitted, size, text ~= nil
 end
-function SETUP.noteXml()
-    local y, h, w = SETUP.place(#SETUP.ROWS)
-    local text, size, on = SETUP.note()
-    return string.format('<Text id="roundNote" active="%s" rectAlignment="MiddleCenter" offsetXY="0 %g" width="%g"' ..
-        ' height="%g" fontSize="%d" fontStyle="Bold" alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>',
-        tostring(on), y, w - 6, h - 4, size, PALE, xmlEsc(text))
-end
 
--- The setup's column of rows, in the round plate (shown before round 1).
+-- The setup in the column (shown before round 1): "GAME SETUP" over its
+-- rows (setupBtn_<k> takes a row's click, setupTxt_<k> is its text), Start
+-- Game gold; right of the deployment's row its small buttons (deployTurn,
+-- deployUp, deployDown).
 function SETUP.xml()
-    local out = { string.format('<Panel id="setupPanel" active="%s" rectAlignment="MiddleCenter" width="%g" height="%g"' ..
-        ' color="#00000000">', tostring(turn < 1), SETUP.W - 6, VP_ROW_H - 6) }
+    local col = LAYOUT.MID
+    local out = { string.format('<Panel id="setupPanel" active="%s" width="%d" height="%d" color="#00000000">',
+        tostring(turn < 1), PANEL_W, PANEL_H),
+        SHAPE.text((col[1] + col[3]) / 2, SETUP.HEAD, col[3] - col[1] - 80, SETUP.HEAD_FONT * 1.4, "GAME SETUP",
+            SETUP.HEAD_FONT, LOOK.HEAD) }
+    local cut = { SETUP.CUT, 0, SETUP.CUT, 0 }
     for k, row in ipairs(SETUP.ROWS) do
-        local y, h, w, x = SETUP.place(k)
+        local box, tools = SETUP.place(k)
         local text, size = SETUP.view(k)
-        out[#out + 1] = string.format([[
-                <Panel id="setup_%d" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g" height="%g" color="%s"%s>
-                  %s
-                  <Text id="setupTxt_%d" rectAlignment="MiddleCenter" width="%g" height="%g" fontSize="%d" fontStyle="Bold"
-                        alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>
-                </Panel>]], k, x, y, w, h, row.start and SETUP.START or SETUP.FILL, BEVEL,
-            plateButton("setupBtn_" .. k, row.start and "onAdvanceTurn" or "onSetup"), k, w - 6, h - 4, size,
-            row.start and INK or PALE, SETUP.esc(text))
-        if row.deploy then out[#out + 1] = SETUP.toolsXml(y, h, w / 2 + x) end
+        out[#out + 1] = SHAPE.button({ box = box, cut = cut, look = row.start and "gold" or "plain", label = text,
+            size = size, fit = false, fn = row.start and "onAdvanceTurn" or "onSetup",
+            btn = "setupBtn_" .. k, txt = "setupTxt_" .. k })
+        if tools then
+            local square = { 0, 0, 0, 0 }
+            out[#out + 1] = SHAPE.button({ box = tools.turn, cut = { SETUP.TOOL_CUT, 0, SETUP.TOOL_CUT, 0 }, label = "90°",
+                size = SETUP.TOOL_FONT, fit = false, fn = "onDeployTool", btn = "deployTurn" })
+            out[#out + 1] = SHAPE.button({ box = tools.up, cut = square, label = "▲", size = SETUP.ARROW_FONT,
+                fit = false, fn = "onDeployTool", btn = "deployUp" })
+            out[#out + 1] = SHAPE.button({ box = tools.down, cut = square, label = "▼", size = SETUP.ARROW_FONT,
+                fit = false, fn = "onDeployTool", btn = "deployDown" })
+        end
     end
     out[#out + 1] = "</Panel>"
     return table.concat(out, "\n")
 end
 
--- A row's text as a Text holds it: inch marks and apostrophes as they
--- are (a Text would show an entity as it is written).
-function SETUP.esc(s)
-    return (tostring(s or ""):gsub("&", "and"):gsub("[<>]", ""))
-end
-
--- The deployment's small buttons, right of its button (whose right edge
--- is at `right`), in a row `h` tall at `y`: one that turns the model
--- (deployTurn, as tall as the row) and, in a column beside it, one that
--- raises it over one that lowers it (deployUp / deployDown) -- each a
--- clear button over a framed panel, like the rows.
-function SETUP.toolsXml(y, h, right)
-    local tw, g = SETUP.TOOL_W, SETUP.GAP
-    local function tool(id, x, yy, hh, label, size)
-        return string.format([[
-                <Panel id="%sBox" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g" height="%g" color="%s"%s>
-                  %s
-                  <Text rectAlignment="MiddleCenter" width="%g" height="%g" fontSize="%d" fontStyle="Bold"
-                        alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>
-                </Panel>]], id, x, yy, tw, hh, SETUP.FILL, BEVEL, plateButton(id, "onDeployTool"), tw, hh, size, PALE, label)
-    end
-    local x1, x2, hh = right + g + tw / 2, right + 2 * g + 1.5 * tw, (h - 2) / 2
-    return tool("deployTurn", x1, y, h, "90°", 13) .. "\n" ..
-        tool("deployUp", x2, y + hh / 2 + 1, hh, "▲", 10) .. "\n" ..
-        tool("deployDown", x2, y - hh / 2 - 1, hh, "▼", 10)
-end
-
--- Row `k` redrawn in place (font sizes scaled by PANEL_DETAIL like the
--- built XML's).
+-- Row `k` redrawn in place.
 function SETUP.draw(k)
     local text, size = SETUP.view(k)
-    self.UI.setAttribute("setupTxt_" .. k, "fontSize", string.format("%d", size * PANEL_DETAIL))
+    SHAPE.size("setupTxt_" .. k, size)
     setLabel("setupTxt_" .. k, text)
 end
 
@@ -1606,20 +2001,20 @@ function SETUP.drawAll()
     for k in ipairs(SETUP.ROWS) do SETUP.draw(k) end
 end
 
--- Side `n`'s part, as its victory points plate shows it: the word and the
--- colour behind it.
+-- Side `n`'s part, as its side panel shows it: the word and the colour
+-- behind it.
 function SETUP.role(n)
     if n == SETUP.attacker then return "Attacker", SETUP.ATTACKER end
     return "Defender", SETUP.DEFENDER
 end
 
--- Attacker and Defender swapped, both plates redrawn, and said in chat.
+-- Attacker and Defender swapped, both side panels redrawn, and said in
+-- chat.
 function SETUP.swap()
     SETUP.attacker = 3 - SETUP.attacker
     for n = 1, 2 do
         local word, fill = SETUP.role(n)
-        setLabel("vpRoleTxt_" .. n, word)
-        self.UI.setAttribute("vpRole_" .. n, "color", fill)
+        SHAPE.paint("vpRole_" .. n, { fill = fill }, word:upper())
     end
     printToAll(string.format("%sAttacker: %s -- Defender: %s", CHAT_PREFIX, SETUP.side(SETUP.attacker),
         SETUP.side(3 - SETUP.attacker)), SETUP.SAY)
@@ -1702,7 +2097,7 @@ function DEPLOY.spawn(face, name)
         })
         if ok and o then
             pcall(function()
-                o.setCustomObject({ mesh = url, collider = collider, type = 0, cast_shadows = false })
+                o.setCustomObject({ mesh = url, collider = collider, type = 0, material = DEPLOY.MATERIAL, cast_shadows = false })
             end)
             pcall(function() o.setLock(true) end)
             pcall(function() o.addTag(DEPLOY.TAG) end)
@@ -1744,154 +2139,240 @@ function SETUP.rollOff(k, color)
         end })
 end
 
--- A player's victory points, beside the turn: clicking the plate counts
--- them (left +1, right -1). At its bottom the side's part, Attacker or
--- Defender (vpRole_<n>: a click there swaps them, see SETUP). The gang's
--- name is over its Bottle Check (nameXml).
-local function vpXml(n)
-    local word, fill = SETUP.role(n)
-    return string.format([[
-          <Panel preferredWidth="130" color="%s" outline="#29313366" outlineSize="2 2" padding="2 2 2 2">
-            <Panel color="#00000000" outline="#E6E5E159" outlineSize="1 1">
-              %s
-              <Text rectAlignment="UpperCenter" offsetXY="0 -8" width="126" height="44" fontSize="36"
-                    fontStyle="Bold" color="%s" raycastTarget="false">VP</Text>
-              <Text id="vpText_%d" rectAlignment="MiddleCenter" offsetXY="0 -10" width="120" height="140"
-                    fontSize="90" fontStyle="Bold" color="%s" raycastTarget="false">%d</Text>
-              <Panel id="vpRole_%d" rectAlignment="MiddleCenter" offsetXY="0 %g" width="114" height="34" color="%s"%s>
-                %s
-                <Text id="vpRoleTxt_%d" rectAlignment="MiddleCenter" width="110" height="30" fontSize="20" fontStyle="Bold"
-                      alignment="MiddleCenter" color="%s" raycastTarget="false">%s</Text>
-              </Panel>
-            </Panel>
-          </Panel>]], LIT, plateButton("vpBtn_" .. n, "onVp"), PALE, n, PALE, vp[n],
-        n, -(VP_ROW_H - 4) / 2 + 6 + 17, fill, BEVEL, plateButton("vpRoleBtn_" .. n, "onSwapRoles"), n, INK, word)
-end
-
--- A player's gang name (to type in, or put one of the gang's models on
--- their victory points plate), as wide as their Bottle Check under it.
-local function nameXml(n)
-    return string.format([[
-          <InputField id="vpName_%d" preferredWidth="%g" fontSize="16" characterLimit="40" textAlignment="MiddleCenter"
-                      textColor="%s" colors="%s" outline="#29313366" outlineSize="2 2"
-                      text="%s" onEndEdit="onVpName" />]], n, (ROW_W - 6) / 2, PALE,
-        "#293133E6|#3A4447E6|#1C2224E6|#293133E6", xmlEsc(vpNames[n]))
-end
-
--- The Bottle Check (see BOTTLE): each player's, under their gang's name,
--- half the row wide. It is the fighter card's Nerve Check panel in the
--- Controller's colours: "Bottle Check" over two diamonds, centred -- the
--- Ld it is taken against (bottleVal: left click one more, right click one
--- fewer, by hand; green while the gang's Iron Will raises it, see
--- BOTTLE.target), with "Ld" left of it, and the die that rolls it
--- (bottleRoll: the card's die, DIE_ICON, upright over it -- ICON of the
--- diamond's side, as on the card's roll buttons -- or a "D"). The panel
--- itself (bottle_<n>) turns dark red while the check must be taken; a left
--- click on "Bottle Check" (bottleHead_<n>) switches that by hand. Every
--- diamond is a turned button with a plain Text over it (a turned button's
--- label would turn with it).
+-- Each player's side panel (sideXml) shows their gang's name -- typed in,
+-- or taken from one of the gang's models put on the panel (see
+-- BOTTLE.tick) -- their victory points, their part (Attacker or Defender:
+-- a click swaps them, see SETUP) and their gang's Bottle Check (see the
+-- Bottle Check's functions): "BOTTLE CHECK" over the Ld it is taken
+-- against (bottleVal: left click one more, right click one fewer, by hand;
+-- green while the gang's Iron Will raises it, see BOTTLE.target), with "Ld"
+-- left of it, and the die that rolls it (bottleRoll: the card's die,
+-- DIE_ICON, upright over it -- ICON of the diamond's side, as on the card's
+-- roll buttons -- or a "D"). A dark red plate (bottle_<n>) lies behind the
+-- check while it must be taken; a left click on "BOTTLE CHECK"
+-- (bottleHead_<n>) switches that by hand. Every diamond is a turned button
+-- with a plain Text over it (a turned button's label would turn with it).
 local BOTTLE = {
     due   = {},             -- gang (BOTTLE.key) -> "due" (to take: lit) or "done", this turn
     hand  = {},             -- per side: an Ld set by hand (nil: the gang's best)
-    seen  = {},             -- per side: the model last found on its victory points plate
-    D = 40, GAP = 10,       -- the diamonds: side, and tip to tip apart (panel units)
+    seen  = {},             -- per side: the model last found on its side panel
+    R     = 38,             -- the diamonds: from the middle to each tip (panel units)
     ICON  = 0.78,           -- the die's size, a fraction of a diamond's side (the card's LAY.dieIcon)
-    LD_W = 26, LD_GAP = 8,  -- "Ld": about how wide, and how far from the first diamond's tip
-    PLAIN = "#293133E6",
-    LIT   = "#7A2020D9",    -- a check to take (the Clear All Conditions red)
+    FONT  = 32,             -- the Ld in its diamond
     HAND  = "#F0C060",      -- an Ld set by hand
     UP    = "#6EE07A",      -- an Ld the gang's Iron Will raises (the card's green for a better value)
-    TOP   = 0.25,           -- this object's top, in its own space: where models on the plates stand
+    HINT  = "[ NO NAME SET ]",                                -- a side's name while it has no gang ...
+    HOW   = { "Move a scribed model", "over this panel" },    -- ... and, in place of its points, how to give it one
 }
-local function bottleXml(n)
-    local W, d = (ROW_W - 6) / 2, BOTTLE.D
-    local step, y = d * math.sqrt(2) + BOTTLE.GAP, -18
-    local function dia(id, i, label, fn, ink)
-        local x = (i - 1.5) * step                          -- the two centred in the panel
-        return string.format(
-            '<Button id="%s_%d" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%d" height="%d" rotation="0 0 45"' ..
-            ' colors="%s" outline="#E6E5E159" outlineSize="1 1" onClick="%s" />' ..
-            '<Text id="%sTxt_%d" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%d" height="%d" fontSize="20"' ..
-            ' fontStyle="Bold" color="%s" raycastTarget="false">%s</Text>',
-            id, n, x, y, d, d, WASH, fn, id, n, x, y, d, d, ink or PALE, label)
+
+-- One of side `n`'s diamonds, its middle at x, y: the turned button
+-- `id`_<n> (calling `fn`) with the card's diamond frame over it (ART.FRAME:
+-- turned with it, FRAME_SIZE times its side, in gold -- or, without the
+-- art, gold lines round it) and a plain Text over that (`id`Txt_<n>).
+function BOTTLE.diamond(id, n, x, y, label, fn, ink)
+    local r = BOTTLE.R
+    local side = r * math.sqrt(2)
+    local frame
+    if ART.FRAME ~= "" then
+        frame = string.format('<Image %s width="%g" height="%g" rotation="0 0 45" image="mundaneFrame" color="%s"' ..
+            ' raycastTarget="false" />', SHAPE.at(x, y), side * ART.FRAME_SIZE, side * ART.FRAME_SIZE, LOOK.GOLD)
+    else
+        frame = (SHAPE.lines({ { x, y - r }, { x + r, y }, { x, y + r }, { x - r, y } }, LOOK.EDGE, LOOK.GOLD, true))
     end
-    -- the roll diamond: the die over it, its Text empty (kept, for the "D")
-    local function die()
-        if DIE_ICON == "" then return dia("bottleRoll", 2, "D", "onBottleRoll") end
-        local s = d * BOTTLE.ICON
-        return dia("bottleRoll", 2, "", "onBottleRoll") .. string.format(
-            '<Image id="bottleRollIcon_%d" rectAlignment="MiddleCenter" offsetXY="%g %g" width="%g" height="%g"' ..
-            ' image="mundaneDie" raycastTarget="false" />', n, 0.5 * step, y, s, s)
-    end
-    local v, will = BOTTLE.value(n)
-    return string.format([[
-          <Panel id="bottle_%d" preferredWidth="%g" color="%s" outline="#29313366" outlineSize="2 2" padding="3 3 3 3">
-            <Panel color="#00000000" outline="#E6E5E159" outlineSize="1 1">
-              <Button id="bottleHead_%d" rectAlignment="UpperCenter" offsetXY="0 -6" width="%g" height="28"
-                      colors="#00000000|#FFFFFF14|#FFFFFF26|#00000000" outline="#00000000" onClick="onBottleHead" />
-              <Text rectAlignment="UpperCenter" offsetXY="0 -6" width="%g" height="28" fontSize="20" fontStyle="Bold"
-                    color="%s" raycastTarget="false">Bottle Check</Text>
-              <Text rectAlignment="MiddleCenter" offsetXY="%g %g" width="40" height="%d" fontSize="22" fontStyle="Bold"
-                    color="%s" raycastTarget="false">Ld</Text>
-              %s%s
-            </Panel>
-          </Panel>]], n, W, BOTTLE.color(n), n, W - 20, W - 20, PALE,
-        -step / 2 - d * math.sqrt(2) / 2 - BOTTLE.LD_GAP - BOTTLE.LD_W / 2, y, d, PALE,
-        dia("bottleVal", 1, v and tostring(v) or "-", "onBottleValue", BOTTLE.ink(n, will)), die())
+    return string.format('<Button id="%s_%d" %s width="%g" height="%g" rotation="0 0 45" colors="%s" onClick="%s" />',
+        id, n, SHAPE.at(x, y), side, side, LOOK.DIAMOND, fn) ..
+        frame .. SHAPE.text(x, y, side, side, label, BOTTLE.FONT, ink or LOOK.TEXT, id .. "Txt_" .. n)
 end
 
--- The play section, under the header: two slim bars of buttons ("Clear
--- All Conditions", "Reset all Fighters" and "Homebrew Rules", then "Roll Dice", "Roll Firepower"
--- and "Roll Injuries": a die under the panel per click, quick clicks
--- gathered into one roll -- see DICE.click), then the turn in a framed
--- plate between the two players' victory points -- before the game the
--- setup's buttons (SETUP), Start Game first; from turn 1 "Turn" over the
--- number (the panel turnView), and clicking it advances the turn (every fighter
--- readied; a right click steps it back, below turn 1 to the setup) -- and
--- under them each player's gang name (nameXml) over their Bottle Check
--- (bottleXml).
+-- What side `n`'s name line shows: its gang's name in capitals (BOTTLE.HINT
+-- while it has none), and the font size that fits it on the line.
+function BOTTLE.nameView(n)
+    local S = LAYOUT.SIDE
+    local text = BOTTLE.named(n) and trim(tostring(vpNames[n])):upper() or BOTTLE.HINT
+    local size = math.floor(math.min(S.NAME_FONT, (S.NAME_W - 24) / math.max(0.01, SHAPE.width(text))))
+    return text, math.max(S.NAME_MIN, size)
+end
+
+-- A clear panel the size of the whole panel, shown while `on`, round
+-- `inner` (laid out on the panel, like everything else).
+local function group(id, on, inner)
+    return string.format('<Panel id="%s" active="%s" width="%d" height="%d" color="#00000000">\n%s\n</Panel>',
+        id, tostring(on), PANEL_W, PANEL_H, inner)
+end
+
+-- Side `n`'s panel (see BOTTLE above): the gang's name over a thin rule --
+-- an input field without a frame (vpName_<n>), so a name can be typed in;
+-- while the side has no gang it reads BOTTLE.HINT, which counts as no name
+-- (see onVpName) -- then "VICTORY POINTS" over the points (vpShow_<n>:
+-- vpText_<n>, vpBtn_<n> takes the clicks) or, while the side has no gang,
+-- how to give it one (vpHint_<n>); a thin rule; the side's part (vpRole_<n>);
+-- and the Bottle Check.
+local function sideXml(n)
+    local S, box = LAYOUT.SIDE, LAYOUT.SIDES[n]
+    local cx, top = (box[1] + box[3]) / 2, box[2]
+    local function rule(dy, color)
+        return (SHAPE.lines({ { cx - S.RULE_W / 2, top + dy }, { cx + S.RULE_W / 2, top + dy } }, LOOK.THIN, color))
+    end
+    local function across(b) return { cx + b[1], top + b[2], cx + b[3], top + b[4] } end
+    local named = BOTTLE.named(n)
+    local name, size = BOTTLE.nameView(n)
+    local word, fill = SETUP.role(n)
+    local v, will = BOTTLE.value(n)
+    local hintW = box[3] - box[1] - 60
+    local rx, dy = cx + S.ROLL_X, top + S.DICE
+    local roll = BOTTLE.diamond("bottleRoll", n, rx, dy, DIE_ICON == "" and "D" or "", "onBottleRoll")
+    if DIE_ICON ~= "" then
+        local s = BOTTLE.R * math.sqrt(2) * BOTTLE.ICON
+        roll = roll .. string.format('<Image id="bottleRollIcon_%d" %s width="%g" height="%g" image="mundaneDie"' ..
+            ' raycastTarget="false" />', n, SHAPE.at(rx, dy), s, s)
+    end
+    local c, pc = S.ROLE_CUT, S.PLATE_CUT
+    return table.concat({
+        SHAPE.panel(box, LAYOUT.SIDE_CUT, { 1, 2, 3, 4 }, LAYOUT.SIDE_ACCENT),
+        group("bottle_" .. n, BOTTLE.lit(n), SHAPE.shape(across(S.PLATE), { pc, pc, pc, pc }, LOOK.BUTTONS.red, LOOK.EDGE)),
+        string.format('<InputField id="vpName_%d" %s %s fontStyle="Bold"' ..
+            ' characterLimit="40" textAlignment="MiddleCenter" textColor="%s" colors="#00000000|#FFFFFF0D|#FFFFFF14|#00000000"' ..
+            ' text="%s" onEndEdit="onVpName" />', n, SHAPE.at(cx, top + S.NAME), SHAPE.sized(size, S.NAME_W, S.NAME_H),
+            LOOK.TEXT, xmlEsc(name)),
+        rule(S.NAME_RULE, LOOK.RULE),
+        group("vpShow_" .. n, named,
+            SHAPE.text(cx, top + S.VP_HEAD, S.RULE_W, S.HEAD_FONT * 1.4, "VICTORY POINTS", S.HEAD_FONT, LOOK.TEXT) ..
+            SHAPE.text(cx, top + S.VP, S.RULE_W, S.VP_FONT * 1.2, tostring(vp[n]), S.VP_FONT, LOOK.TEXT, "vpText_" .. n) ..
+            SHAPE.hit("vpBtn_" .. n, "onVp", cx, top + (S.VP_HIT[1] + S.VP_HIT[2]) / 2, S.RULE_W, S.VP_HIT[2] - S.VP_HIT[1])),
+        group("vpHint_" .. n, not named,
+            SHAPE.text(cx, top + S.HINT - S.HINT_GAP / 2, hintW, S.HINT_FONT * 1.3, BOTTLE.HOW[1], S.HINT_FONT, LOOK.DIM) ..
+            SHAPE.text(cx, top + S.HINT + S.HINT_GAP / 2, hintW, S.HINT_FONT * 1.3, BOTTLE.HOW[2], S.HINT_FONT, LOOK.DIM)),
+        rule(S.VP_RULE, LOOK.RULE_TEXT),
+        SHAPE.button({ box = across(S.ROLE), cut = { c, c, c, c }, look = { fill = fill, ink = LOOK.BUTTONS.gold.ink },
+            line = false, label = word:upper(), size = S.ROLE_FONT, fn = "onSwapRoles", btn = "vpRoleBtn_" .. n,
+            id = "vpRole_" .. n, txt = "vpRoleTxt_" .. n }),
+        SHAPE.text(cx, top + S.BOTTLE, S.HEAD_W, S.HEAD_FONT * 1.4, "BOTTLE CHECK", S.HEAD_FONT, LOOK.TEXT),
+        SHAPE.hit("bottleHead_" .. n, "onBottleHead", cx, top + S.BOTTLE, S.HEAD_W, S.HEAD_FONT * 1.4),
+        SHAPE.text(cx + S.LD_X, dy, 60, S.LD_FONT * 1.3, "Ld", S.LD_FONT, LOOK.TEXT),
+        BOTTLE.diamond("bottleVal", n, cx + S.VAL_X, dy, v and tostring(v) or "-", "onBottleValue", BOTTLE.ink(n, will)),
+        roll,
+    }, "\n")
+end
+
+-- The round's number as the gear shows it, and its size: ROUND.FONT, or
+-- smaller so it stays inside the gear's inner ring (the box of its digits
+-- -- as wide as they are, 0.72 em tall -- a little clear of the ring).
+local function roundView()
+    local R, text = LAYOUT.ROUND, tostring(turn)
+    local half = math.sqrt((SHAPE.width(text) / 2) ^ 2 + 0.36 ^ 2)
+    return text, math.floor(math.min(R.FONT, R.RING * 0.92 / half))
+end
+
+-- The column between the side panels. From round 1 (turnView): "ROUND"
+-- (turnCaption) between two thin rules, over the gear on its glow with the
+-- round's number in it (turnText; turnBack takes a right click on it, which
+-- steps the round back), End Round under it (turnBtn: a left click starts
+-- the next round, every fighter readied; a right click steps it back -- below
+-- round 1 to the setup) and under that the reminder of reinforcements
+-- (roundNote, see SETUP.note). Before round 1 the game's setup (SETUP.xml).
+local function columnXml()
+    local R, col = LAYOUT.ROUND, LAYOUT.MID
+    local cx, gy = (col[1] + col[3]) / 2, R.GEAR
+    local number, size = roundView()
+    local note, noteSize, noteOn = SETUP.note()
+    local out = {
+        SHAPE.panel(col, LAYOUT.MID_CUT, { 1, 2 }, LAYOUT.MID_ACCENT),
+        string.format('<Panel id="turnView" active="%s" width="%d" height="%d" color="#00000000">',
+            tostring(turn >= 1), PANEL_W, PANEL_H),
+        SHAPE.text(cx, R.CAPTION, 2 * R.RULE_GAP, R.CAPTION_FONT * 1.3, "ROUND", R.CAPTION_FONT, LOOK.HEAD, "turnCaption"),
+        (SHAPE.lines({ { col[1] + R.RULE_IN, R.CAPTION }, { cx - R.RULE_GAP, R.CAPTION } }, LOOK.THIN, LOOK.GOLD)),
+        (SHAPE.lines({ { cx + R.RULE_GAP, R.CAPTION }, { col[3] - R.RULE_IN, R.CAPTION } }, LOOK.THIN, LOOK.GOLD)),
+    }
+    if ART.GLOW ~= "" then
+        out[#out + 1] = string.format('<Image %s width="%g" height="%g" image="mundaneGlow" color="%s" raycastTarget="false" />',
+            SHAPE.at(cx, gy), R.GLOW_SIZE, R.GLOW_SIZE, LOOK.GLOW)
+    end
+    if ART.GEAR ~= "" then
+        out[#out + 1] = string.format('<Image %s width="%g" height="%g" image="mundaneGear" color="%s" raycastTarget="false" />',
+            SHAPE.at(cx, gy), R.GEAR_SIZE, R.GEAR_SIZE, LOOK.GOLD)
+    end
+    out[#out + 1] = SHAPE.text(cx, gy - R.DROP, 2 * R.RING + 60, R.FONT * 1.25, number, size, LOOK.NUMBER, "turnText")
+    out[#out + 1] = SHAPE.hit("turnBack", "onAdvanceTurn", cx, gy, R.HIT, R.HIT)
+    out[#out + 1] = SHAPE.button({ box = { cx + R.END[1], R.END[2], cx + R.END[3], R.END[4] },
+        cut = { R.END_CUT, 0, R.END_CUT, 0 }, look = "red", label = "END ROUND", size = R.END_FONT,
+        fn = "onAdvanceTurn", btn = "turnBtn", txt = "endRoundTxt" })
+    out[#out + 1] = SHAPE.text(cx, R.NOTE, R.NOTE_W, R.NOTE_H, note, noteSize, LOOK.NOTE, "roundNote",
+        ' active="' .. tostring(noteOn) .. '"')
+    out[#out + 1] = "</Panel>"
+    out[#out + 1] = SETUP.xml()
+    return table.concat(out, "\n")
+end
+
+-- The links between the column and each side panel: a line with a small
+-- gold diamond in its middle.
+local function linksXml()
+    local L, out = LAYOUT, {}
+    for _, y in ipairs(L.LINKS) do
+        for _, span in ipairs({ { L.SIDES[1][3], L.MID[1] }, { L.MID[3], L.SIDES[2][1] } }) do
+            out[#out + 1] = (SHAPE.lines({ { span[1], y }, { span[2], y } }, LOOK.LINE, LOOK.GOLD))
+            out[#out + 1] = SHAPE.dot((span[1] + span[2]) / 2, y, L.LINK_DOT, LOOK.GOLD)
+        end
+    end
+    return table.concat(out, "\n")
+end
+
+-- A row of buttons under a panel, filling x0 to x1 (RAIL_GAP apart): each
+-- of `list` a SHAPE.button's t without its box (w: a width of its own, the
+-- others sharing the rest) -- cut like the panel's lower corners: the first
+-- at its bottom left, the last at its bottom right, the rest square.
+local function railXml(x0, x1, list)
+    local L, n, fixed, shared = LAYOUT, #list, 0, 0
+    for _, b in ipairs(list) do
+        if b.w then fixed = fixed + b.w else shared = shared + 1 end
+    end
+    local w = (x1 - x0 - (n - 1) * L.RAIL_GAP - fixed) / math.max(1, shared)
+    local out, x = {}, x0
+    for k, b in ipairs(list) do
+        local bw = b.w or w
+        b.box = { x, L.RAIL[1], x + bw, L.RAIL[2] }
+        b.cut = { 0, 0, k == n and L.RAIL_CUT or 0, k == 1 and L.RAIL_CUT or 0 }
+        b.size = b.size or L.RAIL_FONT
+        out[#out + 1] = SHAPE.button(b)
+        x = x + bw + L.RAIL_GAP
+    end
+    return table.concat(out, "\n")
+end
+
+-- The buttons under the panels: under each side panel Roll Dice, Roll
+-- Firepower and Roll Injuries (both rows the same: a die in the line under
+-- the panel per click, quick clicks gathered into one roll -- see
+-- DICE.click); under the column Reset Fighters (red while it asks for its
+-- second click, see RESET), Feedback (the envelope alone: the feedback
+-- form on a tablet past the panel, gold while it is up -- feedbackText,
+-- the word the importer's button has, stays empty) and Homebrew Rules.
+local function railsXml()
+    local L, out = LAYOUT, {}
+    for n, side in ipairs(L.SIDES) do
+        out[#out + 1] = railXml(side[1], side[3], {
+            { label = "Roll Dice", fn = "onRollDiceBtn", btn = "rollDiceBtn_" .. n },
+            { label = "Roll Firepower", fn = "onRollFirepowerBtn", btn = "rollFirepowerBtn_" .. n },
+            { label = "Roll Injuries", fn = "onRollInjuriesBtn", btn = "rollInjuriesBtn_" .. n } })
+    end
+    out[#out + 1] = railXml(L.MID[1], L.MID[3], {
+        { label = RESET.asking and RESET.ASK or RESET.LABEL, look = RESET.asking and RESET.ASKING or "plain",
+          fn = "onResetFighters", btn = "resetFighters", id = "resetFighters", txt = "resetFightersTxt" },
+        { label = L.MARK, size = L.MARK_FONT, fit = false, w = L.FEEDBACK_W, detail = L.MARK_DETAIL, bare = true,
+          look = FEEDBACK.tablet() and "gold" or "plain", fn = "onFeedback", btn = "feedbackBtn", id = "feedback",
+          txt = "feedbackMark" },
+        { label = HOMEBREW.button(), fn = "onHomebrewOpen", btn = "homebrewBtn", id = "homebrewBtn",
+          txt = "homebrewBtnTxt" } })
+    local fb = SHAPE.parts.feedback
+    out[#out + 1] = SHAPE.text((fb.box[1] + fb.box[3]) / 2, (fb.box[2] + fb.box[4]) / 2, L.FEEDBACK_W,
+        L.RAIL[2] - L.RAIL[1], "", L.RAIL_FONT, fb.fill == LOOK.GOLD and LOOK.BUTTONS.gold.ink or LOOK.TEXT, "feedbackText")
+    return table.concat(out, "\n")
+end
+
+-- The main page: both side panels, the column, the links between them and
+-- the buttons under them (playSection: hidden while the Homebrew Rules page
+-- shows).
 local function playXml()
-    return string.format([[
-      <VerticalLayout id="playSection" preferredHeight="%d" spacing="6" childForceExpandHeight="false">
-        <HorizontalLayout preferredHeight="%d" spacing="6">
-          <Button id="clearConditions" fontSize="15" colors="%s" textColor="%s" onClick="onClearConditions">Clear All Conditions</Button>
-          <Button id="resetFighters" fontSize="15" colors="%s" textColor="%s" onClick="onResetFighters">%s</Button>
-          <Button id="homebrewBtn" fontSize="15" colors="%s" textColor="%s" onClick="onHomebrewOpen">%s</Button>
-        </HorizontalLayout>
-        <HorizontalLayout preferredHeight="%d" spacing="6">
-          <Button id="rollDiceBtn" fontSize="15" colors="%s" textColor="%s" onClick="onRollDiceBtn">Roll Dice</Button>
-          <Button id="rollFirepowerBtn" fontSize="15" colors="%s" textColor="%s" onClick="onRollFirepowerBtn">Roll Firepower</Button>
-          <Button id="rollInjuriesBtn" fontSize="15" colors="%s" textColor="%s" onClick="onRollInjuriesBtn">Roll Injuries</Button>
-        </HorizontalLayout>
-        <HorizontalLayout preferredHeight="%d" spacing="6" childForceExpandWidth="false">
-%s
-          <Panel preferredWidth="%d" color="%s" outline="#29313366" outlineSize="2 2" padding="3 3 3 3">
-            <Panel color="#00000000" outline="#E6E5E159" outlineSize="1 1">
-              <Panel id="turnView" active="%s" rectAlignment="MiddleCenter" width="%d" height="%d" color="#00000000">
-                %s
-                <Text id="turnCaption" rectAlignment="MiddleCenter" offsetXY="0 90" width="%d" height="70"
-                      fontSize="51" fontStyle="Bold" color="%s" raycastTarget="false">Round</Text>
-                <Text id="turnText" rectAlignment="MiddleCenter" offsetXY="0 -20" width="%d" height="170"
-                      fontSize="150" fontStyle="Bold" color="%s" raycastTarget="false">%s</Text>
-                %s
-              </Panel>
-              %s
-            </Panel>
-          </Panel>
-%s
-        </HorizontalLayout>
-        <HorizontalLayout preferredHeight="%d" spacing="6" childForceExpandWidth="false">
-%s
-%s
-        </HorizontalLayout>
-        <HorizontalLayout preferredHeight="%d" spacing="6" childForceExpandWidth="false">
-%s
-%s
-        </HorizontalLayout>
-      </VerticalLayout>]], PLAY_H, BAR_H, LIT, PALE, RED, PALE, RESET.LABEL, LIT, PALE, HOMEBREW.button(), BAR_H, LIT, PALE, LIT, PALE, LIT, PALE,
-        VP_ROW_H, vpXml(1), SETUP.W, LIT, tostring(turn >= 1), SETUP.W - 6, VP_ROW_H - 6,
-        plateButton("turnBtn", "onAdvanceTurn"), SETUP.W - 30, PALE, SETUP.W - 30, PALE, tostring(turn), SETUP.noteXml(),
-        SETUP.xml(), vpXml(2), NAME_H, nameXml(1), nameXml(2), BOTTLE_H, bottleXml(1), bottleXml(2))
+    return group("playSection", not HOMEBREW.page,
+        table.concat({ sideXml(1), sideXml(2), columnXml(), linksXml(), railsXml() }, "\n"))
 end
 
 -- A homebrew set's name or description as a Text shows it (see HOMEBREW).
@@ -1900,109 +2381,188 @@ local function hbText(s)
 end
 
 -- Radio button `k` of a set (1: the rules as written, 2: the set's) as it
--- looks on the page: lit, "● ...", while it is the page's choice (see
--- HOMEBREW.pick), else washed, "○ ..." -- its colours, ink and label --
--- and the description under the set: what the chosen one does.
+-- looks on the page: gold, "● ...", while it is the page's choice (see
+-- HOMEBREW.pick), else plain, "○ ..." -- its look and label -- and the
+-- description under the set: what the chosen one does.
 local function hbLook(set, k)
     local on = HOMEBREW.pick[set.id] == true
     local chosen = on == (k == 2)
-    return chosen and LIT or WASH, chosen and PALE or INK,
-           (chosen and "● " or "○ ") .. hbText(k == 2 and set.name or set.off),
+    return chosen and "gold" or "plain", (chosen and "● " or "○ ") .. hbText(k == 2 and set.name or set.off),
            hbText(on and set.desc or set.offDesc)
 end
 
--- The Homebrew Rules page, in the play section's place (hidden until the
--- main page's button opens it): its heading with Back, a rule, and for
--- each set its two radio buttons (hbOpt_<i>_1: as written, hbOpt_<i>_2:
--- the set's) over its description (hbDesc_<i>), then -- at the bottom,
--- the room left between -- Apply selected Rules to all Models (homebrewApply).
-local function homebrewXml()
-    local rows, n = {}, #HOMEBREW.SETS
-    for i, set in ipairs(HOMEBREW.SETS) do
-        local c1, i1, l1, desc = hbLook(set, 1)
-        local c2, i2, l2 = hbLook(set, 2)
-        -- a line between two sets
-        rows[i] = (i > 1 and string.format('        <Image preferredHeight="%d" color="#29313366" />\n', HOMEBREW.SEP_H)
-            or "") .. string.format([[
-        <HorizontalLayout preferredHeight="%d" spacing="6">
-          <Button id="hbOpt_%d_1" fontSize="15" colors="%s" textColor="%s" onClick="onHomebrewOption">%s</Button>
-          <Button id="hbOpt_%d_2" fontSize="15" colors="%s" textColor="%s" onClick="onHomebrewOption">%s</Button>
-        </HorizontalLayout>
-        <Panel preferredHeight="%d" color="#00000000">
-          <Text id="hbDesc_%d" width="%d" height="%d" fontSize="13" fontStyle="Bold" alignment="MiddleLeft"
-                horizontalOverflow="Wrap" raycastTarget="false">%s</Text>
-        </Panel>]], HB_ROW_H, i, c1, i1, l1, i, c2, i2, l2, HB_DESC_H, i, ROW_W - 4, HB_DESC_H,
-            desc)
+-- The Homebrew Rules page's bounds: the main page's -- the left side
+-- panel's left edge to the right one's right edge, the column's top to the
+-- buttons' bottom.
+function HOMEBREW.box()
+    local L = LAYOUT
+    return { L.SIDES[1][1], L.MID[2], L.SIDES[2][3], L.RAIL[2] }
+end
+
+-- The page's outline, points round from the top left: the side panels'
+-- top with their outer corners cut (SIDE_CUT), the column's top rising
+-- between them -- its cuts (MID_CUT) run on down to the side panels' top --
+-- and the bottom corners cut as the buttons' row's are (RAIL_CUT). The
+-- frame round the panel has this outline too. Also the corners' cuts and
+-- where the column's cuts meet the side panels' top (sx0, sx1).
+function HOMEBREW.outline()
+    local L, b = LAYOUT, HOMEBREW.box()
+    local top, sc, mc, rc = L.SIDES[1][2], L.SIDE_CUT[1], L.MID_CUT[1], L.RAIL_CUT
+    local rise = top - b[2]
+    local sx0, sx1 = L.MID[1] + mc - rise, L.MID[3] - mc + rise
+    return {
+        { b[1], top + sc }, { b[1] + sc, top }, { sx0, top }, { L.MID[1] + mc, b[2] },
+        { L.MID[3] - mc, b[2] }, { sx1, top }, { b[3] - sc, top }, { b[3], top + sc },
+        { b[3], b[4] - rc }, { b[3] - rc, b[4] }, { b[1] + rc, b[4] }, { b[1], b[4] - rc },
+    }, sc, rc, sx0, sx1
+end
+
+-- How far down the page each set comes after the one before: what is left
+-- between HEAD (under the side panels' top) and FOOT, shared out among the
+-- sets.
+function HOMEBREW.step()
+    local H, box = HOMEBREW, HOMEBREW.box()
+    return (box[4] - H.FOOT - LAYOUT.SIDES[1][2] - H.HEAD) / math.max(1, #H.SETS)
+end
+
+-- The page's shape: filled -- the body (under the side panels' top) and
+-- the column's top over it, each pieced as SHAPE.fill does -- outlined in
+-- gold, every cut accented: the body's four corners ACCENT along the edges,
+-- the column's two cuts MID_ACCENT on along the side panels' top and the
+-- column's top.
+function HOMEBREW.shapeXml()
+    local L, H, b = LAYOUT, HOMEBREW, HOMEBREW.box()
+    local pts, sc, rc, sx0, sx1 = HOMEBREW.outline()
+    local top, len = L.SIDES[1][2], L.MID_ACCENT
+    local rise = top - b[2]
+    local body, cut = { b[1], top, b[3], b[4] }, { sc, sc, rc, rc }
+    local fill = SHAPE.fill(body, cut, LOOK.FILL) ..
+        SHAPE.fill({ sx0, b[2], sx1, top + 1 }, { rise, rise, 0, 0 }, LOOK.FILL)
+    local line = SHAPE.lines(pts, LOOK.LINE, LOOK.GOLD, true)
+    local accents = SHAPE.accents(body, cut, { 1, 2, 3, 4 }, H.ACCENT)
+    for _, c in ipairs({ { sx0, -1 }, { sx1, 1 } }) do
+        local x, way = c[1], c[2]
+        accents = accents .. SHAPE.lines({ { x + way * len, top }, { x, top }, { x - way * rise, b[2] },
+            { x - way * (rise + len), b[2] } }, LOOK.ACCENT, LOOK.GOLD, false)
     end
-    -- the room left: the page less its heading, rule, rows, the lines
-    -- between them and Apply, and the 6 between each two of them
-    local spare = math.max(0, PLAY_H - HB_HEAD_H - 3 - n * (HB_ROW_H + HB_DESC_H) - (n - 1) * HOMEBREW.SEP_H
-        - HB_APPLY_H - 6 * (3 * n + 2))
-    local ac, ai = HOMEBREW.applyLook()
-    return string.format([[
-      <VerticalLayout id="homebrewPage" active="%s" preferredHeight="%d" spacing="6" childForceExpandHeight="false">
-        <HorizontalLayout preferredHeight="%d" spacing="6" childForceExpandWidth="false">
-          <Panel preferredWidth="%d" color="#00000000">
-            <Text width="%d" height="%d" fontSize="18" fontStyle="Bold" alignment="MiddleLeft">Homebrew Rules</Text>
-          </Panel>
-          <Button id="homebrewBack" preferredWidth="110" fontSize="15" onClick="onHomebrewBack">Back</Button>
-        </HorizontalLayout>
-        <Image preferredHeight="3" color="#29313399" />
-%s
-        <Panel preferredHeight="%d" color="#00000000" />
-        <Button id="homebrewApply" preferredHeight="%d" fontSize="18" colors="%s" textColor="%s"
-                onClick="onHomebrewApply">Apply selected Rules to all Models</Button>
-      </VerticalLayout>]], tostring(HOMEBREW.page), PLAY_H, HB_HEAD_H, ROW_W - 116, ROW_W - 116, HB_HEAD_H,
-        table.concat(rows, "\n"), spare, HB_APPLY_H, ac, ai)
+    return fill .. line .. accents
 end
 
--- The whole panel (see panelShell): the play section under the header --
--- or, in its place, the Homebrew Rules page.
+-- Set `i`'s description as the page shows it: the chosen choice's,
+-- fitted (its text and size).
+function HOMEBREW.desc(i)
+    local H = HOMEBREW
+    local _, _, desc = hbLook(H.SETS[i], 1)
+    return SHAPE.fit(desc, H.DESC_W, H.DESC_H, H.DESC_FONT)
+end
+
+-- The Homebrew Rules page in place of the main page (hidden until its
+-- button opens it): a panel with the title and Back (homebrewBack), and for
+-- each set its two radio buttons (hbOpt_<i>_1: as written, hbOpt_<i>_2: the
+-- set's) over its description (hbDesc_<i>), thin rules between the sets,
+-- and at the bottom Apply Selected Rules (homebrewApply).
+local function homebrewXml()
+    local H, box = HOMEBREW, HOMEBREW.box()
+    local x0, y0, x1, y1 = box[1], box[2], box[3], box[4]
+    local cx, step, top = (x0 + x1) / 2, HOMEBREW.step(), LAYOUT.SIDES[1][2]
+    -- the title's room: the column's top as wide as it is where the
+    -- capitals' tops are, less its outline
+    local _, _, _, sx0, sx1 = HOMEBREW.outline()
+    local room = sx1 - sx0 - 2 * (top - y0 - H.TITLE + H.TITLE_FONT * 0.4) - 4 * LOOK.LINE
+    local title = "HOMEBREW RULES"
+    local _, size = SHAPE.fitLine(title, room, H.TITLE_FONT)
+    local out = {
+        HOMEBREW.shapeXml(),
+        SHAPE.text(cx, y0 + H.TITLE, room, H.TITLE_FONT * 1.4, title, size, LOOK.HEAD),
+        SHAPE.button({ box = { x1 + H.BACK[1], top + H.BACK[2], x1 + H.BACK[3], top + H.BACK[4] }, label = "BACK",
+            size = H.BACK_FONT, fn = "onHomebrewBack", btn = "homebrewBack" }),
+    }
+    for i, set in ipairs(H.SETS) do
+        local y = top + H.HEAD + (i - 1) * step
+        for k = 1, 2 do
+            local look, label = hbLook(set, k)
+            local bx = k == 1 and cx - H.RADIO_GAP / 2 - H.RADIO_W or cx + H.RADIO_GAP / 2
+            local id = string.format("hbOpt_%d_%d", i, k)
+            out[#out + 1] = SHAPE.button({ box = { bx, y, bx + H.RADIO_W, y + H.RADIO_H }, look = look, label = label,
+                size = H.RADIO_FONT, fn = "onHomebrewOption", btn = id, id = id, txt = id .. "Txt" })
+        end
+        local desc, size = HOMEBREW.desc(i)
+        out[#out + 1] = SHAPE.text(cx, y + H.DESC, H.DESC_W, H.DESC_H, desc, size, LOOK.DIM, "hbDesc_" .. i)
+        if i < #H.SETS then
+            out[#out + 1] = (SHAPE.lines({ { cx - H.SEP_W / 2, y + step - H.SEP_UP }, { cx + H.SEP_W / 2, y + step - H.SEP_UP } },
+                LOOK.THIN, LOOK.SEP))
+        end
+    end
+    out[#out + 1] = SHAPE.button({ box = { cx - H.APPLY_W / 2, y1 - H.APPLY_UP - H.APPLY_H, cx + H.APPLY_W / 2,
+        y1 - H.APPLY_UP }, look = HOMEBREW.applyLook(), label = "APPLY SELECTED RULES", size = H.APPLY_FONT,
+        fn = "onHomebrewApply", btn = "homebrewApply", id = "homebrewApply", txt = "homebrewApplyTxt" })
+    return group("homebrewPage", H.page, table.concat(out, "\n"))
+end
+
+-- The whole panel: the main page, or in its place the Homebrew Rules page
+-- -- built afresh, so what is noted of its shapes is too.
 local function panelXml()
-    return panelShell({ id = "controllerPanel", position = PANEL.position, rotation = PANEL.rotation,
-        scale = PANEL.scale, width = PANEL_W, height = PANEL_H, title = CONTROLLER_NAME,
-        version = VERSION, body = playXml() .. "\n" .. homebrewXml() })
+    SHAPE.parts = {}
+    return string.format([[
+<Defaults>
+  <Panel rectAlignment="MiddleCenter"/>
+  <Image rectAlignment="MiddleCenter"/>
+  <Text rectAlignment="MiddleCenter"/>
+  <Button rectAlignment="MiddleCenter"/>
+  <InputField rectAlignment="MiddleCenter"/>
+</Defaults>
+<Panel id="controllerPanel" position="%s" rotation="%s" scale="%s" width="%d" height="%d" color="#00000000">
+%s
+%s
+</Panel>]], PANEL.position, PANEL.rotation, PANEL.scale, PANEL_W, PANEL_H, playXml(), homebrewXml())
 end
 
--- The picture behind the panel, and the Bottle Check's die, as the
--- panel's own UI assets.
+-- The panel's pictures as its own UI assets (those with a link).
 local function panelAssets()
-    local out = { { name = "mundanePanelBg", url = PANEL_BG } }
-    if DIE_ICON ~= "" then out[#out + 1] = { name = "mundaneDie", url = DIE_ICON } end
+    local out = {}
+    for _, a in ipairs({ { "mundaneEdge", ART.EDGE }, { "mundaneFrame", ART.FRAME }, { "mundaneGear", ART.GEAR },
+                         { "mundaneGlow", ART.GLOW }, { "mundaneDie", DIE_ICON } }) do
+        if a[2] ~= "" then out[#out + 1] = { name = a[1], url = a[2] } end
+    end
     return out
 end
 
--- A player's victory points, clicking their plate: left click one up,
--- right click one down (never below 0).
+-- A player's victory points, clicking them: left click one up, right click
+-- one down (never below 0) -- not while the side has no gang (they don't
+-- show then).
 function onVp(player, value, id)
     local n = tonumber(tostring(id or ""):match("^vpBtn_(%d)$"))
-    if not (n and vp[n]) then return end
+    if not (n and vp[n]) or not BOTTLE.named(n) then return end
     vp[n] = math.max(0, vp[n] + (tostring(value) == "-2" and -1 or 1))
     setLabel("vpText_" .. n, tostring(vp[n]))
 end
 
 -- A player's name typed in -- the gang whose Bottle Check that side shows
--- (a model put on the plate types it in, see BOTTLE.tick).
+-- (a model put on the side panel types it in, see BOTTLE.tick). The hint
+-- an unnamed side shows changes nothing, nor does the name as shown (in
+-- capitals).
 function onVpName(player, value, id)
     local n = tonumber(tostring(id or ""):match("^vpName_(%d)$"))
-    if n and vpNames[n] then
-        vpNames[n] = trim(tostring(value or ""))
+    if not (n and vpNames[n]) then return end
+    local name = trim(tostring(value or ""))
+    if name ~= BOTTLE.HINT and name:lower() ~= trim(tostring(vpNames[n])):lower() then
+        vpNames[n] = name
         BOTTLE.hand[n] = nil
-        BOTTLE.draw(n)
-        SETUP.drawAll()
     end
+    BOTTLE.drawSide(n)
+    SETUP.drawAll()
 end
 
 -- ── The Bottle Check ─────────────────────────────────────────────
 -- A gang with a fighter taken Out of Action this turn must take one: the
--- fighter's card tells this object (onFighterOut), and that gang's panel
--- -- the side whose name is the gang's -- glows until the check is rolled
--- or the turn changes; once a turn. It is taken on 2D6
--- against the best Ld of the gang's fighters still on the table (not Out
--- of Action), Loners left out unless every one is a Loner -- one higher
--- for each of them with the Iron Will skill, the number then green. A
--- player puts one of their gang's models on their victory points plate to
--- name their side after the gang.
+-- fighter's card tells this object (onFighterOut), and that gang's side
+-- panel -- the side whose name is the gang's -- shows a dark red plate
+-- behind its check until the check is rolled or the turn changes; once a
+-- turn. It is taken on 2D6 against the best Ld of the gang's fighters still
+-- on the table (not Out of Action), Loners left out unless every one is a
+-- Loner -- one higher for each of them with the Iron Will skill, the number
+-- then green. A player puts one of their gang's models on their side panel
+-- to name their side after the gang.
 
 -- A gang's name as the check compares it: trimmed, any case.
 function BOTTLE.key(name) return trim(tostring(name or "")):lower() end
@@ -2090,16 +2650,13 @@ end
 -- The colour side `n`'s number shows in: one set by hand in its own, one
 -- Iron Will raises (by `will`) green, else plain.
 function BOTTLE.ink(n, will)
-    return BOTTLE.hand[n] and BOTTLE.HAND or (will or 0) > 0 and BOTTLE.UP or PALE
+    return BOTTLE.hand[n] and BOTTLE.HAND or (will or 0) > 0 and BOTTLE.UP or LOOK.TEXT
 end
 
--- Whether side `n`'s check must be taken (its panel glows), and its colour.
+-- Whether side `n`'s check must be taken (its plate shows).
 function BOTTLE.lit(n)
     local key = BOTTLE.key(vpNames[n])
     return key ~= "" and BOTTLE.due[key] == "due"
-end
-function BOTTLE.color(n)
-    return BOTTLE.lit(n) and BOTTLE.LIT or BOTTLE.PLAIN
 end
 
 -- Whether side `n` has a name of its own (not the "Player <n>" it starts
@@ -2109,12 +2666,26 @@ function BOTTLE.named(n)
     return key ~= "" and key ~= ("player " .. n)
 end
 
--- Side `n`'s panel redrawn: its glow and its Ld.
+-- Side `n`'s Bottle Check redrawn: its plate and its Ld.
 function BOTTLE.draw(n)
-    self.UI.setAttribute("bottle_" .. n, "color", BOTTLE.color(n))
+    self.UI.setAttribute("bottle_" .. n, "active", tostring(BOTTLE.lit(n)))
     local v, will = BOTTLE.value(n)
     setLabel("bottleValTxt_" .. n, v and tostring(v) or "-")
     self.UI.setAttribute("bottleValTxt_" .. n, "color", BOTTLE.ink(n, will))
+end
+
+-- Side `n`'s panel redrawn for its name: the name (or the hint), its
+-- points or how to name the side, and its Bottle Check.
+function BOTTLE.drawSide(n)
+    local text, size = BOTTLE.nameView(n)
+    self.UI.setAttribute("vpName_" .. n, "text", text)
+    local S = LAYOUT.SIDE
+    for a, v in SHAPE.sized(size, S.NAME_W, S.NAME_H):gmatch('(%w+)="([^"]*)"') do
+        self.UI.setAttribute("vpName_" .. n, a, v)
+    end
+    self.UI.setAttribute("vpShow_" .. n, "active", tostring(BOTTLE.named(n)))
+    self.UI.setAttribute("vpHint_" .. n, "active", tostring(not BOTTLE.named(n)))
+    BOTTLE.draw(n)
 end
 
 -- A new turn (either way): no check to take any more, nothing set by hand.
@@ -2123,44 +2694,30 @@ function BOTTLE.newTurn()
     for n = 1, 2 do BOTTLE.draw(n) end
 end
 
--- Where a part of the play section lies on this object, in its local x / z,
--- worked out from the layout (panelXml / playXml) and PANEL through
--- panelLocal: side `n`'s
--- victory points plate (`what` "vp", with its size), its gang name and
--- Bottle Check ("bottle") or, for "line", the middle of the line the dice
--- fall in, DICE.BELOW under the panel (any `n`).
-function BOTTLE.spot(n, what)
-    local sc = {}
-    for v in tostring(PANEL.scale):gmatch("%-?[%d%.]+") do sc[#sc + 1] = tonumber(v) end
-    local side = n == 1 and -1 or 1
-    local rowTop = PANEL_H / 2 - 3 - 9 - 40 - 6 - 2 * (BAR_H + 6)   -- the victory points row's top
-    local x, y, w, h = side * (ROW_W / 2 - 65), rowTop - VP_ROW_H / 2, 130, VP_ROW_H
-    if what == "bottle" then       -- the gang's name and its Bottle Check under it
-        x, y, w, h = side * (ROW_W + 6) / 4, rowTop - VP_ROW_H - 6 - (NAME_H + 6 + BOTTLE_H) / 2,
-            (ROW_W - 6) / 2, NAME_H + 6 + BOTTLE_H
-    end
-    if what == "line" then
-        x, y = 0, -PANEL_H / 2 - DICE.BELOW
-    end
-    local sx, sy = sc[1] or 1, sc[2] or 1
-    local lx, lz = panelLocal(PANEL, x, y)
-    return lx, lz, w * sx / 100, h * sy / 100
+-- Where side `n`'s panel lies on this object, worked out from the layout
+-- (LAYOUT) and STAND: its middle (local x, y, z: on the panel's face), its
+-- width and how far it reaches across the table (local units), and how much
+-- higher its top edge stands than its bottom.
+function BOTTLE.spot(n)
+    local k = (tonumber(tostring(PANEL.scale):match("[%d.]+")) or 1) / 100
+    local b = LAYOUT.SIDES[n] or LAYOUT.SIDES[1]
+    local x, y, z = STAND.point((b[1] + b[3]) / 2 - PANEL_W / 2, PANEL_H / 2 - (b[2] + b[4]) / 2)
+    local a, h = math.rad(STAND.ANGLE), (b[4] - b[2]) * k
+    return x, y, z, (b[3] - b[1]) * k, h * math.cos(a), h * math.sin(a)
 end
 
--- The first model with a gang tag standing on side `n`'s victory points
--- plate or its gang name / Bottle Check (nil: none).
+-- The first model with a gang tag standing on side `n`'s panel (nil: none):
+-- one box looked through over the side panel, from its lowest point (its
+-- bottom edge) up.
 function BOTTLE.modelOn(n)
-    return BOTTLE.modelAt(n, "vp") or BOTTLE.modelAt(n, "bottle")
-end
-function BOTTLE.modelAt(n, what)
     if not (Physics and Physics.cast and self.positionToWorld) then return nil end
-    local x, z, w, h = BOTTLE.spot(n, what)
-    local p = self.positionToWorld({ x, BOTTLE.TOP, z })
+    local x, y, z, w, d, rise = BOTTLE.spot(n)
+    local p = self.positionToWorld({ x, y - rise / 2, z })
     local okS, sc = pcall(function() return self.getScale() end)
     sc = okS and type(sc) == "table" and sc or {}
     local okR, rot = pcall(function() return self.getRotation() end)
     local hits = Physics.cast({ origin = { p.x, p.y + 1.5, p.z }, direction = { 0, 1, 0 }, type = 3,
-        size = { w * (sc.x or 1), 3, h * (sc.z or 1) }, orientation = okR and rot or nil, max_distance = 0 }) or {}
+        size = { w * (sc.x or 1), 3, d * (sc.z or 1) }, orientation = okR and rot or nil, max_distance = 0 }) or {}
     for _, hit in ipairs(hits) do
         local o = hit.hit_object
         if o and o ~= self and BOTTLE.gangName(o) then return o end
@@ -2169,12 +2726,12 @@ end
 
 -- Half a second after anything on the table is picked up, put down or
 -- removed (BOTTLE.soon), and every BOTTLE.POLL seconds besides: a model
--- newly put on a victory points plate names that side after its gang (said
--- in chat, the model flashed) -- not while the Homebrew Rules page hides
--- the plates. Looking only when something moved spares a slow machine the
--- plates' physics casts twice a second all game.
+-- newly put on a side panel names that side after its gang (said in chat,
+-- the model flashed) -- not while the Homebrew Rules page hides the side
+-- panels. Looking only when something moved spares a slow machine the
+-- panels' physics casts twice a second all game.
 function BOTTLE.tick()
-    if HOMEBREW.page then return end      -- the plates are hidden behind the Homebrew Rules page
+    if HOMEBREW.page then return end      -- the side panels are hidden behind the Homebrew Rules page
     for n = 1, 2 do
         local o = BOTTLE.modelOn(n)
         if o ~= BOTTLE.seen[n] then
@@ -2182,13 +2739,12 @@ function BOTTLE.tick()
             local g = o and BOTTLE.gangName(o)
             if g then
                 vpNames[n] = g
-                self.UI.setAttribute("vpName_" .. n, "text", g)
+                BOTTLE.hand[n] = nil
+                BOTTLE.drawSide(n)
                 SETUP.drawAll()
                 pcall(function() o.highlightOn({ 0.9, 0.8, 0.4 }, 1) end)
                 printToAll(string.format("%s%s play on the %s.", CHAT_PREFIX, g, n == 1 and "left" or "right"),
                     { 0.9, 0.8, 0.4 })
-                BOTTLE.hand[n] = nil
-                BOTTLE.draw(n)
             end
         end
     end
@@ -2211,36 +2767,57 @@ function BOTTLE.throw(n, color, done)
 end
 
 -- ── The dice ─────────────────────────────────────────────────────
--- Every roll falls in one line under the panel (see DICE): a card's (see
--- throwDice), a Bottle Check's, the Roll Dice / Firepower / Injuries
--- buttons'.
+-- Every roll falls in a line under the panel (see DICE): a card's (see
+-- throwDice), a Bottle Check's -- under the column -- and the Roll Dice /
+-- Firepower / Injuries buttons' under the side panel they were clicked on,
+-- so both sides can roll at once (a roll-off).
 -- A roll: { kinds = { "d6", "firepower", ... }, color = the roller's, and
 -- who hears of it: done(faces, digital, dice) and / or a card (from = its
 -- GUID, token), or -- own, the buttons' -- said on everyone's screen;
 -- apart = its dice fall in a row in the order thrown, that far apart, and
 -- lie so (none: they fall from the middle out, and lie STEP apart);
--- inOrder = never lined up by SORT }.
--- DICE.busy is the roll falling now, DICE.queue the rolls waiting for it,
--- DICE.shown the last roll's dice, lined up; DICE.open the buttons' roll
--- still gathering clicks. The tokens let a newer wait win over an older one.
-DICE.busy, DICE.queue, DICE.shown, DICE.open = nil, {}, {}, nil
-DICE.joinToken = 0
+-- inOrder = never lined up by SORT; lane = which line: 1 / 2 under that
+-- side panel, nil under the column }.
+-- Each line (DICE.lanes, see DICE.lane) goes on its own: its busy = the
+-- roll falling now, queue = the rolls waiting for it, shown = the last
+-- roll's dice, lined up, open = the buttons' roll still gathering clicks.
+-- The tokens let a newer wait win over an older one.
+DICE.lanes = {}
 DICE.ORDER = { d6 = 1, firepower = 2, injury = 3 }   -- mixed kinds line up in this order
 
--- Throws roll `req` now, or once the one falling has been lined up.
-function DICE.request(req)
-    if DICE.busy or #DICE.queue > 0 then DICE.queue[#DICE.queue + 1] = req else DICE.start(req) end
+-- Line `key`'s state (1 / 2: under that side panel; nil: under the column).
+function DICE.lane(key)
+    key = LAYOUT.SIDES[key] and key or "main"
+    local l = DICE.lanes[key]
+    if not l then
+        l = { key = key, queue = {}, shown = {}, joinToken = 0 }
+        DICE.lanes[key] = l
+    end
+    return l
 end
 
--- The line the dice fall in: its middle in the world, and the way it runs
--- (the panel's x, flat, one world unit long) -- nil outside TTS.
-function DICE.line()
+-- Throws roll `req` now, or once the one falling in its line has been
+-- lined up.
+function DICE.request(req)
+    local l = DICE.lane(req.lane)
+    if l.busy or #l.queue > 0 then l.queue[#l.queue + 1] = req else DICE.start(req) end
+end
+
+-- The line the dice of line `lane` fall in: its middle in the world -- on
+-- the table in front of the panel, DICE.BELOW panel units out from its
+-- bottom edge, under the column's middle or side panel `lane`'s -- and the
+-- way it runs (the panel's x, flat, one world unit long) -- nil outside
+-- TTS.
+function DICE.line(lane)
     if not self.positionToWorld then return nil end
-    local x, z = BOTTLE.spot(1, "line")
-    local ox, oz = panelLocal(PANEL, 0, 0)
-    local rx, rz = panelLocal(PANEL, 100, 0)              -- the panel's x, one local unit
+    local k = (tonumber(tostring(PANEL.scale):match("[%d.]+")) or 1) / 100
+    local b = LAYOUT.SIDES[lane]
+    local x, _, z = STAND.point(b and (b[1] + b[3]) / 2 - PANEL_W / 2 or 0, -PANEL_H / 2)
+    z = z + DICE.BELOW * k
+    local ox = STAND.point(0, 0)
+    local rx = STAND.point(100, 0)                        -- the panel's x, one local unit
     local ok, a, b = pcall(function()
-        return self.positionToWorld({ x, 0, z }), self.positionToWorld({ x + rx - ox, 0, z + rz - oz })
+        return self.positionToWorld({ x, 0, z }), self.positionToWorld({ x + rx - ox, 0, z })
     end)
     if not (ok and a and b) then return nil end
     local ax, ay, az = a.x or a[1], a.y or a[2], a.z or a[3]
@@ -2253,9 +2830,10 @@ end
 -- A roll begins: the last roll's dice go, and its dice fall (one each of
 -- req.kinds) -- or, outside TTS, its faces are rolled digitally at once.
 function DICE.start(req)
-    DICE.clear()
-    DICE.busy, req.dice = req, {}
-    req.mid, req.dir = DICE.line()
+    local l = DICE.lane(req.lane)
+    DICE.clear(l)
+    l.busy, req.dice = req, {}
+    req.mid, req.dir = DICE.line(req.lane)
     local real = req.mid ~= nil and spawnObject ~= nil and Wait ~= nil and Wait.condition ~= nil
     for _, kind in ipairs(req.kinds) do
         if real then DICE.spawn(req, kind) else req.dice[#req.dice + 1] = { kind = kind } end
@@ -2392,9 +2970,10 @@ function DICE.finish(req)
         end)
     end
     DICE.lineUp(req, list)
-    DICE.shown, DICE.busy = list, nil
+    local l = DICE.lane(req.lane)
+    l.shown, l.busy = list, nil
     DICE.deliver(req, thrown)
-    DICE.next()
+    DICE.next(l)
 end
 
 -- The dice of `list` moved into a row along the line, in its order, STEP
@@ -2468,11 +3047,12 @@ RULES.follow(function()
     for k, r in pairs(RULES.injury) do DICE.INJURY[k], DICE.RANK[k] = r.short or r.label, r.rank or 0 end
 end)
 
--- The buttons' roll said on everyone's screen, in the roller's colour: the
--- D6 and their total, the Firepower dice (CHART) and their hits -- and
--- whether an Ammo check is due -- and the Injury dice's results, every
--- one and the best after them ("Inj, OOA = Inj"; no count of dice, no
--- faces).
+-- The buttons' roll said on everyone's screen, in the roller's colour, as
+-- the gang of the side panel it was rolled under ("[Alpha] rolls ...";
+-- a side with no gang: "[Player 1] rolls ..."): the D6 and their total,
+-- the Firepower dice (CHART) and their hits -- and whether an Ammo check
+-- is due -- and the Injury dice's results, every one and the best after
+-- them ("Inj, OOA = Inj"; no count of dice, no faces).
 function DICE.say(req, list, digital)
     local d6, fp, inj, total, hits, ammo, best = {}, {}, {}, 0, 0, false, nil
     for _, d in ipairs(list) do
@@ -2505,55 +3085,68 @@ function DICE.say(req, list, digital)
         local ok, c = pcall(stringColorToRGB, req.color)
         if ok and c then rgb = c end
     end
-    DICE.announce(string.format("%s%s rolls %s%s", CHAT_PREFIX, req.color or "Someone", table.concat(parts, "; "),
+    local who = CHAT_PREFIX .. (req.color or "Someone")
+    if LAYOUT.SIDES[req.lane] then who = "[" .. SETUP.side(req.lane) .. "]" end
+    DICE.announce(string.format("%s rolls %s%s", who, table.concat(parts, "; "),
         digital and " (rolled digitally)" or ""), rgb)
 end
 
--- The last roll's dice taken off the table as the next roll begins --
--- with any left lying from before a save (they carry DICE.TAG).
-function DICE.clear()
-    for _, d in ipairs(DICE.shown) do
+-- Line `l`'s last roll's dice taken off the table as its next roll begins
+-- -- with any left lying from before a save (they carry DICE.TAG; the
+-- other lines' dice, falling or shown, stay).
+function DICE.clear(l)
+    for _, d in ipairs(l.shown) do
         if d.obj then pcall(function() if not d.obj.isDestroyed() then d.obj.destruct() end end) end
     end
-    DICE.shown = {}
-    pcall(function() for _, o in ipairs(getObjectsWithTag(DICE.TAG)) do o.destruct() end end)
-end
-
--- The next roll waiting, if any: thrown DICE.NEXT seconds after the last
--- was lined up, so that one can be seen (at once when nothing was thrown).
-function DICE.next()
-    if #DICE.queue == 0 then return end
-    local function go()
-        if DICE.busy or #DICE.queue == 0 then return end
-        DICE.start(table.remove(DICE.queue, 1))
+    l.shown = {}
+    local keep = {}
+    for _, o in pairs(DICE.lanes) do
+        for _, d in ipairs(o.shown) do if d.obj then keep[d.obj] = true end end
+        for _, d in ipairs(o.busy and o.busy.dice or {}) do if d.obj then keep[d.obj] = true end end
     end
-    if DICE.shown[1] and DICE.shown[1].obj then Wait.time(go, DICE.NEXT) else go() end
+    pcall(function()
+        for _, o in ipairs(getObjectsWithTag(DICE.TAG)) do if not keep[o] then o.destruct() end end
+    end)
 end
 
--- A click on Roll Dice / Roll Firepower / Roll Injuries: one more die of
--- `kind` for the clicking player's roll while it is still gathering, else
--- a roll of its own (another player's gathering one is thrown first). It
--- is thrown -- all its dice at once -- when no click has come for
--- DICE.JOIN seconds.
-function DICE.click(kind, player)
+-- Line `l`'s next roll waiting, if any: thrown DICE.NEXT seconds after the
+-- last was lined up, so that one can be seen (at once when nothing was
+-- thrown).
+function DICE.next(l)
+    if #l.queue == 0 then return end
+    local function go()
+        if l.busy or #l.queue == 0 then return end
+        DICE.start(table.remove(l.queue, 1))
+    end
+    if l.shown[1] and l.shown[1].obj then Wait.time(go, DICE.NEXT) else go() end
+end
+
+-- A click on Roll Dice / Roll Firepower / Roll Injuries under side panel
+-- `lane`: one more die of `kind` for the clicking player's roll there
+-- while it is still gathering, else a roll of its own (another player's
+-- gathering one there is thrown first). It is thrown -- all its dice at
+-- once, under that side panel -- when no click has come for DICE.JOIN
+-- seconds.
+function DICE.click(kind, player, lane)
     local color = player and player.color or nil
-    local req = DICE.open
+    local l = DICE.lane(lane)
+    local req = l.open
     if req and req.color ~= color then
-        DICE.open = nil
+        l.open = nil
         DICE.request(req)
         req = nil
     end
     if req then
         if #req.kinds < DICE.MAX then req.kinds[#req.kinds + 1] = kind end
     else
-        req = { kinds = { kind }, color = color, own = true }
-        DICE.open = req
+        req = { kinds = { kind }, color = color, own = true, lane = lane }
+        l.open = req
     end
-    DICE.joinToken = DICE.joinToken + 1
-    local t = DICE.joinToken
+    l.joinToken = l.joinToken + 1
+    local t = l.joinToken
     Wait.time(function()
-        if DICE.joinToken == t and DICE.open == req then
-            DICE.open = nil
+        if l.joinToken == t and l.open == req then
+            l.open = nil
             DICE.request(req)
         end
     end, DICE.JOIN)
@@ -2578,9 +3171,11 @@ function throwDice(t)
     return true
 end
 
-function onRollDiceBtn(player, value, id) DICE.click("d6", player) end
-function onRollFirepowerBtn(player, value, id) DICE.click("firepower", player) end
-function onRollInjuriesBtn(player, value, id) DICE.click("injury", player) end
+-- The side panel a rail button sits under (its id ends in _1 / _2).
+function DICE.side(id) return tonumber(tostring(id or ""):match("_(%d+)$")) end
+function onRollDiceBtn(player, value, id) DICE.click("d6", player, DICE.side(id)) end
+function onRollFirepowerBtn(player, value, id) DICE.click("firepower", player, DICE.side(id)) end
+function onRollInjuriesBtn(player, value, id) DICE.click("injury", player, DICE.side(id)) end
 
 -- A fighter's card: the fighter has gone Out of Action (t = { gang, name }),
 -- or is back (t.back: revived). Its gang's Ld is looked at again either
@@ -2600,7 +3195,7 @@ function onFighterOut(t)
     if not due then return end
     printToAll(string.format("[%s] %s is Out of Action: %s must take a Bottle Check this round.%s", gang,
         tostring(t.name or "A fighter"), gang,
-        shown and "" or " Put one of its models on a Victory Points plate of the Mundane Controller."), { 1, 0.55, 0.2 })
+        shown and "" or " Put one of its models on a side panel of the Mundane Controller."), { 1, 0.55, 0.2 })
 end
 
 -- "Bottle Check" over a side's diamonds, left click: the reminder that its
@@ -2613,7 +3208,7 @@ function onBottleHead(player, value, id)
     if not n or tostring(value) == "-2" or tostring(value) == "-3" then return end
     if not BOTTLE.named(n) then
         broadcastToAll(string.format("%sBottle Check: no gang on the %s yet -- put one of your gang's models on your " ..
-            "Victory Points plate of the Mundane Controller.", CHAT_PREFIX, n == 1 and "left" or "right"), { 1, 0.55, 0.2 })
+            "side panel of the Mundane Controller.", CHAT_PREFIX, n == 1 and "left" or "right"), { 1, 0.55, 0.2 })
         return
     end
     local key = BOTTLE.key(vpNames[n])
@@ -2648,7 +3243,7 @@ function onBottleRoll(player, value, id)
     if not n then return end
     if not BOTTLE.named(n) then
         broadcastToAll(string.format("%sBottle Check: no gang on the %s yet -- put one of your gang's models on your " ..
-            "Victory Points plate of the Mundane Controller.", CHAT_PREFIX, n == 1 and "left" or "right"), { 1, 0.55, 0.2 })
+            "side panel of the Mundane Controller.", CHAT_PREFIX, n == 1 and "left" or "right"), { 1, 0.55, 0.2 })
         return
     end
     local gang = vpNames[n]
@@ -2708,25 +3303,29 @@ local function updatedNote(n)
     return n > 0 and string.format(" (%d older card(s) brought up to date first -- press again for them)", n) or ""
 end
 
--- The round plate redrawn in place for `turn` (the round): the setup's
--- buttons before round 1, the round from then on, with the reinforcements
--- reminder (font sizes scaled by PANEL_DETAIL like the built XML's).
+-- The column redrawn in place for `turn` (the round): the setup's buttons
+-- before round 1, the round from then on, with the reinforcements reminder
+-- (font sizes as SHAPE.font makes them).
 local function drawTurn()
     self.UI.setAttribute("setupPanel", "active", tostring(turn < 1))
     self.UI.setAttribute("turnView", "active", tostring(turn >= 1))
-    setLabel("turnText", tostring(turn))
-    local text, size, on = SETUP.note()
+    local number, size = roundView()
+    setLabel("turnText", number)
+    SHAPE.size("turnText", size)
+    local text, noteSize, on = SETUP.note()
     self.UI.setAttribute("roundNote", "active", tostring(on))
-    self.UI.setAttribute("roundNote", "fontSize", string.format("%d", size * PANEL_DETAIL))
+    SHAPE.size("roundNote", noteSize)
     setLabel("roundNote", text)
 end
 
--- A click on the turn (or on the setup's Start Game): the counter on one
--- (Start Game -> turn 1) and every fighter readied -- at Start Game every
+-- A click on End Round (or on the setup's Start Game): the counter on one
+-- (Start Game -> round 1) and every fighter readied -- at Start Game every
 -- weapon's Reliable trait ready again too (the card's resetReliable). A
--- right click only steps the counter back, for a turn advanced by mistake
--- -- below turn 1 to the setup.
+-- right click -- there or on the round's number (turnBack, which takes
+-- nothing else) -- only steps the counter back, for a round advanced by
+-- mistake -- below round 1 to the setup.
 function onAdvanceTurn(player, value, id)
+    if tostring(id) == "turnBack" and tostring(value) ~= "-2" then return end
     if tostring(value) == "-2" then
         local was = turn
         if turn > 0 then BOTTLE.newTurn() end
@@ -2812,20 +3411,18 @@ function onDeployTool(player, value, id)
     end
 end
 
--- A left click on a victory points plate's Attacker / Defender: swapped.
+-- A left click on a side panel's Attacker / Defender: swapped.
 function onSwapRoles(player, value, id)
     if tostring(value) == "-1" then SETUP.swap() end
 end
 
--- The Reset all Fighters button as it stands: red, brighter while it asks
--- for the second click.
+-- The Reset Fighters button as it stands: plain, red while it asks for the
+-- second click.
 function RESET.draw()
-    setLabel("resetFighters", RESET.asking and RESET.ASK or RESET.LABEL)
-    self.UI.setAttribute("resetFighters", "colors", RESET.asking and RESET.ASKING or RED)
-    self.UI.setAttribute("resetFighters", "textColor", PALE)
+    SHAPE.paint("resetFighters", RESET.asking and RESET.ASKING or "plain", RESET.asking and RESET.ASK or RESET.LABEL)
 end
 
--- A left click on Reset all Fighters: the first asks for a second (for
+-- A left click on Reset Fighters: the first asks for a second (for
 -- RESET.WAIT seconds), the second puts every fighter back as imported (the
 -- card's resetFighter; older cards brought up to date first, as for every
 -- call to all fighters).
@@ -2848,6 +3445,8 @@ function onResetFighters(player, value, id)
         { 1, 0.7, 0.2 })
 end
 
+-- Every condition taken off every fighter (the card's clearConditions) --
+-- for a script to call: no button on the panel does.
 function onClearConditions(player, value, id)
     local n, up = everyFighter("clearConditions")
     printToAll(string.format("%sConditions cleared on %d fighter(s)%s.", CHAT_PREFIX, n, updatedNote(up)),
@@ -2982,20 +3581,10 @@ function HOMEBREW.changed()
     return false
 end
 
--- Apply selected Rules to all Models as it looks: lit while there is something to
--- apply, washed while the page's choices are those in force.
+-- Apply Selected Rules as it looks: gold while there is something to
+-- apply, plain while the page's choices are those in force.
 function HOMEBREW.applyLook()
-    local c = HOMEBREW.changed()
-    return c and LIT or WASH, c and PALE or INK
-end
-
--- A button's label changed, and then its colours and ink: TTS puts a
--- button's ink back to the panel's default (anthracite) when its label
--- changes, so the ink must come after it.
-function HOMEBREW.label(id, text, c, ink)
-    setLabel(id, text)
-    self.UI.setAttribute(id, "colors", c)
-    self.UI.setAttribute(id, "textColor", ink)
+    return HOMEBREW.changed() and "gold" or "plain"
 end
 
 -- Set `i`'s radio buttons redrawn, as the page has it chosen, with the
@@ -3003,18 +3592,18 @@ end
 function HOMEBREW.draw(i)
     local set = HOMEBREW.SETS[i]
     for k = 1, 2 do
-        local c, ink, label, desc = hbLook(set, k)
-        HOMEBREW.label(string.format("hbOpt_%d_%d", i, k), label, c, ink)
-        if k == 1 then setLabel("hbDesc_" .. i, desc) end
+        local look, label = hbLook(set, k)
+        SHAPE.paint(string.format("hbOpt_%d_%d", i, k), look, label)
     end
-    local c, ink = HOMEBREW.applyLook()
-    self.UI.setAttribute("homebrewApply", "colors", c)
-    self.UI.setAttribute("homebrewApply", "textColor", ink)
+    local desc, size = HOMEBREW.desc(i)
+    setLabel("hbDesc_" .. i, desc)
+    SHAPE.size("hbDesc_" .. i, size)
+    SHAPE.paint("homebrewApply", HOMEBREW.applyLook())
 end
 
--- The Homebrew Rules page shown in the play section's place (`on`), its
--- choices those in force -- or the play section back, whatever the page
--- had chosen and not applied gone with it.
+-- The Homebrew Rules page shown in the main page's place (`on`), its
+-- choices those in force -- or the main page back, whatever the page had
+-- chosen and not applied gone with it.
 function HOMEBREW.show(on)
     HOMEBREW.page = on == true
     HOMEBREW.pick = {}
@@ -3022,7 +3611,7 @@ function HOMEBREW.show(on)
     for i in ipairs(HOMEBREW.SETS) do HOMEBREW.draw(i) end
     self.UI.setAttribute("playSection", "active", tostring(not HOMEBREW.page))
     self.UI.setAttribute("homebrewPage", "active", tostring(HOMEBREW.page))
-    HOMEBREW.label("homebrewBtn", HOMEBREW.button(), LIT, PALE)
+    SHAPE.paint("homebrewBtn", "plain", HOMEBREW.button())
 end
 
 -- What chat says once the sets in force have changed: `what`, and how many
@@ -3061,7 +3650,7 @@ function HOMEBREW.switch(id, on)
     HOMEBREW.on[id] = on == true or nil
     HOMEBREW.pick[id] = HOMEBREW.on[id]
     HOMEBREW.draw(i)
-    HOMEBREW.label("homebrewBtn", HOMEBREW.button(), LIT, PALE)
+    SHAPE.paint("homebrewBtn", "plain", HOMEBREW.button())
     local changed, told = RULES.refresh()
     HOMEBREW.say(hbText(on and set.name or set.off), changed, told)
     return true
@@ -3092,12 +3681,49 @@ function onHomebrewOption(player, value, id)
     HOMEBREW.draw(i)
 end
 
--- Apply selected Rules to all Models: see HOMEBREW.apply.
+-- Apply Selected Rules: see HOMEBREW.apply.
 function onHomebrewApply(player, value, id) HOMEBREW.apply() end
 
--- The header's Feedback button: the feedback form on a tablet past the panel.
+-- The Feedback button (under the column): the feedback form on a tablet
+-- past the panel -- or, when it is up, taken away (see FEEDBACK.open).
 function onFeedback(player, value, id)
     FEEDBACK.open(PANEL, PANEL_H)
+end
+
+-- Where the feedback tablet goes for this panel (in place of the shared
+-- FEEDBACK.spot, which reckons from a panel lying flat): BEYOND world units
+-- past the panel's top edge, over the table along the panel's up,
+-- FEEDBACK.LIFT over this object's origin (the table), leaned back
+-- FEEDBACK.TILT, facing the players -- its centre and rotation in the
+-- world, nil outside TTS.
+FEEDBACK.BEYOND = 6.5
+function FEEDBACK.spot()
+    local x, _, z = STAND.point(0, PANEL_H / 2)                 -- the top edge's middle
+    local dx0, _, dz0 = STAND.point(0, PANEL_H / 2 - 100)       -- and back down the panel
+    local ok, a, b = pcall(function()
+        return self.positionToWorld({ x, 0, z }), self.positionToWorld({ dx0, 0, dz0 })
+    end)
+    if not (ok and a and b) then return nil end
+    local ax, ay, az = a.x or a[1], a.y or a[2], a.z or a[3]
+    local dx, dz = (b.x or b[1]) - ax, (b.z or b[3]) - az     -- the panel's down, over the table
+    local len = math.sqrt(dx * dx + dz * dz)
+    if len < 1e-6 then dx, dz, len = 0, 1, 1 end
+    dx, dz = dx / len, dz / len
+    return { ax - dx * FEEDBACK.BEYOND, ay + FEEDBACK.LIFT, az - dz * FEEDBACK.BEYOND },
+           { FEEDBACK.TILT, math.deg((math.atan2 or math.atan)(dx, dz)) + FEEDBACK.TURN, 0 }
+end
+
+-- The Feedback button lit (`on`: the tablet is up) or not, in place -- in
+-- this panel's own look, gold while lit like a choice made (the shared
+-- FEEDBACK.draw's colours are for the importer's parchment, so this one
+-- takes its place here; the other script's relight, feedbackLit, comes
+-- here too).
+function FEEDBACK.draw(on)
+    local look = on and "gold" or "plain"
+    pcall(function()
+        SHAPE.paint("feedback", look)
+        self.UI.setAttribute("feedbackText", "color", LOOK.BUTTONS[look].ink)
+    end)
 end
 
 -- The sets, for a script: a list of { id, name (the set's choice), off
@@ -3169,7 +3795,7 @@ function onLoad(saved)
     HOMEBREW.page, HOMEBREW.pick = false, {}
     for id in pairs(HOMEBREW.on) do HOMEBREW.pick[id] = true end
     pcall(function() if not self.hasTag(CONTROLLER_TAG) then self.addTag(CONTROLLER_TAG) end end)
-    self.UI.setXml(detailed(panelXml(), "controllerPanel"), panelAssets())
+    self.UI.setXml(panelXml(), panelAssets())
     Wait.time(BOTTLE.tick, BOTTLE.POLL, -1)
     -- the cards that loaded before this did asked no one: tell them now
     -- (the table's own rules only -- as written, they already have them)
@@ -3203,7 +3829,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-controller"
-local TOOL_VERSION   = "2.2.0"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.2.1"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
