@@ -420,8 +420,6 @@ local TEMPLATES_URL = ""
 -- { version =, note =, changes = { "one line each", ... } } -- lines of
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
-    { version = "2.2.2", note = "Minor Update", changes = {"Added support for Precision Shot + Homebrew rule"
-    } },
     { version = "2.2.1", note = "Minor Update", changes = {"UI-Overhaul for the Mundane Controller"
     } },
     { version = "2.2.0", note = "Major Update", changes = {"Improvements and accessibility for various actions and rolls", "Added deployment zones / setup helper"
@@ -2824,9 +2822,8 @@ RULES.conditions = {
 --              TRAIT_RULES.marksman);
 --   aimed      N: its Aimed Shot is N better to hit, not 1 (Sharpshooter: 2);
 --   precise    true: a natural 6 on the hit die of its ranged attack with a
---              profile without Blast leaves the target no armour save
---              against that hit's wound -- at Rapid Fire every hit's, or
---              (cfg.rapidOneHit) the first's, as with Shock; an
+--              profile that has neither Blast nor Rapid Fire (N) leaves the
+--              target no armour save against that hit's wound -- an
 --              invulnerable save can still be made (Precision Shot; see the
 --              card's ACTIVATION.attackDice and ACTIVATION.rollSaves);
 --   fastReload true: its Reload reloads every profile that is out of ammo,
@@ -3224,10 +3221,9 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   knockback     Knockback (N+): how many inches the target is knocked
 --                 back, shown on its card once the attack is over -- the
 --                 players move the model (see the card's knockback).
---   rapidOneHit   Shock (N+) or Precision Shot on a Rapid Fire shot: false
---                 -- every hit the Firepower dice give shares the hit roll,
---                 so every one of them wounds automatically (Shock) / allows
---                 no armour save (Precision Shot); true -- only the first.
+--   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
+--                 Firepower dice give shares the hit roll, so every one of
+--                 them wounds automatically; true -- only the first does.
 --   saveFails     a save roll of this or less always fails, whatever the
 --                 save (2: a natural 1 or 2);
 --   dicePause     seconds a roll that follows another waits after that one
@@ -13992,8 +13988,6 @@ end
 -- the Wound roll at once). A hit die that Shocks (see ACTIVATION.hitRead)
 -- has CFG.shockMark over it and makes the Wound roll die of its hit an
 -- automatic 6 -- at RF every hit's, or (CFG.rapidOneHit) the first's.
--- Precision Shot: a natural 6 on the hit die (no Blast) leaves the target
--- no armour save against the hit's wound -- at RF the same hits as Shock.
 -- Knockback (N+): every hit die that reaches N (a ranged attack's hit die
 -- alone, not its Firepower dice) has CFG.knockMark over it, and if any
 -- does, the target's card shows it knocked back once the attack is over
@@ -14088,9 +14082,11 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
                     attack.stat == "WS" and ", WS" or "", attack.marksman and ", Marksman" or "", attack.prone and ", Seriously Injured -1" or "",
                     h.why and ", " .. h.why or "",
                     attack.rerolled and string.format(", re-rolled %d", attack.rerolled) or "", sh and ", Shock" or "", kbText())
-                -- Precision Shot: a natural 6 with a profile without
-                -- Blast -- no armour save against the hit's wound
-                precise = hit and f1 == 6 and not R.blast(p) and #SKILL.with("precise") > 0
+                -- Precision Shot: a natural 6 with a profile that has
+                -- neither Blast nor Rapid Fire (N) -- no armour save
+                -- against the hit's wound
+                precise = hit and f1 == 6 and not R.blast(p) and not hasRapidFire(p)
+                          and #SKILL.with("precise") > 0
                 if precise then parts[1] = parts[1] .. ", Precision Shot" end
             elseif not rf then
                 parts[1] = #aims > 0 and ACTIVATION.nameList(aims) .. " hit" or "no enemy selected"
@@ -14136,8 +14132,7 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             roll.ammoState = state                   -- OUT / JAM / SPENT at the panel's left end
             -- the hits, each a Wound roll die: a Template's on every enemy
             -- (at RF the one, as often as the Firepower dice say); a Shock
-            -- hit die makes every hit's an automatic 6 -- or only the first's;
-            -- a Precision Shot likewise every hit's / the first's
+            -- hit die makes every hit's an automatic 6 -- or only the first's
             if template then
                 if rf then
                     for _ = 1, aims[1] and fpHits or 0 do dice[#dice + 1] = { plan = 1 } end
@@ -14148,8 +14143,8 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
                 hit = #aims > 0
             elseif hit then
                 for k = 1, rf and fpHits or 1 do
-                    local all = k == 1 or not CFG.rapidOneHit
-                    dice[#dice + 1] = { plan = 1, auto = (sh and all) or nil, precise = (precise and all) or nil }
+                    local auto = sh and (k == 1 or not CFG.rapidOneHit)
+                    dice[#dice + 1] = { plan = 1, auto = auto or nil, precise = precise or nil }
                 end
                 if aims[1] then struck[1] = aims[1] end
             end
