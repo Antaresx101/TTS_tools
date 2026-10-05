@@ -1452,7 +1452,7 @@ local LAYOUT = {
     -- below NAME_MIN) over a thin rule (NAME_RULE, RULE_W wide); "VICTORY
     -- POINTS" (VP_HEAD) and the points (VP; VP_HIT: the top and bottom of
     -- what a click on them takes) -- or, while the side has no gang, how to
-    -- give it one (HINT: the middle of its two lines, HINT_GAP apart); a
+    -- give it one (HINT: the middle of its three lines, HINT_GAP apart); a
     -- thin rule (VP_RULE); the side's part (ROLE, cut ROLE_CUT); "BOTTLE
     -- CHECK" (BOTTLE, HEAD_W wide to click) over "Ld" and the two diamonds
     -- (DICE: their middle; LD_X, VAL_X, ROLL_X across), on a dark red plate
@@ -2140,7 +2140,7 @@ function SETUP.rollOff(k, color)
 end
 
 -- Each player's side panel (sideXml) shows their gang's name -- typed in,
--- or taken from one of the gang's models put on the panel (see
+-- or taken from one of the gang's models put on the table in front of its panel (see
 -- BOTTLE.tick) -- their victory points, their part (Attacker or Defender:
 -- a click swaps them, see SETUP) and their gang's Bottle Check (see the
 -- Bottle Check's functions): "BOTTLE CHECK" over the Ld it is taken
@@ -2155,14 +2155,15 @@ end
 local BOTTLE = {
     due   = {},             -- gang (BOTTLE.key) -> "due" (to take: lit) or "done", this turn
     hand  = {},             -- per side: an Ld set by hand (nil: the gang's best)
-    seen  = {},             -- per side: the model last found on its side panel
+    seen  = {},             -- per side: the model last found in front of its side panel
     R     = 38,             -- the diamonds: from the middle to each tip (panel units)
     ICON  = 0.78,           -- the die's size, a fraction of a diamond's side (the card's LAY.dieIcon)
     FONT  = 32,             -- the Ld in its diamond
     HAND  = "#F0C060",      -- an Ld set by hand
     UP    = "#6EE07A",      -- an Ld the gang's Iron Will raises (the card's green for a better value)
     HINT  = "[ NO NAME SET ]",                                -- a side's name while it has no gang ...
-    HOW   = { "Move a scribed model", "over this panel" },    -- ... and, in place of its points, how to give it one
+    HOW   = { "Move a scribed Model", "beneath this panel to", "set the Gangname" },   -- ... and, in place of its points, how to give it one
+    ZONE  = 140,            -- how far out on the table in front of a side panel a model sets its name (panel units from its bottom edge)
 }
 
 -- One of side `n`'s diamonds, its middle at x, y: the turned button
@@ -2240,8 +2241,9 @@ local function sideXml(n)
             SHAPE.text(cx, top + S.VP, S.RULE_W, S.VP_FONT * 1.2, tostring(vp[n]), S.VP_FONT, LOOK.TEXT, "vpText_" .. n) ..
             SHAPE.hit("vpBtn_" .. n, "onVp", cx, top + (S.VP_HIT[1] + S.VP_HIT[2]) / 2, S.RULE_W, S.VP_HIT[2] - S.VP_HIT[1])),
         group("vpHint_" .. n, not named,
-            SHAPE.text(cx, top + S.HINT - S.HINT_GAP / 2, hintW, S.HINT_FONT * 1.3, BOTTLE.HOW[1], S.HINT_FONT, LOOK.DIM) ..
-            SHAPE.text(cx, top + S.HINT + S.HINT_GAP / 2, hintW, S.HINT_FONT * 1.3, BOTTLE.HOW[2], S.HINT_FONT, LOOK.DIM)),
+            SHAPE.text(cx, top + S.HINT - S.HINT_GAP, hintW, S.HINT_FONT * 1.3, BOTTLE.HOW[1], S.HINT_FONT, LOOK.DIM) ..
+            SHAPE.text(cx, top + S.HINT, hintW, S.HINT_FONT * 1.3, BOTTLE.HOW[2], S.HINT_FONT, LOOK.DIM) ..
+            SHAPE.text(cx, top + S.HINT + S.HINT_GAP, hintW, S.HINT_FONT * 1.3, BOTTLE.HOW[3], S.HINT_FONT, LOOK.DIM)),
         rule(S.VP_RULE, LOOK.RULE_TEXT),
         SHAPE.button({ box = across(S.ROLE), cut = { c, c, c, c }, look = { fill = fill, ink = LOOK.BUTTONS.gold.ink },
             line = false, label = word:upper(), size = S.ROLE_FONT, fn = "onSwapRoles", btn = "vpRoleBtn_" .. n,
@@ -2538,7 +2540,7 @@ function onVp(player, value, id)
 end
 
 -- A player's name typed in -- the gang whose Bottle Check that side shows
--- (a model put on the side panel types it in, see BOTTLE.tick). The hint
+-- (a model put in front of the side panel types it in, see BOTTLE.tick). The hint
 -- an unnamed side shows changes nothing, nor does the name as shown (in
 -- capitals).
 function onVpName(player, value, id)
@@ -2694,25 +2696,25 @@ function BOTTLE.newTurn()
     for n = 1, 2 do BOTTLE.draw(n) end
 end
 
--- Where side `n`'s panel lies on this object, worked out from the layout
--- (LAYOUT) and STAND: its middle (local x, y, z: on the panel's face), its
--- width and how far it reaches across the table (local units), and how much
--- higher its top edge stands than its bottom.
+-- Where a model sets side `n`'s name, worked out from the layout (LAYOUT)
+-- and STAND: the strip of table in front of the panel, under the side panel
+-- and BOTTLE.ZONE panel units deep from the panel's bottom edge (short of
+-- the dice's line). Its middle (local x, z -- the table is local y 0) and its
+-- width and depth (local units).
 function BOTTLE.spot(n)
     local k = (tonumber(tostring(PANEL.scale):match("[%d.]+")) or 1) / 100
     local b = LAYOUT.SIDES[n] or LAYOUT.SIDES[1]
-    local x, y, z = STAND.point((b[1] + b[3]) / 2 - PANEL_W / 2, PANEL_H / 2 - (b[2] + b[4]) / 2)
-    local a, h = math.rad(STAND.ANGLE), (b[4] - b[2]) * k
-    return x, y, z, (b[3] - b[1]) * k, h * math.cos(a), h * math.sin(a)
+    local x, _, z = STAND.point((b[1] + b[3]) / 2 - PANEL_W / 2, -PANEL_H / 2)
+    local d = BOTTLE.ZONE * k
+    return x, z + d / 2, (b[3] - b[1]) * k, d
 end
 
--- The first model with a gang tag standing on side `n`'s panel (nil: none):
--- one box looked through over the side panel, from its lowest point (its
--- bottom edge) up.
+-- The first model with a gang tag standing in side `n`'s strip of table
+-- (nil: none): one box looked through over it, from the table up.
 function BOTTLE.modelOn(n)
     if not (Physics and Physics.cast and self.positionToWorld) then return nil end
-    local x, y, z, w, d, rise = BOTTLE.spot(n)
-    local p = self.positionToWorld({ x, y - rise / 2, z })
+    local x, z, w, d = BOTTLE.spot(n)
+    local p = self.positionToWorld({ x, 0, z })
     local okS, sc = pcall(function() return self.getScale() end)
     sc = okS and type(sc) == "table" and sc or {}
     local okR, rot = pcall(function() return self.getRotation() end)
@@ -2726,7 +2728,7 @@ end
 
 -- Half a second after anything on the table is picked up, put down or
 -- removed (BOTTLE.soon), and every BOTTLE.POLL seconds besides: a model
--- newly put on a side panel names that side after its gang (said in chat,
+-- newly put on the table in front of a side panel names that side after its gang (said in chat,
 -- the model flashed) -- not while the Homebrew Rules page hides the side
 -- panels. Looking only when something moved spares a slow machine the
 -- panels' physics casts twice a second all game.
@@ -3195,7 +3197,7 @@ function onFighterOut(t)
     if not due then return end
     printToAll(string.format("[%s] %s is Out of Action: %s must take a Bottle Check this round.%s", gang,
         tostring(t.name or "A fighter"), gang,
-        shown and "" or " Put one of its models on a side panel of the Mundane Controller."), { 1, 0.55, 0.2 })
+        shown and "" or " Put one of its models on the table in front of a side panel of the Mundane Controller."), { 1, 0.55, 0.2 })
 end
 
 -- "Bottle Check" over a side's diamonds, left click: the reminder that its
