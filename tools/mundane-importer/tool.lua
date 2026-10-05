@@ -420,6 +420,8 @@ local TEMPLATES_URL = ""
 -- { version =, note =, changes = { "one line each", ... } } -- lines of
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
+    { version = "2.2.2", note = "Minor Update", changes = {"Added support for Precision Shot + Homebrew rule"
+    } },
     { version = "2.2.1", note = "Minor Update", changes = {"UI-Overhaul for the Mundane Controller"
     } },
     { version = "2.2.0", note = "Major Update", changes = {"Improvements and accessibility for various actions and rolls", "Added deployment zones / setup helper"
