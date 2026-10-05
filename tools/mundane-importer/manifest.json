@@ -1,11 +1,17 @@
 {
   "stable": {
-    "version": "2.2.1",
+    "version": "2.2.2",
     "notes": [
-      "UI-Overhaul for the Mundane Controller."
+      "Added support for Precision Shot + Homebrew rule."
     ]
   },
   "history": [
+    {
+      "version": "2.2.1",
+      "notes": [
+        "UI-Overhaul for the Mundane Controller."
+      ]
+    },
     {
     "version": "2.2.0",
     "notes": [

@@ -602,6 +602,12 @@ RULES.conditions = {
 --              are N better to hit (Marksman: 1; see the card's
 --              TRAIT_RULES.marksman);
 --   aimed      N: its Aimed Shot is N better to hit, not 1 (Sharpshooter: 2);
+--   precise    true: a natural 6 on the hit die of its ranged attack with a
+--              profile without Blast leaves the target no armour save
+--              against that hit's wound -- at Rapid Fire every hit's, or
+--              (cfg.rapidOneHit) the first's, as with Shock; an
+--              invulnerable save can still be made (Precision Shot; see the
+--              card's ACTIVATION.attackDice and ACTIVATION.rollSaves);
 --   fastReload true: its Reload reloads every profile that is out of ammo,
 --              not one (Fast Reload; see the card's reloadWeapon);
 --   ironWill   N: while it is on the table, its gang's Bottle Checks are
@@ -742,6 +748,7 @@ RULES.skills = {
     { name = "Hip-Shooting", desc = "", hipShooting = true },
     { name = "Marksman",     desc = "", marksman = 1 },
     { name = "Sharpshooter", desc = "", aimed = 2 },
+    { name = "Precision Shot", desc = "", precise = true },
     -- Wyrd powers: actions on the Special tab, whatever the status
     -- ("/C": continuous -- it stays in effect, see the card's
     -- ACTIVATION.cast). What one does once manifested (see the card's
@@ -996,9 +1003,10 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   knockback     Knockback (N+): how many inches the target is knocked
 --                 back, shown on its card once the attack is over -- the
 --                 players move the model (see the card's knockback).
---   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
---                 Firepower dice give shares the hit roll, so every one of
---                 them wounds automatically; true -- only the first does.
+--   rapidOneHit   Shock (N+) or Precision Shot on a Rapid Fire shot: false
+--                 -- every hit the Firepower dice give shares the hit roll,
+--                 so every one of them wounds automatically (Shock) / allows
+--                 no armour save (Precision Shot); true -- only the first.
 --   saveFails     a save roll of this or less always fails, whatever the
 --                 save (2: a natural 1 or 2);
 --   dicePause     seconds a roll that follows another waits after that one
@@ -1391,8 +1399,8 @@ local HOMEBREW = {
           desc = "Only the die counts for Shock (X+) and Knockback (X+): (6+) triggers on a natural 6 alone.",
           rules = { cfg = { shockNatural = true } } },
         { id = "rapid_one_hit", off = "Rapid Fire has Hit-Rolls", name = "Rapid Fire has 1 Hit-Roll",
-          offDesc = "A Shock hit at Rapid Fire makes every hit's Wound roll an automatic 6.",
-          desc = "A Shock hit at Rapid Fire makes only the first hit's Wound roll an automatic 6.",
+          offDesc = "A Shock or Precision Shot hit at Rapid Fire counts for every hit the Firepower dice give.",
+          desc = "A Shock or Precision Shot hit at Rapid Fire counts only for the first hit.",
           rules = { cfg = { rapidOneHit = true } } },
         { id = "slow_dice", off = "Fast Dice Speed", name = "Slow Dice Speed",
           offDesc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 3 s.",
@@ -3831,7 +3839,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-controller"
-local TOOL_VERSION   = "2.2.1"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.2.2"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error

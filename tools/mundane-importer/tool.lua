@@ -2821,6 +2821,12 @@ RULES.conditions = {
 --              are N better to hit (Marksman: 1; see the card's
 --              TRAIT_RULES.marksman);
 --   aimed      N: its Aimed Shot is N better to hit, not 1 (Sharpshooter: 2);
+--   precise    true: a natural 6 on the hit die of its ranged attack with a
+--              profile without Blast leaves the target no armour save
+--              against that hit's wound -- at Rapid Fire every hit's, or
+--              (cfg.rapidOneHit) the first's, as with Shock; an
+--              invulnerable save can still be made (Precision Shot; see the
+--              card's ACTIVATION.attackDice and ACTIVATION.rollSaves);
 --   fastReload true: its Reload reloads every profile that is out of ammo,
 --              not one (Fast Reload; see the card's reloadWeapon);
 --   ironWill   N: while it is on the table, its gang's Bottle Checks are
@@ -2961,6 +2967,7 @@ RULES.skills = {
     { name = "Hip-Shooting", desc = "", hipShooting = true },
     { name = "Marksman",     desc = "", marksman = 1 },
     { name = "Sharpshooter", desc = "", aimed = 2 },
+    { name = "Precision Shot", desc = "", precise = true },
     -- Wyrd powers: actions on the Special tab, whatever the status
     -- ("/C": continuous -- it stays in effect, see the card's
     -- ACTIVATION.cast). What one does once manifested (see the card's
@@ -3215,9 +3222,10 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   knockback     Knockback (N+): how many inches the target is knocked
 --                 back, shown on its card once the attack is over -- the
 --                 players move the model (see the card's knockback).
---   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
---                 Firepower dice give shares the hit roll, so every one of
---                 them wounds automatically; true -- only the first does.
+--   rapidOneHit   Shock (N+) or Precision Shot on a Rapid Fire shot: false
+--                 -- every hit the Firepower dice give shares the hit roll,
+--                 so every one of them wounds automatically (Shock) / allows
+--                 no armour save (Precision Shot); true -- only the first.
 --   saveFails     a save roll of this or less always fails, whatever the
 --                 save (2: a natural 1 or 2);
 --   dicePause     seconds a roll that follows another waits after that one
@@ -6005,7 +6013,7 @@ do
                                   meleeL = d.meleeL, target = d.target, area = d.area, aura = d.aura,
                                   rerollHits = d.rerollHits, void = d.void, visions = d.visions,
                                   inv = d.inv, burns = d.burns, noAp = d.noAp, immune = d.immune, gasInv = d.gasInv,
-                                  bioBooster = d.bioBooster,
+                                  bioBooster = d.bioBooster, precise = d.precise,
                                   bar = #out + 1, state = state }
             end
         end
@@ -13982,6 +13990,8 @@ end
 -- the Wound roll at once). A hit die that Shocks (see ACTIVATION.hitRead)
 -- has CFG.shockMark over it and makes the Wound roll die of its hit an
 -- automatic 6 -- at RF every hit's, or (CFG.rapidOneHit) the first's.
+-- Precision Shot: a natural 6 on the hit die (no Blast) leaves the target
+-- no armour save against the hit's wound -- at RF the same hits as Shock.
 -- Knockback (N+): every hit die that reaches N (a ranged attack's hit die
 -- alone, not its Firepower dice) has CFG.knockMark over it, and if any
 -- does, the target's card shows it knocked back once the attack is over
@@ -14056,7 +14066,7 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             -- "Autogun (RF2): Hit 5 (3+), 1 + 2 = ∑3 Hits, 1x AM, Ammo 2 (4+), Reliable, OUT"
             -- ("Hit 5 (3+, Marksman)", "Hit 6 (3+), Shock"); a Template's: "Bob and Ann hit, ..."
             -- / "2 + 1 = ∑3 Hits on Bob, ..."
-            local parts, hit, sh = {}, true, false
+            local parts, hit, sh, precise = {}, true, false, false
             if not template and (faces[1] or 1) == 1 and hasTrait(p, TRAIT.unstable) then
                 -- Unstable: a 1 on the hit die -- the weapon explodes, the attack ends
                 ACTIVATION.sayAttack(verb, title, string.format("Miss 1 (%d+), Unstable: Explosion", shown), MOD, digital)
@@ -14076,6 +14086,10 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
                     attack.stat == "WS" and ", WS" or "", attack.marksman and ", Marksman" or "", attack.prone and ", Seriously Injured -1" or "",
                     h.why and ", " .. h.why or "",
                     attack.rerolled and string.format(", re-rolled %d", attack.rerolled) or "", sh and ", Shock" or "", kbText())
+                -- Precision Shot: a natural 6 with a profile without
+                -- Blast -- no armour save against the hit's wound
+                precise = hit and f1 == 6 and not R.blast(p) and #SKILL.with("precise") > 0
+                if precise then parts[1] = parts[1] .. ", Precision Shot" end
             elseif not rf then
                 parts[1] = #aims > 0 and ACTIVATION.nameList(aims) .. " hit" or "no enemy selected"
             end
@@ -14120,7 +14134,8 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
             roll.ammoState = state                   -- OUT / JAM / SPENT at the panel's left end
             -- the hits, each a Wound roll die: a Template's on every enemy
             -- (at RF the one, as often as the Firepower dice say); a Shock
-            -- hit die makes every hit's an automatic 6 -- or only the first's
+            -- hit die makes every hit's an automatic 6 -- or only the first's;
+            -- a Precision Shot likewise every hit's / the first's
             if template then
                 if rf then
                     for _ = 1, aims[1] and fpHits or 0 do dice[#dice + 1] = { plan = 1 } end
@@ -14131,8 +14146,8 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
                 hit = #aims > 0
             elseif hit then
                 for k = 1, rf and fpHits or 1 do
-                    local auto = sh and (k == 1 or not CFG.rapidOneHit)
-                    dice[#dice + 1] = { plan = 1, auto = auto or nil }
+                    local all = k == 1 or not CFG.rapidOneHit
+                    dice[#dice + 1] = { plan = 1, auto = (sh and all) or nil, precise = (precise and all) or nil }
                 end
                 if aims[1] then struck[1] = aims[1] end
             end
@@ -14140,7 +14155,7 @@ function ACTIVATION.attackDice(attack, verb, aimed, player)
                 parts[#parts + 1] = R.flash(p) and "Flash: no Wound roll" or "Graviton Pulse: no Wound roll"
             end
             res.hit, res.hits = hit, #dice
-            res.shock = sh or nil
+            res.shock, res.precise = sh or nil, precise or nil
             res.ammo, res.spared, res.state = #checks, spare ~= nil, state
             ACTIVATION.sayAttack(verb, title, table.concat(parts, ", "), hit and UP or MOD, digital)
             if state then setProfileState({ weapon = attack.weapon, profile = attack.profile, ammo = state })
@@ -14517,7 +14532,7 @@ function ACTIVATION.woundRoll(seq, player)
             end
             if ok then
                 local h = { rend = q.rend ~= nil and f >= q.rend or nil,
-                            shred = q.shred ~= nil and f >= q.shred or nil }
+                            shred = q.shred ~= nil and f >= q.shred or nil, precise = d.precise }
                 seq.hurt[d.plan] = seq.hurt[d.plan] or {}
                 table.insert(seq.hurt[d.plan], h)
                 if h.rend then rd = rd + 1 end
@@ -14628,7 +14643,8 @@ end
 -- Once an attack's Wound rolls are over (seq, see ACTIVATION.woundRoll; `per`
 -- the wounds by plan): every enemy wounded -- or given Concussion -- whose
 -- card is known (plan.guid) is told (takeSaves): each wound with its own AP
--- and Lethality (as Rending and Shred left them) and Damage, the cover it
+-- and Lethality (as Rending and Shred left them) and Damage and whether
+-- it allows no armour save (Precision Shot), the cover it
 -- would get, what the weapon's traits do to it, and this player's colour to
 -- roll in -- and Knockback (plan.knock), shown on it once its saves are
 -- over. One that isn't told (no wound) and is to be knocked back is told
@@ -14649,7 +14665,8 @@ function ACTIVATION.toSaves(seq, per, player, roll)
             local list = {}
             for i, h in ipairs((seq.hurt or {})[k] or {}) do
                 list[i] = { ap = (tonumber(plan.ap) or 0) + (h.rend and 1 or 0),
-                            l = (tonumber(plan.l) or 0) + (h.shred and 1 or 0), dmg = plan.dmg }
+                            l = (tonumber(plan.l) or 0) + (h.shred and 1 or 0), dmg = plan.dmg,
+                            precise = h.precise }
             end
             local ok, obj = pcall(function() return getObjectFromGUID(plan.guid) end)
             if ok and obj then
@@ -14666,7 +14683,8 @@ end
 -- This fighter is wounded (an enemy's attack, see ACTIVATION.toSaves):
 -- t = { wounds, list (each wound: { ap (how much its AP worsens a save: 2 for
 -- "-2"), l (Lethality), dmg (Damage (N)'s N: the wounds it takes off, nil
--- 1) }; a wound not in it takes t.ap / l / dmg), cover (what cover would add,
+-- 1), precise (Precision Shot: no armour save against it, an invulnerable
+-- save only) }; a wound not in it takes t.ap / l / dmg), cover (what cover would add,
 -- nil: none -- a melee attack), gas, web (no armour save), concussion (its
 -- stacks: Concussive), radphage, weapon, by (the attacker's name), from (its
 -- model's GUID), color (the player to roll in) }.
@@ -14680,7 +14698,8 @@ end
 -- CFG.coverYes rolls the saves with it, X calls the attack off -- no saves,
 -- no Concussion or Radphage, no damage, no Knockback. The attacker is
 -- highlighted orange meanwhile; another check opened over it doesn't lose
--- it. With nothing to ask the saves are thrown CFG.diceShow seconds later,
+-- it. Every wound from a Precision Shot: no armour save, so no cover to
+-- ask about either. With nothing to ask the saves are thrown CFG.diceShow seconds later,
 -- once the Wound roll has shown. No save that could be made at all (no
 -- armour save, no cover to be had, no invulnerable save): chat says so
 -- and every wound goes through (ACTIVATION.damage). Knockback
@@ -14704,6 +14723,9 @@ function takeSaves(t)
     local sv, none = ACTIVATION.saveOf(t)
     local inv = ACTIVATION.invOf(t)
     local cover = tonumber(t.cover)
+    local precise = n >= 1                           -- Precision Shot on every wound: no armour save at all
+    for i = 1, n do precise = precise and ACTIVATION.wound(t, i).precise and true or false end
+    if precise then sv, none, cover = nil, nil, nil end
     if n >= 1 and cover and cover > 0 and sv then     -- (the attack may yet be called off)
         local ok, obj = pcall(function() return t.from and getObjectFromGUID(t.from) end)
         if ACTIVATION.roll and not ACTIVATION.roll.rolling then ACTIVATION.hideDice() end   -- the question shows
@@ -14726,8 +14748,8 @@ function takeSaves(t)
         return false
     end
     if not (sv or inv) or (none and not inv and not (cover and cover > 0)) then
-        chat(string.format("%s has no save against %s -- %d Wound%s go%s through", fighter.name, from, n,
-            n == 1 and "" or "s", n == 1 and "es" or ""), rgbOf(COL.valueMod))
+        chat(string.format("%s has no save against %s%s -- %d Wound%s go%s through", fighter.name, from,
+            precise and " (Precision Shot)" or "", n, n == 1 and "" or "s", n == 1 and "es" or ""), rgbOf(COL.valueMod))
         local all = {}
         for i = 1, n do all[i] = ACTIVATION.wound(t, i) end
         onSavesRolled(t.color, { wounds = n, saved = 0, through = n, faces = {}, by = t.by, weapon = t.weapon })
@@ -14804,7 +14826,9 @@ end
 -- worsened by its wound's AP (none against a Reflec Shroud, see
 -- ACTIVATION.apProof) and bettered by the cover -- and the invulnerable
 -- save (ACTIVATION.invOf: as it is, nothing betters or worsens it); the
--- armour save when they are equal. A die of CFG.saveFails or less always
+-- armour save when they are equal. A wound from a Precision Shot
+-- (`precise`) has the invulnerable save alone ("Precision Shot" with
+-- none). A die of CFG.saveFails or less always
 -- fails, one reaching the number saves; a number over 6 can't be made.
 -- Read in the order thrown: the first natural 1 on a save taken with
 -- wargear that burns out (the Refractor Shield) burns it out
@@ -14821,7 +14845,8 @@ function ACTIVATION.rollSaves(t, cover, player)
     local sv, none = ACTIVATION.saveOf(t)
     local proof = ACTIVATION.apProof(t.weapon)
     local function apOf(i) return proof and 0 or math.max(0, math.floor(tonumber(ACTIVATION.wound(t, i).ap) or 0)) end
-    local function needOf(i) return sv and sv + apOf(i) - cover or nil end
+    local function precise(i) return ACTIVATION.wound(t, i).precise end
+    local function needOf(i) return sv and not precise(i) and sv + apOf(i) - cover or nil end
     local function invFor(need)
         local v, it = ACTIVATION.invOf(t)
         if v and not (need and need <= v) then return v, it end
@@ -14850,7 +14875,8 @@ function ACTIVATION.rollSaves(t, cover, player)
             local ok = k ~= nil and f > CFG.saveFails and f >= k
             if ok then saved = saved + 1 else failed[#failed + 1] = ACTIVATION.wound(t, i) end
             hls[i] = ok and UP or MOD
-            local mark = v and needText(v, true) or need and needText(need) or "no save"
+            local mark = v and needText(v, true) or need and needText(need)
+                         or precise(i) and "Precision Shot" or "no save"
             first = first or mark
             mixed = mixed or mark ~= first
             read[i] = { f = f, mark = mark }
@@ -14866,13 +14892,18 @@ function ACTIVATION.rollSaves(t, cover, player)
         local each = {}
         for i, r in ipairs(read) do each[i] = mixed and string.format("%d (%s)", r.f, r.mark) or tostring(r.f) end
         local ap = apOf(1)
-        local detail = { sv and not none and string.format("Sv %d+", sv)
+        local some, all = false, true                -- Precision Shot on some / every wound
+        for i = 1, #faces do some, all = some or precise(i) or false, all and precise(i) or false end
+        local detail = { all and "no Sv (Precision Shot)" or sv and not none and string.format("Sv %d+", sv)
                          or (t.gas and "no Sv (Gas)" or t.web and "no Sv (Web)" or "no Sv") }
-        if proof then detail[#detail + 1] = "AP ignored, " .. proof
-        elseif ap > 0 then detail[#detail + 1] = "AP -" .. ap end
-        if cover > 0 then detail[#detail + 1] = "Cover +" .. cover end
+        if not all then
+            if proof then detail[#detail + 1] = "AP ignored, " .. proof
+            elseif ap > 0 then detail[#detail + 1] = "AP -" .. ap end
+            if cover > 0 then detail[#detail + 1] = "Cover +" .. cover end
+        end
         local one = needOf(1)
         if one and (ap > 0 or cover > 0) and not mixed then detail[#detail] = detail[#detail] .. " = " .. needText(one) end
+        if some and not all then detail[#detail + 1] = "Precision Shot" end
         local invItem = select(2, ACTIVATION.invOf(t))
         if v0 or burnt then
             local nInv = tonumber((burnt or {}).inv) or v0
@@ -14896,6 +14927,7 @@ function ACTIVATION.rollSaves(t, cover, player)
         local shown = ACTIVATION.roll
         onSavesRolled(player, { wounds = #faces, saved = saved, through = through, faces = faces, need = needOf(1),
                                 inv = v0, cover = cover, ap = ap, burnt = burnt and burnt.name or nil,
+                                precise = some or nil,
                                 by = t.by, weapon = t.weapon, digital = digital })
         ACTIVATION.damage(t, failed, shown, player)
     end, "d6", title)
@@ -17447,7 +17479,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-importer"
-local TOOL_VERSION   = "2.2.1"                 -- bumped with manifest.json
+local TOOL_VERSION   = "2.2.2"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-importer"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
