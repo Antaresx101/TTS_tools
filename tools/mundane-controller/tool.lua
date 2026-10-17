@@ -15,7 +15,7 @@
 --  The fighter cards find it by its tag (CONTROLLER_TAG): they have it
 --  throw their dice (throwDice), tell it when a fighter goes Out of
 --  Action (onFighterOut) and ask it for the table's own rules (getRules:
---  see RULES) -- the homebrew rules chosen on the panel's Homebrew Rules
+--  see RULES) -- the homebrew rules chosen on the panel's Settings
 --  page (see HOMEBREW) are those rules. Cards older than the Mundane
 --  Importer's are brought up to date by the importer, when there is one on
 --  the table, before this calls on every fighter.
@@ -182,12 +182,18 @@ end
 -- the panel's top edge and tilted towards the players so it is easy to
 -- read. The importer and the Controller share it: one form, one tablet --
 -- either one's button takes it away again, or moves it to its own panel.
--- Both buttons are lit (anthracite, pale label) while the tablet is there.
+-- Both buttons are lit (anthracite, pale label) while the tablet shows the
+-- form. The Controller's Supported Mechanics button puts the same tablet
+-- up showing the instructions page (INFO_URL, the tablet named INFO_NAME)
+-- instead: a press on either button while the tablet shows the other's
+-- page turns it to this one's, where it stands.
 local FEEDBACK = {
     MARK = "✉︎", TEXT = "Feedback",   -- the envelope its own text: with the word it leaves a wide gap
     W = 124, H = 30, MARK_W = 22,           -- the button, and the envelope's room in it (panel units)
     URL   = "https://docs.google.com/forms/d/e/1FAIpQLSdOTHX_jjUigf9HpH9mRPav5yBvyKPLSV9g1Q09N9dnUHUU7g/viewform?usp=publish-editor",
     NAME  = "Mundane Feedback",             -- the tablet's name
+    INFO_URL  = "",                         -- the instructions page (empty: none yet)
+    INFO_NAME = "Mundane Supported Mechanics",   -- the tablet's name while it shows that page
     TAG   = "Mundane Feedback",             -- the tablet's tag
     -- the tags of the tablets older scripts put up, one each: found and
     -- taken away like the shared one
@@ -222,12 +228,27 @@ function FEEDBACK.tablet()
     return FEEDBACK.tablets()[1]
 end
 
+-- What the tablet shows: "feedback" (the form), "info" (the instructions
+-- page, told by the tablet's name) or nil (no tablet).
+function FEEDBACK.showing()
+    local tab = FEEDBACK.tablet()
+    if not tab then return nil end
+    local ok, name = pcall(function() return tab.getName() end)
+    return (ok and name == FEEDBACK.INFO_NAME) and "info" or "feedback"
+end
+
+-- The name and the page of the tablet showing `what` ("feedback" / "info").
+function FEEDBACK.page(what)
+    if what == "info" then return FEEDBACK.INFO_NAME, FEEDBACK.INFO_URL end
+    return FEEDBACK.NAME, FEEDBACK.URL
+end
+
 -- The button: a plain button with the envelope and the word over it, lit
--- while the tablet is up (`on`; FEEDBACK.draw changes it in place).
+-- while the tablet shows the form (FEEDBACK.draw changes it in place).
 function FEEDBACK.xml()
     local w, h, m = FEEDBACK.W, FEEDBACK.H, FEEDBACK.MARK_W
     local left = -w / 2 + 8
-    local on = FEEDBACK.tablet() ~= nil
+    local on = FEEDBACK.showing() == "feedback"
     local ink = on and PALE or INK
     return string.format([[
         <Panel id="feedbackBox" rectAlignment="MiddleRight" width="%d" height="%d" color="#00000000">
@@ -240,8 +261,11 @@ function FEEDBACK.xml()
         left + m + 4 + (w - 8 - m - 4 - 8) / 2, w - 8 - m - 4 - 8, h, ink, FEEDBACK.TEXT)
 end
 
--- The button lit (`on`: the tablet is up) or not, in place.
+-- The button lit or not, in place, for what the tablet shows (`on`: as
+-- FEEDBACK.showing says, or true / false from an older script: the form
+-- or nothing).
 function FEEDBACK.draw(on)
+    on = on == true or on == "feedback"
     pcall(function()
         self.UI.setAttribute("feedbackBtn", "colors", on and LIT or WASH)
         self.UI.setAttribute("feedbackMark", "color", on and PALE or INK)
@@ -249,19 +273,22 @@ function FEEDBACK.draw(on)
     end)
 end
 
--- Asked by the other script when it puts the tablet up or takes it away,
--- so both buttons agree.
+-- Asked by the other script when it puts the tablet up, turns it to the
+-- other page or takes it away, so all the buttons agree.
 function feedbackLit(on)
-    FEEDBACK.draw(on == true)
+    FEEDBACK.draw(on)
 end
 
--- This button and every other importer's and Controller's lit or not.
-function FEEDBACK.drawAll(on)
-    FEEDBACK.draw(on)
+-- This script's buttons and every other importer's and Controller's lit
+-- or not, for what the tablet shows (`what`: as FEEDBACK.showing says).
+-- The form is passed on as true, which an older script also takes.
+function FEEDBACK.drawAll(what)
+    FEEDBACK.draw(what)
+    local pass = what == "feedback" or what or false
     for _, tag in ipairs({ IMPORTER_TAG, CONTROLLER_TAG }) do
         local ok, list = pcall(function() return getObjectsWithTag(tag) end)
         for _, o in ipairs(ok and type(list) == "table" and list or {}) do
-            if o ~= self then callIfHas(o, "feedbackLit", on) end
+            if o ~= self then callIfHas(o, "feedbackLit", pass) end
         end
     end
 end
@@ -294,19 +321,31 @@ function FEEDBACK.show(tab, url)
     if not pcall(function() tab.Browser.url = url end) then pcall(function() tab.setValue(url) end) end
 end
 
--- The button pressed: the tablet put up over a panel (PANEL) `h` tall --
--- or, when it is up already (put up by either script), taken away. A press
--- while the tablet is still spawning does nothing.
-function FEEDBACK.open(panel, h)
+-- A button pressed: the tablet put up over a panel (PANEL) `h` tall,
+-- showing `what` ("feedback", the default, or "info") -- or, when it is up
+-- already (put up by either script), taken away if it shows that, else
+-- turned to it where it stands. A press while the tablet is still
+-- spawning does nothing.
+function FEEDBACK.open(panel, h, what)
+    what = what or "feedback"
     if FEEDBACK.spawning then return end
+    local tag = FEEDBACK.TAG
+    local name, url = FEEDBACK.page(what)
     local up = FEEDBACK.tablets()
     if #up > 0 then
-        for _, o in ipairs(up) do pcall(function() o.destruct() end) end
-        return FEEDBACK.drawAll(false)
+        if FEEDBACK.showing() == what then
+            for _, o in ipairs(up) do pcall(function() o.destruct() end) end
+            return FEEDBACK.drawAll(false)
+        end
+        for k = 2, #up do pcall(function() up[k].destruct() end) end
+        local tab = up[1]
+        pcall(function() tab.setName(name) end)
+        pcall(function() if not tab.hasTag(tag) then tab.addTag(tag) end end)
+        FEEDBACK.show(tab, url)
+        return FEEDBACK.drawAll(what)
     end
     local at, rot = FEEDBACK.spot(panel, h)
     if not at then return end
-    local name, tag, url = FEEDBACK.NAME, FEEDBACK.TAG, FEEDBACK.URL
     FEEDBACK.spawning = true
     local ok = pcall(function()
         spawnObject({ type = "Tablet", position = at, rotation = rot, sound = false,
@@ -322,7 +361,7 @@ function FEEDBACK.open(panel, h)
     end)
     if not ok then FEEDBACK.spawning = nil; return end
     pcall(function() Wait.time(function() FEEDBACK.spawning = nil end, 5) end)   -- a spawn that never came back
-    FEEDBACK.drawAll(true)
+    FEEDBACK.drawAll(what)
 end
 
 -- The whole panel round its content: the defaults, an anthracite border
@@ -430,15 +469,21 @@ RULES.actionTypes = {
 -- card's TRAIT_RULES.shot). `distance`: how far the action moves its
 -- fighter, a list of { stat, times } added up -- "D6" for a die thrown for
 -- it -- shown over the stats and said with the action (see the card's
--- ACTIVATION.moveBy), the bar's title `distanceTitle` or the label with
--- what it adds up ("Dash (M + I)"). Fight and the Shoot actions pay for the
+-- ACTIVATION.moveBy), the bar's title `distanceTitle` or the label, the
+-- cost and what it adds up ("Dash (D) - Mov + I", "Crawl (D) - Strength").
+-- `escape`: Desperate Escape's D6 -- on this or more the fighter goes Out
+-- Cold rather than Out of Action (see the card's ACTIVATION.escape).
+-- `targets`: "one" -- aimed at the one fighter its player has selected,
+-- not taken while several are -- or "several" (the card knows Treat Ally,
+-- Coup de Grace and the Wyrd powers with a target as "one", Group
+-- Activation as "several"; see its ACTIVATION.aimsAt). Fight and the Shoot actions pay for the
 -- weapons' attacks: taken from the panel, they light up the weapons they
 -- are for, and the attack after them spends nothing more (see the card's
 -- ACTIVATION.attackCost). `desc`, when filled in, shows over the stats
 -- while the cursor is on the action.
 RULES.actions = {
     { key = "move",             label = "Move",             cost = "S", type = "movement", desc = "",
-      distance = { { "M", 1 } }, distanceTitle = "Movement" },
+      distance = { { "M", 1 } } },
     { key = "dash",             label = "Dash",             cost = "D", type = "movement", desc = "",
       distance = { { "M", 1 }, { "I", 1 } } },
     { key = "engage",           label = "Engage",           cost = "S", type = "close",    desc = "",
@@ -454,9 +499,12 @@ RULES.actions = {
     { key = "treat_ally",       label = "Treat Ally",       cost = "S", type = "utility",  desc = "" },
     { key = "group_activation", label = "Group Activation", cost = "S", type = "utility",  desc = "" },
     { key = "fight",            label = "Fight",            cost = "D", type = "close",    desc = "" },
-    { key = "retreat",          label = "Retreat",          cost = "D", type = "movement", desc = "" },
-    { key = "crawl",            label = "Crawl",            cost = "D", type = "movement", desc = "" },
-    { key = "desperate_escape", label = "Desperate Escape", cost = "D", type = "movement", desc = "" },
+    { key = "retreat",          label = "Retreat",          cost = "D", type = "movement", desc = "",
+      distance = { { "I", 1 } } },
+    { key = "crawl",            label = "Crawl",            cost = "D", type = "movement", desc = "",
+      distance = { { "S", 1 } } },
+    { key = "desperate_escape", label = "Desperate Escape", cost = "D", type = "movement", desc = "",
+      escape = 3 },
     { key = "tend_wounds",      label = "Tend Wounds",      cost = "D", type = "utility",  desc = "" },
     -- not an action of the rules: it opens the Recovery Test panel (see
     -- the card's recoveryTest). `always`: never dimmed, spends no action,
@@ -529,6 +577,15 @@ RULES.conditions = {
     { key = "maintaining_power", label = "Maintaining Power", short = "PWR", desc = "" },
     -- nothing of its own: a reminder for a custom condition
     { key = "special",     label = "Special",     short = "SPC", desc = "" },
+    -- `auto`: never toggled by hand (not in C's panel) -- a fighter has it
+    -- while a skill or wargear of its that says `condition` works
+    -- (Berserker; Fearsome, Horrific Appearance)
+    { key = "frenzy",      label = "Frenzy",      short = "FRZ", desc = "", auto = true,
+      mods = { A = 1 } },                     -- +1 Attacks
+    -- an enemy that starts a fight against it makes a Willpower check
+    -- first, and fails into Feared (the card's rollAttack) -- unless it is
+    -- Fearsome itself
+    { key = "fearsome",    label = "Fearsome",    short = "FSM", desc = "", auto = true },
 }
 
 -- Skills (fighter.skills: the names as the roster lists them), matched by
@@ -569,9 +626,14 @@ RULES.conditions = {
 --              fighter, shown and said in chat when it is taken -- a list
 --              of { stat, times }, added up (Sprint: M + 2x I), as the
 --              actions' own `distance` is;
---   fearsome   true: an enemy that starts a fight against it makes a
---              Willpower check first, and fails into the Feared condition
---              (see the card's rollAttack) -- unless it is Fearsome itself;
+--   lines      for a skill or wargear that is an action: what it shows
+--              over the stats when it is taken, a line each (Drop Rig's
+--              Descend: '3" horizontally', '12" vertically'), and says
+--              in chat after its name;
+--   fearsome   true: as `condition = "fearsome"` -- an enemy that starts a
+--              fight against it makes a Willpower check first, and fails
+--              into the Feared condition (see the card's rollAttack) --
+--              unless it is Fearsome itself;
 --   ironJaw    N: against attacks with no AP (and Light weapons used while
 --              engaged), it counts N higher in Toughness (Iron Jaw: 2; see
 --              the card's woundPlan);
@@ -580,6 +642,29 @@ RULES.conditions = {
 --              rangedHit);
 --   unstoppable  true: activating with a wound lost, it makes a Willpower
 --              check at once, and regains a wound when it passes;
+--   bullCharge true: once it has taken the Charge action in an activation,
+--              its melee profiles are +1 Strength and have Knockback (6+)
+--              -- one with a Knockback of its own keeps that (Bull Charge;
+--              see the card's TRAIT_RULES.bull);
+--   biceps     true: a Heavy melee weapon it fights with still lets it use
+--              a second weapon, one that isn't Heavy (Bulging Biceps; see
+--              the card's TRAIT_RULES.secondaryOk);
+--   rainOfBlows  true: its first round of close combat in an activation
+--              over and still Engaged, it fights a second round, for free
+--              (Rain Of Blows; see the card's TRAIT_RULES.fought);
+--   dodge      N: each wound that goes through its saves, a D6 -- N or more
+--              and that wound is dodged -- while it still has wounds to lose
+--              (Dodge: 6; see the card's ACTIVATION.dodge);
+--   counterAttack  true: attacking in melee outside its own activation
+--              (fighting back), it makes two attacks, not one (Counter-
+--              Attack; see the card's TRAIT_RULES.opening);
+--   juggernaut true: hit by a ranged attack, it is Suppressed only once
+--              the attack is over, and only if it lost a wound or had an
+--              Injury dice rolled for it (Juggernaut; see the card's
+--              rangedHit);
+--   condition  a condition's key: the fighter has that condition while the
+--              skill works -- wargear: always (Berserker: "frenzy";
+--              Fearsome, Horrific Appearance: "fearsome");
 --   backstab   true: its melee weapons have the Backstab trait -- one that
 --              has it already adds 2 to its Strength, not 1 (Backstab; see
 --              the card's TRAIT_RULES.stab);
@@ -587,8 +672,9 @@ RULES.conditions = {
 --              rolled again, once (Cut-Throat; see the card's
 --              ACTIVATION.coup);
 --   lieLow     true: while it is Suppressed it can't be the target of a
---              ranged attack -- an enemy about to shoot it is told so, and
---              asked whether to go on (Lie Low; see the card's rollAttack);
+--              ranged attack from beyond the weapon's Short Range -- an
+--              enemy about to shoot it from there is told so, and asked
+--              whether to go on (Lie Low; see the card's rollAttack);
 --   shoots     N: it may make N Shoot actions in an activation, not one
 --              (Fast Shot: 2) -- Shoot only, so never a second shot with a
 --              Heavy weapon, which is a Braced Shot;
@@ -612,9 +698,15 @@ RULES.conditions = {
 --   ironWill   N: while it is on the table, its gang's Bottle Checks are
 --              taken against N more (Iron Will: 1; see the Mundane
 --              Controller's Bottle Check);
+--   statuses   for one that is an action: the statuses it can be taken in
+--              -- on the Special tab only then (Sprint: Active; Heal Ally,
+--              Distribute Ammo: Active or Suppressed); none: any;
 --   label      for a skill that is an action: what the action is called
 --              on the Special tab, when not by the skill's own name
 --              (Munitioneer: Distribute Ammo);
+--   heal       N: its action gives the one ally its player has selected --
+--              itself too -- N wounds back, unless Seriously Injured
+--              (Medicate's Heal Ally: 1; see the card's ACTIVATION.heal);
 --   distribute N: its action hands out ammo -- every fighter of its gang
 --              within N inches with a weapon out of ammo makes an
 --              Intelligence check at once, and reloads on passing it
@@ -641,11 +733,11 @@ RULES.conditions = {
 --   inv        N: an invulnerable save of N+ -- never worsened by AP, never
 --              bettered by cover or anything else that betters a save; each
 --              wound takes whichever of the two saves is better (see the
---              card's takeSaves) (Refractor Shield: 5);
+--              card's takeSaves) (Refractor Field: 5);
 --   burns      true: the first natural 1 on a save taken with its `inv`
 --              burns it out for the rest of the battle -- its name turns
 --              grey, and a left click on it switches it back on or off
---              (Refractor Shield; the Bio-Booster, which is used up so);
+--              (Refractor Field; the Bio-Booster, which is used up so);
 --   bioBooster N: the first time in the battle a wound that goes through
 --              brings the fighter to 0 wounds, that wound's Lethality is N
 --              less -- down to 0: two Injury dice of their own instead, the
@@ -659,7 +751,72 @@ RULES.conditions = {
 --              and conditions (keys) it never gets (Hazard Suit: Blaze,
 --              Radphage);
 --   gasInv     N: an invulnerable save of N+ against Gas weapons only
---              (Respirator: 5).
+--              (Respirator: 5);
+--   flashMod   N: added to the Initiative check it makes when hit by a
+--              Flash weapon (Photo-Goggles: -2; see the card's traitHit);
+--   agility    N: added to every Agility test it makes, and shown with A's
+--              Agility Test (Heavy Carapace Armour: -1; see the card's
+--              ACTIVATION.agility);
+--   agilityReroll  "all": a failed Agility test of its is re-rolled once,
+--              the second result standing -- "ones": a natural 1 is
+--              (Tentacles: "all"; the better of it and a gang's re-roll
+--              counts, never both; see the card's ACTIVATION.agilityReroll);
+--   spends     true: taking its `once` action uses the item up for the
+--              battle -- its name grey under the stats, its `mods` no
+--              longer counting (Needle Spines once its Fire Spines is
+--              taken; the Mundane Controller's Start Game gives it back);
+--   burst      { range, profile = { S, AP, L, traits } }: its action hits
+--              every other fighter within `range` inches, base to base --
+--              friend or foe -- once, automatically, with that profile,
+--              nearest first; the Wound roll, saves and Injury dice
+--              follow as for any hit (Needle Spines' Fire Spines);
+--   toxicBlood { range, profile }: each wound of an attack that goes
+--              through its saves -- until it is down to 0 wounds -- counts;
+--              once that attack is over, every other fighter within
+--              `range` makes that many Agility tests, each failed one an
+--              automatic hit with the profile, resolved nearest first, as
+--              `burst` (Toxic Blood; see the card's ACTIVATION.toxicBlood);
+--   voidSoul   true: an enemy or friendly Wyrd casting a power while it is
+--              among the fighters selected is asked first -- go on, or
+--              call the power off (Void Soul; see the card's useAction);
+--   jumpDown   true: its Falling Down, from A's Special tab, first asks
+--              whether it jumps down -- yes: its Agility test passes
+--              whatever the die (Wing Membranes; see the card's
+--              ACTIVATION.fallAsk);
+--   activeMelee  a trait its melee profiles gain during its activation --
+--              never one that has the trait already (Pyromantic Mantle:
+--              "Blaze (5+)");
+--   booster    as its fighter activates it is asked whether to use the
+--              item; yes: until that activation is over, `mods` (never
+--              past a stat's highest), the Flying subtype with `flying`,
+--              on the charge `charge` -- { hit = to hit with every weapon,
+--              S = to its Strength } -- and with `unstable` grenades and
+--              Template weapons gain Unstable (Jump Booster; see the card's
+--              ACTIVATION.boosterAsk);
+--   refraction { moved, still }: a ranged attack on it (one with a hit
+--              die) asks whether it moved in its last activation -- the
+--              hit roll is `moved` worse, or `still` (Refraction Cloak: -1,
+--              -2; see the card's ACTIVATION.cloaked);
+--   check      a stat: its action does what it does only once the fighter
+--              passes a check of that stat (Servo-Medicae's Auto-Medicate:
+--              Int, then `heal`);
+--   restrain   { test, fail, freeBy }: its action aimed at the one enemy
+--              selected: the enemy makes the test ("agility", or a stat),
+--              and gains condition `fail` on failing it -- with `freeBy`, a
+--              stat: until a check of it, passed at the end of one of its
+--              activations, frees it, as a Web hit's (Magnacles' Restrain:
+--              Agility, Webbed, S; see the card's restrained);
+--   enrage     { range, dice, stat, needReady, needStatus }: its action has
+--              every friend completely within `range` inches -- its whole
+--              base -- that is Ready (`needReady`) and in status
+--              `needStatus` roll a D`dice`, one after the other, and add it
+--              to `stat` until the end of the round (Corpse Grinder Cult
+--              Icon's Enrage; see the card's enraged);
+--   wyrdPower  (wargear) the importer gives its fighter the Wyrd subtype and
+--              this Wyrd power, where the roster doesn't already (Conduit
+--              Of Ozostium: Force Blast).
+--   A wargear item's `aura` (below) is always in effect, shown in the plain
+-- colours, not purple (Seven-Pointed Talisman).
 -- What a Wyrd power (`type = "wyrd"`) does once manifested -- nothing
 -- before: a power that fails, or is disrupted out of it, does none of it.
 -- "While in effect" is for a Continuous power, until it ends (see the
@@ -712,28 +869,34 @@ RULES.conditions = {
 -- A fighter's skills do nothing while it is at 0 wounds, Seriously Injured
 -- or Out of Action (the card's SKILL.off).
 RULES.skills = {
-    { name = "Counter-Attack", desc = "" },
+    { name = "Counter-Attack", desc = "", counterAttack = true },
     { name = "Inspiring",      desc = "", costs = { group_activation = "F" } },
-    { name = "Juggernaut",     desc = "" },
+    { name = "Juggernaut",     desc = "", juggernaut = true },
     -- savant
     { name = "Fast Reload",    desc = "", fastReload = true },
     { name = "Iron Will",      desc = "", ironWill = 1 },
-    { name = "Medicate",       desc = "", action = "S", type = "utility" },
+    { name = "Medicate",       desc = "", action = "S", type = "utility", label = "Heal Ally", heal = 1,
+      statuses = { "active", "suppressed" } },
     { name = "Munitioneer",    desc = "", action = "S", type = "utility",
-      label = "Distribute Ammo", distribute = 6 },   -- within 6"
+      label = "Distribute Ammo", distribute = 6, statuses = { "active", "suppressed" } },   -- within 6"
     -- agility
     { name = "Catfall",        desc = "", catfall = true },
+    { name = "Dodge",          desc = "", dodge = 6 },
     { name = "Spring Up",      desc = "", springUp = true },
-    { name = "Sprint",         desc = "", action = "D", type = "movement",
+    { name = "Sprint",         desc = "", action = "D", type = "movement", statuses = { "active" },
       distance = { { "M", 1 }, { "I", 2 } } },   -- M + 2x I
+    -- brawn
+    { name = "Bull Charge",        desc = "", bullCharge = true },
+    { name = "Bulging Biceps",     desc = "", biceps = true },
     -- close combat
-    { name = "Berserker",          desc = "", mods = { A = 1 } },   -- +1 Attacks
+    { name = "Berserker",          desc = "", condition = "frenzy" },
     { name = "Combat Master",      desc = "", master = true },
     { name = "Headbutt",           desc = "", weapon = { name = "Headbutt", profiles = {
         { SR = "E", LR = "-", S = "S+1", AP = "-", L = "1", traits = "Additional Attack (1), Melee" } } } },
     { name = "Heavy Blows",        desc = "", meleeS = { heavy = 1 } },
+    { name = "Rain Of Blows",      desc = "", rainOfBlows = true },
     { name = "Two-Weapon Fighter", desc = "", secondary = 2 },
-    { name = "Fearsome",           desc = "", fearsome = true },
+    { name = "Fearsome",           desc = "", condition = "fearsome" },
     { name = "Iron Jaw",           desc = "", ironJaw = 2 },
     { name = "Nerves Of Steel",    desc = "", steel = true },
     { name = "Unstoppable",        desc = "", unstoppable = true },
@@ -819,23 +982,70 @@ RULES.wargear = {
     { name = "Bio-Booster",            desc = "", aka = { "Bio Booster", "Biobooster" },
       bioBooster = 1, burns = true },
     { name = "Bomb Delivery Rats",     desc = "" },
-    { name = "Book Of The Redemption", desc = "" },
+    { name = "Cult Icon",              desc = "", groupReroll = true },   -- a failed Group Activation check re-rolled once
+    { name = "Carapace Armour - Heavy", desc = "", aka = { "Heavy Carapace Armour", "Heavy Carapace", "Carapace Armour (Heavy)" },
+      agility = -1 },
     { name = "Chaos Familiar",         desc = "" },
     { name = "Dirt Bike",              desc = "" },
-    { name = "Drop Rig",               desc = "", action = "S", type = "utility", label = "Descend" },
-    { name = "Grapnel Launcher",       desc = "", action = "D", type = "utility", label = "Grapnel" },
+    { name = "Drop Rig",               desc = "", action = "S", type = "utility", label = "Descend",
+      lines = { '3" horizontally', '12" vertically' } },
+    { name = "Grapnel Launcher",       desc = "", action = "D", type = "utility", label = "Grapnel",
+      lines = { '12" straight', "end on higher level" } },
     { name = "Grav Chute",             desc = "", noFall = true },
     { name = "Hazard Suit",            desc = "", immune = { "blaze", "radphage" } },
     { name = "Medicae Kit",            desc = "", assist = 1 },
     { name = "Mesh Armour",            desc = "", aka = { "Mesh Armor" },
       mods = { Sv = -1 }, when = "engaged" },       -- a save one better in close combat
-    { name = "Pyromantic Mantle",      desc = "" },
-    { name = "Reflec Shroud",          desc = "", noAp = { "Las", "Plasma", "Melta" } },
-    { name = "Refractor Shield",       desc = "", inv = 5, burns = true },
+    { name = "Reflec Shroud",         desc = "", noAp = { "Las", "Plasma", "Melta" } },
+    { name = "Photo-Goggles",          desc = "", aka = { "Photo Goggles" }, flashMod = -2 },
+    { name = "Refractor Field",        desc = "", aka = { "Refractor Shield" }, inv = 5, burns = true },
     { name = "Respirator",             desc = "", gasInv = 5 },
     { name = "Stimm-Slug Stash",       desc = "", aka = { "Stim-Slug Stash" },
       action = "F", type = "utility", label = "Stimm-Slug", once = true,
       boost = { M = 2, S = 2, T = 2 }, reaction = { roll = 1, wounds = 1 } },
+    -- Outcasts: the Ozostium artefacts
+    { name = "Seven-Pointed Breastplate", desc = "" },      -- Sv +1: the roster's statline, once it has it
+    { name = "Conduit Of Ozostium",    desc = "", wyrdPower = "Force Blast" },
+    { name = "Gloves Of Ozostium",     desc = "", wyrdPower = "Flaming Weapon" },
+    { name = "Seven-Pointed Talisman", desc = "", mods = { Cl = 1 },
+      aura = { range = 6, side = "all", mods = { Cl = 1 } } },   -- every fighter within 6", and the bearer
+    -- Outcasts: mutations (the roster lists them as wargear)
+    { name = "Void Soul",              desc = "", voidSoul = true },
+    { name = "Extra Appendage",        desc = "" },         -- +1 A: the roster's statline
+    { name = "Horrific Appearance",    desc = "", condition = "fearsome" },
+    { name = "Massive Claws",          desc = "" },         -- the roster's weapon
+    { name = "Needle Spines",          desc = "", mods = { Sv = -1 }, when = "engaged",   -- a save one better in close combat
+      action = "S", type = "utility", label = "Fire Spines", once = true, spends = true,
+      statuses = { "active", "suppressed" },
+      burst = { range = 3, profile = { S = "-", AP = "-", L = "1", traits = "Toxin (3+)" } } },
+    { name = "Tentacles",              desc = "", agilityReroll = "all" },
+    { name = "Toxic Blood",            desc = "",
+      toxicBlood = { range = 1, profile = { S = "-", AP = "-", L = "1", traits = "Toxin (3+)" } } },
+    { name = "Wing Membranes",         desc = "", jumpDown = true },
+    -- Ironhead Squats
+    { name = "Exo Suit",               desc = "", aka = { "Exo-Suit" }, immune = { "blaze", "radphage" } },
+    -- Cawdor
+    { name = "Book Of The Redemption", desc = "" },
+    { name = "Pyromantic Mantle",      desc = "", activeMelee = "Blaze (5+)" },
+    -- Delaque
+    { name = "Psychomancer's Harness", desc = "", aka = { "Psychomancers Harness" } },   -- movement: the table's
+    -- Orlock
+    { name = "Jump Booster",           desc = "", aka = { "Jump-Booster" },
+      booster = { mods = { M = 3 }, flying = true, charge = { hit = 1, S = 1 }, unstable = true } },
+    -- Van Saar
+    { name = "Augurspex",              desc = "" },
+    { name = "Refraction Cloak",       desc = "", refraction = { moved = -1, still = -2 } },
+    { name = "Servo-Medicae",          desc = "", aka = { "Servo Medicae" },
+      action = "F", type = "utility", label = "Auto-Medicate", check = "Int", heal = 1,
+      statuses = { "active", "suppressed" } },
+    { name = "Vox Array",              desc = "", costs = { group_activation = "F" } },
+    -- Palanite Enforcers
+    { name = "Magnacles",              desc = "", action = "D", type = "close", label = "Restrain",
+      statuses = { "engaged" }, restrain = { test = "agility", fail = "webbed", freeBy = "S" } },
+    -- Corpse Grinder Cults
+    { name = "Corpse Grinder Cult Icon", desc = "", action = "S", type = "utility", label = "Enrage",
+      statuses = { "active" },
+      enrage = { range = 6, dice = 3, stat = "M", needReady = true, needStatus = "active" } },
 }
 
 -- Weapon accessories. The roster names a weapon with its accessories in
@@ -847,15 +1057,19 @@ RULES.wargear = {
 --   aimed   N: an Aimed Shot with the weapon is N better to hit, not 1
 --           (Mono-Sight: 2) -- not on top of a skill's (Sharpshooter): the
 --           better of the two counts;
+--   coverShort / coverLong  N: added to the cover a target within the
+--           weapon's Short Range / beyond it (within Long Range) is asked
+--           about (Las-Projector: Short -1, Telescopic Sight: Long -1) --
+--           shown orange on its card, the accessory named in its bar;
 --   aka     other names the roster may list it under (a list).
 RULES.accessories = {
     { name = "Focusing Crystal" },
     { name = "Hotshot Las Pack" },
     { name = "Infra-Sight" },
-    { name = "Las-Projector" },
+    { name = "Las-Projector", coverShort = -1 },
     { name = "Mono-Sight", aimed = 2 },
     { name = "Suspensors" },
-    { name = "Telescopic Sight" },
+    { name = "Telescopic Sight", coverLong = -1 },
 }
 
 -- How each stat is tested (see the card's rollStat): the number of D6. M
@@ -893,7 +1107,7 @@ RULES.limits = {
 -- matched against a whole comma-separated trait). N is a single digit.
 RULES.traits = {
     melee     = "melee",
-    smoke     = "smoke",              -- a hit with it doesn't Suppress (nor does Melee)
+    smoke     = "smoke",              -- a hit with it doesn't Suppress (nor does Melee) and never wounds
     unstable  = "unstable",
     unwieldy  = "unwieldy",
     light     = "light",
@@ -914,16 +1128,20 @@ RULES.traits = {
     toxin     = "toxin",              -- Toxin (N+)  (the card's TRAIT_RULES.toxin)
     shock     = "shock",              -- Shock (N+): a hit roll of N+ wounds automatically, as a 6
     knockback = "knockback",          -- Knockback (N+): a hit roll of N+ knocks the target back (once an attack)
-    blast     = "blast[^,]*",         -- Blast (3") / (5"): a Knockback with it knocks nobody back
+    blast     = "blast[^,]*",         -- Blast (3") / (5"): its Knockback a D6 for each fighter caught, once it is over
     cursed    = "cursed",             -- a target hit makes a Willpower check, failed: Insanity
     flash     = "flash",              -- ranged: no Wound roll; the target hit is Blind and loses its Ready marker
     graviton  = "graviton pulse",     -- ranged: no Wound roll
-    lance     = "lance",              -- melee: +1 S on the charge ("A + 1") for a Mounted fighter
+    lance     = "lance",              -- melee: +1 S on the charge for a Mounted fighter
+    lanceBomb = "lance%-bomb",        -- melee: its first hit in a game spends it (SPENT, a click readies it again)
     template  = "template",           -- ranged: no hit roll, every enemy selected is hit
+    drag      = "drag",               -- a hit, not Out of Action: a D6 at least its S drags it a Firepower die's inches
+    twinLinked = "twin%-linked",      -- a hit at RF: the Firepower dice may be re-rolled
     blaze     = "blaze",              -- Blaze (N+): a Wound roll of N+ makes one more hit, which hits by itself
     -- what a wound does (the card's TRAIT_RULES.hurts; N without a number: 6)
     damage    = "damage",             -- Damage (N): a wound through takes N wounds off (without it: 1)
     rending   = "rending",            -- Rending (N+): a natural N+ to wound (Shock's 6 too) -- that wound's AP one worse
+    breaching = "breaching",          -- Breaching (N+): N+ to wound -- no armour save against that wound
     shred     = "shred",              -- Shred (N+): N+ to wound -- that wound's Lethality one higher
     concussive = "concussive",        -- Concussive (N+): each N+ to wound -- a stack of Concussion
     gas       = "gas",                -- no armour save (a Respirator: 5+ invulnerable against it)
@@ -967,13 +1185,55 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 groupRange, on Distribute Ammo every friend within its
 --                 range.
 --   agility       Agility test: one D6, passed on this or more;
---   agilityGang   the fighters of a gang of this `type` add `mod` to that
---                 die (the type as the roster names it under the gang's
---                 name, any case) -- unless the gang is any of `unless`,
---                 which the roster names in brackets after the type
---                 ("House Escher (Malstrain Corrupted)").
+--   escherGang    House Escher's rules: they go to the fighters of a gang
+--                 of this `type` (the type as the roster names it under the
+--                 gang's name, any case; a variant of the gang, named after
+--                 a colon, "House Escher: Wyld Hunt", is not of the type --
+--                 it has its own gang rule) -- unless the gang is any of
+--                 `unless`, which the roster names in brackets after the
+--                 type ("House Escher (Malstrain Corrupted)"). `agility`:
+--                 "ones" -- an Agility test's natural 1 is re-rolled, "all"
+--                 -- a failed one is. A gang of one of the `variants` (its
+--                 `type` or any of its `aka` named after the colon:
+--                 "House Escher: Wyld Hunt") has that variant's rules
+--                 instead, the house's own not at all: `agility` as above,
+--                 `toxinShred` N -- every weapon profile with Toxin (N+)
+--                 and no Shred gains Shred (N+).
 --   coupGang      Coup de Grace: the fighters of a gang of this `type` add
---                 `mod` to their own roll (read as agilityGang is).
+--                 `mod` to their own roll (read as escherGang's type is).
+--   corrupted     the gangs no gang rule below goes to (named in brackets
+--                 after the type, as escherGang's `unless`) -- one with an
+--                 `unless` of its own goes by that instead;
+--   noGangRule    nor does any of them go to a fighter tagged with one of
+--                 these (its role line: "Agitator • Hanger-on, Support"),
+--                 escherGang's and coupGang's neither. Like escherGang, each
+--                 goes to the house itself, never to a variant of it:
+--   delaqueGang   a fighter with at least `friends` friends within `range`
+--                 inches, base to base (Out of Action, or tagged with
+--                 noGangRule, don't count), has its stats changed by `mods`;
+--   goliathGang   once a fighter has taken the Charge action, its stats are
+--                 changed by `charge` until its activation is over -- and a
+--                 melee profile going by its Strength that attacks on the
+--                 charge without that action (as Lance or Bull Charge
+--                 would) has the S of `charge` added too;
+--   palaniteGang  a fighter's actions cost what `costs` says while it is in
+--                 status `status` (none: in any);
+--   outcastGang   a fighter within `range` inches of a Leader of its gang,
+--                 base to base (the Leader itself too), passes its Nerve
+--                 Checks whatever the dice say (`nerve`) and makes no
+--                 Willpower check against a Fearsome enemy (`fearsome`).
+--   extraArm      a fighter with this `rule` (the roster's "Rules:" line, or
+--                 a skill or wargear of that name) takes Braced Shot for
+--                 `cost` -- but not after a Move or a Shoot in the same
+--                 activation, nor either of those after it (Fast Shot
+--                 neither: it is more Shoots);
+--   fixedMove     a fighter tagged with one of these (Mounted) has its M
+--                 changed by no wargear (the Stimm-Slug) and no Wyrd power
+--                 (Quickening, an enemy's) -- a number set by hand still is;
+--   readyMarks    the Ready markers a fighter tagged with one of these keys
+--                 gets each round, if more than one (a Spyrer: 2): it may
+--                 activate that many times, S half lit while one is left
+--                 after the first; losing a Ready marker takes one of them.
 --   fallSave     Falling Down: a passed Agility test takes this many
 --                 inches off the height fallen;
 --   fallLevels    what is left then decides what the fall does -- less than
@@ -981,7 +1241,7 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 second: a wound lost as well (at 0 wounds an Injury dice);
 --                 more: Out of Action (see the card's fallingDown).
 --   disruptRange  Wyrd powers: an enemy Wyrd within this many inches (base to
---                 base) with sight of the caster may try to disrupt the
+--                 base) of the caster may try to disrupt the
 --                 cast (see the card's ACTIVATION.cast);
 --   disruptMod    a passed disrupt takes this off the caster's Willpower
 --                 check (it may go below the lowest Wil);
@@ -1005,7 +1265,12 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --   rapidOneHit   Shock (N+) on a Rapid Fire shot: false -- every hit the
 --                 Firepower dice give shares the hit roll, so every one of
 --                 them wounds automatically; true -- only the first does.
---   saveFails     a save roll of this or less always fails, whatever the
+--   unstableAll   Unstable: a natural 1 on a ranged hit die (after any
+--                 re-roll) hits the shooting fighter instead. false -- with
+--                 one hit, whatever the Firepower dice show; true -- with
+--                 every hit the Firepower dice give at Rapid Fire (one
+--                 without). A melee attack is always one hit.
+--   saveFails    a save roll of this or less always fails, whatever the
 --                 save (2: a natural 1 or 2);
 --   dicePause     seconds a roll that follows another waits after that one
 --                 showed (the Wound roll after the Hit roll, the saves
@@ -1018,6 +1283,11 @@ RULES.firepower = { { hits = 1, ammo = true }, { hits = 1 }, { hits = 1 }, { hit
 --                 the card's takeSaves);
 --   coverTemplate what cover adds against a ranged attack with neither
 --                 range in inches (a Template's "T").
+--   handWeapon    the weapon every fighter fights with that has nothing
+--                 else to fight with (name and profiles, as a weapon of the
+--                 roster's). `light` true: a fighter with a Melee or a Light
+--                 weapon has something to fight with; false: only a Melee
+--                 weapon counts (see the card's SKILL.hand).
 RULES.cfg = {
     engageRange   = 1,
     nerveRanges   = { leader = 12, champion = 6 },
@@ -1027,11 +1297,22 @@ RULES.cfg = {
     groupRange    = 3,
     preMeasure    = false,
     agility       = 4,
-    agilityGang   = { type = "House Escher", mod = 1,
+    escherGang    = { type = "House Escher", agility = "ones",
                       unless = { "Chaos Corrupted", "Genestealer Corrupted", "Genestealer Infected",
-                                 "Malstrain Corrupted" } },
+                                 "Malstrain Corrupted" },
+                      variants = { { type = "Wyld Hunt", agility = "all" },
+                                   { type = "Chymist Cult", toxinShred = 6 } } },
     coupGang      = { type = "Genestealer Cults", mod = 1 },
-    fallSave     = 3,
+    corrupted     = { "Chaos Corrupted", "Genestealer Corrupted", "Genestealer Infected", "Malstrain Corrupted" },
+    noGangRule    = { "hanger-on" },
+    delaqueGang   = { type = "House Delaque", range = 3, friends = 2, mods = { Ld = 1, Wil = 1 } },
+    goliathGang   = { type = "House Goliath", charge = { S = 1 } },
+    palaniteGang  = { type = "Palanite Enforcers", costs = { group_activation = "F" }, status = "active" },
+    outcastGang   = { type = "Outcasts", range = 6, nerve = true, fearsome = true },
+    readyMarks    = { spyrer = 2 },
+    extraArm      = { rule = "Extra Arm", cost = "S" },
+    fixedMove     = { "mounted" },
+    fallSave    = 3,
     fallLevels    = { 3, 6 },
     disruptRange  = 18,
     disruptMod    = -2,
@@ -1041,11 +1322,14 @@ RULES.cfg = {
     shockNatural  = false,
     knockback     = 1,
     rapidOneHit   = false,
+    unstableAll   = false,
     saveFails     = 2,
     coverShort    = 1,
     coverLong     = 2,
     coverTemplate = 1,
     dicePause     = 3,
+    handWeapon    = { light = true, name = "Hand Weapon", profiles = {
+        { SR = "E", LR = "-", S = "S", AP = "-", L = "1", traits = "Melee" } } },
 }
 
 -- ── Overrides ────────────────────────────────────────────────
@@ -1308,7 +1592,7 @@ local LOOK = {
     TEXT   = "#ECE6D8",
     DIM    = "#AAA08C",     -- what only explains: how to name a side, a homebrew set
     NOTE   = "#D4CAB2",     -- the reminder of reinforcements under End Round
-    HEAD   = "#FFD696",     -- "ROUND", "GAME SETUP", "HOMEBREW RULES"
+    HEAD   = "#FFD696",     -- "ROUND", "GAME SETUP", "SETTINGS" and its columns' headers
     NUMBER = "#FFC46E",     -- the round
     GLOW   = "#FFAA3C8C",   -- behind the round
     DIAMOND = "#2C2F31|#3A3E41|#232527|#2C2F31",   -- the Bottle Check's diamonds (resting, hovered, pressed)
@@ -1322,6 +1606,7 @@ LOOK.BUTTONS = {
     plain = { fill = "#18191A", line = LOOK.GOLD, ink = LOOK.TEXT },
     gold  = { fill = LOOK.GOLD, line = LOOK.GOLD, ink = "#181614" },   -- a choice made, Start Game, Apply
     red   = { fill = "#461210", line = "#E65040", ink = "#FFE2D6" },   -- End Round, a Bottle Check to take
+    dim   = { fill = "#18191A", line = "#8A7143", ink = LOOK.DIM },    -- Supported Mechanics, out of the way
 }
 
 -- The deployment's model: rolled on the setup's Roll for Deployment, a
@@ -1364,11 +1649,14 @@ local DEPLOY = {
 
 -- Homebrew: the table's own rules, as named sets, each a choice between
 -- the rules as written and the set's -- two radio buttons on the panel's
--- second page, Homebrew Rules (the button under the column opens it, Back
--- leaves it as it was), where "Apply Selected Rules" puts every choice in
--- force at once -- kept with the Controller. Each of SETS:
+-- second page, Settings (the button under the column opens it, Back
+-- leaves it as it was), where "Apply Settings" puts every choice in
+-- force at once -- kept with the Controller. The page has two columns:
+-- Gameplay on the left (how the game plays at the table, not its rules),
+-- Homebrew Rules on the right. Each of SETS:
 --   id     what a save knows it by (the same however the set is renamed)
---   off    the first button: the rules as written -- about 28 letters fit
+--   gameplay  true: in the Gameplay column (else under Homebrew Rules)
+--   off    the first button: the rules as written -- about 20 letters fit
 --          at full size (a longer label shrinks)
 --   name   the second: the set's rules
 --   offDesc  under them while the first is chosen: what the rules as
@@ -1377,14 +1665,19 @@ local DEPLOY = {
 --   rules  the overrides the set makes, in the format of the rules (see the
 --          overrides in RULES: actions, conditions, skills, wargear, limits,
 --          cfg, ...). Sets that are on are laid over each other in this
---          order, so where two change the same thing the later one wins --
+--          order (each column shows its own in this order too), so where
+--          two change the same thing the later one wins --
 --          but sets that add different actions, change different limits
 --          and so on just add up.
 -- (An "&" in a name or description reads "and", a "<" or ">" is dropped:
 -- TTS shows what is escaped as it is.)
 local HOMEBREW = {
     SETS = {
-        { id = "pre_measure", off = "No Pre-Measuring", name = "Allow Pre-Measuring",
+        { id = "slow_dice", off = "Fast Dice Speed", name = "Slow Dice Speed", gameplay = true,
+          offDesc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 3 s.",
+          desc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 4.5 s.",
+          rules = { cfg = { dicePause = 4.5 } } },
+        { id = "pre_measure", off = "No Pre-Measuring", name = "Allow Pre-Measuring", gameplay = true,
           offDesc = "Nothing shows who is in range before an action is taken: distances are judged by eye.",
           desc = "The cursor on Group Activation or Distribute Ammo highlights friendly fighters within range.",
           rules = { cfg = { preMeasure = true } } },
@@ -1400,31 +1693,40 @@ local HOMEBREW = {
           offDesc = "A Shock hit at Rapid Fire makes every hit's Wound roll an automatic 6.",
           desc = "A Shock hit at Rapid Fire makes only the first hit's Wound roll an automatic 6.",
           rules = { cfg = { rapidOneHit = true } } },
-        { id = "slow_dice", off = "Fast Dice Speed", name = "Slow Dice Speed",
-          offDesc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 3 s.",
-          desc = "A roll that follows another (the Wound roll after the Hit roll, the saves after it) waits 4.5 s.",
-          rules = { cfg = { dicePause = 4.5 } } },
+        { id = "unstable_all", off = "Unstable: One Hit", name = "Unstable: Rapid Fire",
+          offDesc = "A natural 1 on an Unstable weapon's Hit roll: 1 hit on the shooter.",
+          desc = "A natural 1 on an Unstable weapon's Hit roll: every hit the Firepower dice show goes to the shooter.",
+          rules = { cfg = { unstableAll = true } } },
+        { id = "hand_heavy", off = "Hand Weapon (no melee / no light)", name = "Hand Weapon (no melee)",
+          offDesc = "A fighter with neither a Melee nor a Light weapon fights with a Hand Weapon (E, S, AP -, L 1, Melee).",
+          desc = "A fighter with no Melee weapon fights with a Hand Weapon (E, S, AP -, L 1, Heavy, Melee), Light weapons or not.",
+          rules = { cfg = { handWeapon = { light = false, profiles = {
+              { SR = "E", LR = "-", S = "S", AP = "-", L = "1", traits = "Heavy, Melee" } } } } } },
     },
     on = {},                -- id -> true, for the sets that are on (saved)
     pick = {},              -- id -> true: the page's choice, until applied
-    page = false,           -- the Homebrew Rules page shows (not saved)
+    page = false,           -- the Settings page shows (not saved)
     -- the page (see homebrewXml), in panel units: the whole of the main
     -- page's outline, as one shape (HOMEBREW.outline: both side panels, the
     -- column's top rising between them, the buttons' row under them, nothing
-    -- between) -- the sets from HEAD under the side panels' top to FOOT over
-    -- the page's bottom, sharing that out (each set's step, see
-    -- HOMEBREW.step); the cut corners accented ACCENT along the edges; the
-    -- title in the column's top (TITLE down from it, TITLE_FONT or smaller to
-    -- fit) and Back (BACK: from the page's right edge and the side panels'
-    -- top); each set's radio buttons (RADIO_W x RADIO_H, RADIO_GAP apart)
-    -- over its description (DESC down from the buttons' top, DESC_W x
-    -- DESC_H, up to DESC_FONT) and a thin rule (SEP_UP over the next set's
-    -- buttons, SEP_W wide) before the next; Apply (APPLY_W x APPLY_H, its
-    -- bottom APPLY_UP over the page's).
-    HEAD = 84, FOOT = 88, ACCENT = 46,
+    -- between) -- split down the middle into its two columns by a thin rule
+    -- (from DIV_UP under the side panels' top to FOOT over the page's
+    -- bottom), each column's header (SUB down from the side panels' top,
+    -- SUB_FONT) over its sets, which run from HEAD under the side panels'
+    -- top to FOOT over the page's bottom, sharing that out (each set's step,
+    -- the same in both columns, see HOMEBREW.step); the cut corners accented
+    -- ACCENT along the edges; the title in the column's top (TITLE down from
+    -- it, TITLE_FONT or smaller to fit) and Back (BACK: from the page's
+    -- right edge and the side panels' top); each set's radio buttons
+    -- (RADIO_W x RADIO_H, RADIO_GAP apart) over its description (DESC down
+    -- from the buttons' top, DESC_W x DESC_H, up to DESC_FONT) and a thin
+    -- rule (SEP_UP over the next set's buttons, SEP_W wide) before the next
+    -- in its column; Apply (APPLY_W x APPLY_H, its bottom APPLY_UP over the
+    -- page's).
+    HEAD = 84, FOOT = 80, ACCENT = 46, SUB = 40, SUB_FONT = 22, DIV_UP = 24,
     TITLE = 50, TITLE_FONT = 30, BACK = { -150, 24, -46, 64 }, BACK_FONT = 18,
-    RADIO_W = 440, RADIO_H = 42, RADIO_GAP = 20, RADIO_FONT = 19,
-    DESC = 62, DESC_W = 1040, DESC_H = 36, DESC_FONT = 17, SEP_UP = 8, SEP_W = 1000,
+    RADIO_W = 316, RADIO_H = 38, RADIO_GAP = 14, RADIO_FONT = 19,
+    DESC = 62, DESC_W = 640, DESC_H = 40, DESC_FONT = 17, SEP_UP = 8, SEP_W = 620,
     APPLY_W = 520, APPLY_H = 48, APPLY_UP = 24, APPLY_FONT = 22,
 }
 
@@ -1443,7 +1745,7 @@ local HOMEBREW = {
 -- Feedback button FEEDBACK_W wide, its envelope MARK at MARK_FONT, made at
 -- MARK_DETAIL whatever TEXT_DETAIL is -- the bare sign, without the
 -- text-style selector the shared FEEDBACK.MARK carries, and with TTS's own
--- text overflow: so it sits in the button's middle). The Homebrew Rules
+-- text overflow: so it sits in the button's middle). The Settings
 -- page takes the place of all of it (see HOMEBREW).
 local PANEL_W, PANEL_H = 1480, 714
 local LAYOUT = {
@@ -1482,8 +1784,12 @@ local LAYOUT = {
     -- inner ring, RING from its middle; DROP above the gear's middle; HIT:
     -- the square a right click on it takes); End Round (END: across from
     -- the middle, and down); the reminder of reinforcements (NOTE: its
-    -- middle, NOTE_W x NOTE_H, up to NOTE_FONT)
+    -- middle, NOTE_W x NOTE_H, up to NOTE_FONT); over "ROUND", in the
+    -- column's top, Supported Mechanics (INFO_H tall, its top corners cut
+    -- INFO_CUT, INFO_GAP inside the column's top edge and its cut corners,
+    -- INFO_FONT)
     ROUND = {
+        INFO_H = 30, INFO_CUT = 14, INFO_GAP = 8, INFO_FONT = 17,
         CAPTION = 94, CAPTION_FONT = 46, RULE_IN = 32, RULE_GAP = 92,
         GEAR = 342, GEAR_SIZE = 320, GLOW_SIZE = 260, RING = 116, FONT = 222, DROP = 6, HIT = 240,
         END = { -100, 542, 100, 590 }, END_CUT = 12, END_FONT = 24,      -- its middle level with the Bottle Checks' "Ld"
@@ -2277,16 +2583,25 @@ end
 -- steps the round back), End Round under it (turnBtn: a left click starts
 -- the next round, every fighter readied; a right click steps it back -- below
 -- round 1 to the setup) and under that the reminder of reinforcements
--- (roundNote, see SETUP.note). Before round 1 the game's setup (SETUP.xml).
+-- (roundNote, see SETUP.note); over "ROUND" Supported Mechanics (infoBtn:
+-- the instructions page on the feedback form's tablet, see onInfo -- dim,
+-- plain while the tablet shows the page). Before round 1 the game's setup
+-- (SETUP.xml).
 local function columnXml()
     local R, col = LAYOUT.ROUND, LAYOUT.MID
     local cx, gy = (col[1] + col[3]) / 2, R.GEAR
     local number, size = roundView()
     local note, noteSize, noteOn = SETUP.note()
+    -- the button's cut edges run along the column's, INFO_GAP inside them
+    local iy = col[2] + R.INFO_GAP
+    local ix = LAYOUT.MID_CUT[1] + R.INFO_GAP * (math.sqrt(2) - 1) - R.INFO_CUT
     local out = {
         SHAPE.panel(col, LAYOUT.MID_CUT, { 1, 2 }, LAYOUT.MID_ACCENT),
         string.format('<Panel id="turnView" active="%s" width="%d" height="%d" color="#00000000">',
             tostring(turn >= 1), PANEL_W, PANEL_H),
+        SHAPE.button({ box = { col[1] + ix, iy, col[3] - ix, iy + R.INFO_H }, cut = { R.INFO_CUT, R.INFO_CUT, 0, 0 },
+            look = FEEDBACK.showing() == "info" and "plain" or "dim", label = "Supported Mechanics", size = R.INFO_FONT,
+            fn = "onInfo", btn = "infoBtn", id = "info", txt = "infoTxt" }),
         SHAPE.text(cx, R.CAPTION, 2 * R.RULE_GAP, R.CAPTION_FONT * 1.3, "ROUND", R.CAPTION_FONT, LOOK.HEAD, "turnCaption"),
         (SHAPE.lines({ { col[1] + R.RULE_IN, R.CAPTION }, { cx - R.RULE_GAP, R.CAPTION } }, LOOK.THIN, LOOK.GOLD)),
         (SHAPE.lines({ { cx + R.RULE_GAP, R.CAPTION }, { col[3] - R.RULE_IN, R.CAPTION } }, LOOK.THIN, LOOK.GOLD)),
@@ -2352,7 +2667,7 @@ end
 -- DICE.click); under the column Reset Fighters (red while it asks for its
 -- second click, see RESET), Feedback (the envelope alone: the feedback
 -- form on a tablet past the panel, gold while it is up -- feedbackText,
--- the word the importer's button has, stays empty) and Homebrew Rules.
+-- the word the importer's button has, stays empty) and Settings.
 local function railsXml()
     local L, out = LAYOUT, {}
     for n, side in ipairs(L.SIDES) do
@@ -2365,7 +2680,7 @@ local function railsXml()
         { label = RESET.asking and RESET.ASK or RESET.LABEL, look = RESET.asking and RESET.ASKING or "plain",
           fn = "onResetFighters", btn = "resetFighters", id = "resetFighters", txt = "resetFightersTxt" },
         { label = L.MARK, size = L.MARK_FONT, fit = false, w = L.FEEDBACK_W, detail = L.MARK_DETAIL, bare = true,
-          look = FEEDBACK.tablet() and "gold" or "plain", fn = "onFeedback", btn = "feedbackBtn", id = "feedback",
+          look = FEEDBACK.showing() == "feedback" and "gold" or "plain", fn = "onFeedback", btn = "feedbackBtn", id = "feedback",
           txt = "feedbackMark" },
         { label = HOMEBREW.button(), fn = "onHomebrewOpen", btn = "homebrewBtn", id = "homebrewBtn",
           txt = "homebrewBtnTxt" } })
@@ -2376,7 +2691,7 @@ local function railsXml()
 end
 
 -- The main page: both side panels, the column, the links between them and
--- the buttons under them (playSection: hidden while the Homebrew Rules page
+-- the buttons under them (playSection: hidden while the Settings page
 -- shows).
 local function playXml()
     return group("playSection", not HOMEBREW.page,
@@ -2399,7 +2714,7 @@ local function hbLook(set, k)
            hbText(on and set.desc or set.offDesc)
 end
 
--- The Homebrew Rules page's bounds: the main page's -- the left side
+-- The Settings page's bounds: the main page's -- the left side
 -- panel's left edge to the right one's right edge, the column's top to the
 -- buttons' bottom.
 function HOMEBREW.box()
@@ -2425,12 +2740,23 @@ function HOMEBREW.outline()
     }, sc, rc, sx0, sx1
 end
 
--- How far down the page each set comes after the one before: what is left
--- between HEAD (under the side panels' top) and FOOT, shared out among the
--- sets.
+-- The page's two columns, each the places in SETS of its sets, in order:
+-- Gameplay (the sets marked `gameplay`) and Homebrew Rules (the rest).
+function HOMEBREW.columns()
+    local cols = { {}, {} }
+    for i, set in ipairs(HOMEBREW.SETS) do
+        local col = cols[set.gameplay and 1 or 2]
+        col[#col + 1] = i
+    end
+    return cols
+end
+
+-- How far down the page each set comes after the one above it: what is
+-- left between HEAD (under the side panels' top) and FOOT, shared out among
+-- the sets of the fuller column (the other's sets line up with them).
 function HOMEBREW.step()
-    local H, box = HOMEBREW, HOMEBREW.box()
-    return (box[4] - H.FOOT - LAYOUT.SIDES[1][2] - H.HEAD) / math.max(1, #H.SETS)
+    local H, box, cols = HOMEBREW, HOMEBREW.box(), HOMEBREW.columns()
+    return (box[4] - H.FOOT - LAYOUT.SIDES[1][2] - H.HEAD) / math.max(1, #cols[1], #cols[2])
 end
 
 -- The page's shape: filled -- the body (under the side panels' top) and
@@ -2464,11 +2790,12 @@ function HOMEBREW.desc(i)
     return SHAPE.fit(desc, H.DESC_W, H.DESC_H, H.DESC_FONT)
 end
 
--- The Homebrew Rules page in place of the main page (hidden until its
--- button opens it): a panel with the title and Back (homebrewBack), and for
--- each set its two radio buttons (hbOpt_<i>_1: as written, hbOpt_<i>_2: the
--- set's) over its description (hbDesc_<i>), thin rules between the sets,
--- and at the bottom Apply Selected Rules (homebrewApply).
+-- The Settings page in place of the main page (hidden until its button
+-- opens it): a panel with the title and Back (homebrewBack), split into
+-- two columns (see HOMEBREW.columns) under their headers, and for each set
+-- its two radio buttons (hbOpt_<i>_1: as written, hbOpt_<i>_2: the set's)
+-- over its description (hbDesc_<i>), thin rules between the sets of a
+-- column, and at the bottom Apply Settings (homebrewApply).
 local function homebrewXml()
     local H, box = HOMEBREW, HOMEBREW.box()
     local x0, y0, x1, y1 = box[1], box[2], box[3], box[4]
@@ -2477,37 +2804,44 @@ local function homebrewXml()
     -- capitals' tops are, less its outline
     local _, _, _, sx0, sx1 = HOMEBREW.outline()
     local room = sx1 - sx0 - 2 * (top - y0 - H.TITLE + H.TITLE_FONT * 0.4) - 4 * LOOK.LINE
-    local title = "HOMEBREW RULES"
+    local title = "SETTINGS"
     local _, size = SHAPE.fitLine(title, room, H.TITLE_FONT)
     local out = {
         HOMEBREW.shapeXml(),
         SHAPE.text(cx, y0 + H.TITLE, room, H.TITLE_FONT * 1.4, title, size, LOOK.HEAD),
         SHAPE.button({ box = { x1 + H.BACK[1], top + H.BACK[2], x1 + H.BACK[3], top + H.BACK[4] }, label = "BACK",
             size = H.BACK_FONT, fn = "onHomebrewBack", btn = "homebrewBack" }),
+        SHAPE.lines({ { cx, top + H.DIV_UP }, { cx, y1 - H.FOOT } }, LOOK.THIN, LOOK.SEP),
     }
-    for i, set in ipairs(H.SETS) do
-        local y = top + H.HEAD + (i - 1) * step
-        for k = 1, 2 do
-            local look, label = hbLook(set, k)
-            local bx = k == 1 and cx - H.RADIO_GAP / 2 - H.RADIO_W or cx + H.RADIO_GAP / 2
-            local id = string.format("hbOpt_%d_%d", i, k)
-            out[#out + 1] = SHAPE.button({ box = { bx, y, bx + H.RADIO_W, y + H.RADIO_H }, look = look, label = label,
-                size = H.RADIO_FONT, fn = "onHomebrewOption", btn = id, id = id, txt = id .. "Txt" })
-        end
-        local desc, size = HOMEBREW.desc(i)
-        out[#out + 1] = SHAPE.text(cx, y + H.DESC, H.DESC_W, H.DESC_H, desc, size, LOOK.DIM, "hbDesc_" .. i)
-        if i < #H.SETS then
-            out[#out + 1] = (SHAPE.lines({ { cx - H.SEP_W / 2, y + step - H.SEP_UP }, { cx + H.SEP_W / 2, y + step - H.SEP_UP } },
-                LOOK.THIN, LOOK.SEP))
+    for c, col in ipairs(HOMEBREW.columns()) do
+        -- the column's middle: the middle of its half of the page
+        local mx = x0 + (c - 0.5) * (x1 - x0) / 2
+        out[#out + 1] = SHAPE.text(mx, top + H.SUB, H.DESC_W, H.SUB_FONT * 1.4, c == 1 and "GAMEPLAY" or "HOMEBREW RULES",
+            H.SUB_FONT, LOOK.HEAD)
+        for n, i in ipairs(col) do
+            local set, y = H.SETS[i], top + H.HEAD + (n - 1) * step
+            for k = 1, 2 do
+                local look, label = hbLook(set, k)
+                local bx = k == 1 and mx - H.RADIO_GAP / 2 - H.RADIO_W or mx + H.RADIO_GAP / 2
+                local id = string.format("hbOpt_%d_%d", i, k)
+                out[#out + 1] = SHAPE.button({ box = { bx, y, bx + H.RADIO_W, y + H.RADIO_H }, look = look, label = label,
+                    size = H.RADIO_FONT, fn = "onHomebrewOption", btn = id, id = id, txt = id .. "Txt" })
+            end
+            local desc, dsize = HOMEBREW.desc(i)
+            out[#out + 1] = SHAPE.text(mx, y + H.DESC, H.DESC_W, H.DESC_H, desc, dsize, LOOK.DIM, "hbDesc_" .. i)
+            if n < #col then
+                out[#out + 1] = (SHAPE.lines({ { mx - H.SEP_W / 2, y + step - H.SEP_UP },
+                    { mx + H.SEP_W / 2, y + step - H.SEP_UP } }, LOOK.THIN, LOOK.SEP))
+            end
         end
     end
     out[#out + 1] = SHAPE.button({ box = { cx - H.APPLY_W / 2, y1 - H.APPLY_UP - H.APPLY_H, cx + H.APPLY_W / 2,
-        y1 - H.APPLY_UP }, look = HOMEBREW.applyLook(), label = "APPLY SELECTED RULES", size = H.APPLY_FONT,
+        y1 - H.APPLY_UP }, look = HOMEBREW.applyLook(), label = "APPLY SETTINGS", size = H.APPLY_FONT,
         fn = "onHomebrewApply", btn = "homebrewApply", id = "homebrewApply", txt = "homebrewApplyTxt" })
     return group("homebrewPage", H.page, table.concat(out, "\n"))
 end
 
--- The whole panel: the main page, or in its place the Homebrew Rules page
+-- The whole panel: the main page, or in its place the Settings page
 -- -- built afresh, so what is noted of its shapes is too.
 local function panelXml()
     SHAPE.parts = {}
@@ -2735,11 +3069,11 @@ end
 -- Half a second after anything on the table is picked up, put down or
 -- removed (BOTTLE.soon), and every BOTTLE.POLL seconds besides: a model
 -- newly put on the table in front of a side panel names that side after its gang (said in chat,
--- the model flashed) -- not while the Homebrew Rules page hides the side
+-- the model flashed) -- not while the Settings page hides the side
 -- panels. Looking only when something moved spares a slow machine the
 -- panels' physics casts twice a second all game.
 function BOTTLE.tick()
-    if HOMEBREW.page then return end      -- the side panels are hidden behind the Homebrew Rules page
+    if HOMEBREW.page then return end      -- the side panels are hidden behind the Settings page
     for n = 1, 2 do
         local o = BOTTLE.modelOn(n)
         if o ~= BOTTLE.seen[n] then
@@ -3049,10 +3383,14 @@ function DICE.announce(msg, rgb)
 end
 
 -- The Injury dice's results as the chat names them (RULES.injury's short
--- names: Inj, S. Inj, OOA), and their ranks (1 the worst).
+-- names: Inj, S. Inj, OOA; the result that counts written out,
+-- DICE.LABEL: Injury, Serious Injury, Out of Action), and their ranks (1
+-- the worst).
 RULES.follow(function()
-    DICE.INJURY, DICE.RANK = {}, {}
-    for k, r in pairs(RULES.injury) do DICE.INJURY[k], DICE.RANK[k] = r.short or r.label, r.rank or 0 end
+    DICE.INJURY, DICE.LABEL, DICE.RANK = {}, {}, {}
+    for k, r in pairs(RULES.injury) do
+        DICE.INJURY[k], DICE.LABEL[k], DICE.RANK[k] = r.short or r.label, r.label or r.short, r.rank or 0
+    end
 end)
 
 -- The buttons' roll said on everyone's screen, in the roller's colour, as
@@ -3060,7 +3398,8 @@ end)
 -- a side with no gang: "[Player 1] rolls ..."): the D6 and their total,
 -- the Firepower dice (CHART) and their hits -- and whether an Ammo check
 -- is due -- and the Injury dice's results, every one and the best after
--- them ("Inj, OOA = Inj"; no count of dice, no faces).
+-- them written out ("Inj, OOA = Injury"; one die: its result written out;
+-- no count of dice, no faces).
 function DICE.say(req, list, digital)
     local d6, fp, inj, total, hits, ammo, best = {}, {}, {}, 0, 0, false, nil
     for _, d in ipairs(list) do
@@ -3086,7 +3425,7 @@ function DICE.say(req, list, digital)
             ammo and " -- Ammo check" or "")
     end
     if #inj > 0 then
-        parts[#parts + 1] = "Injury dice: " .. table.concat(inj, ", ") .. (#inj > 1 and " = " .. DICE.INJURY[best] or "")
+        parts[#parts + 1] = "Injury dice: " .. (#inj > 1 and table.concat(inj, ", ") .. " = " or "") .. DICE.LABEL[best]
     end
     local rgb = { 0.9, 0.9, 0.9 }
     if req.color and stringColorToRGB then
@@ -3564,9 +3903,9 @@ end
 -- ── Homebrew ─────────────────────────────────────────────────────
 -- The sets (HOMEBREW.SETS) that are on are rules of the table: laid over
 -- the rules as written (RULES.stack) and handed to the cards like any
--- override (RULES.refresh). They are chosen on the Homebrew Rules page --
+-- override (RULES.refresh). They are chosen on the Settings page --
 -- every choice there only marks the page (HOMEBREW.pick) until "Apply
--- selected Rules" puts them all in force at once.
+-- Settings" puts them all in force at once.
 
 -- A set's place in SETS, and the set, by its id (nil: no such set).
 function HOMEBREW.find(id)
@@ -3575,10 +3914,11 @@ function HOMEBREW.find(id)
     end
 end
 
--- The main page's button: "Homebrew Rules", and how many sets are on.
+-- The main page's button: "Settings", and how many sets (either column)
+-- are on.
 function HOMEBREW.button()
     local n = #HOMEBREW.list()
-    return n > 0 and string.format("Homebrew Rules (%d on)", n) or "Homebrew Rules"
+    return n > 0 and string.format("Settings (%d on)", n) or "Settings"
 end
 
 -- Whether the page's choices differ from the sets in force.
@@ -3589,7 +3929,7 @@ function HOMEBREW.changed()
     return false
 end
 
--- Apply Selected Rules as it looks: gold while there is something to
+-- Apply Settings as it looks: gold while there is something to
 -- apply, plain while the page's choices are those in force.
 function HOMEBREW.applyLook()
     return HOMEBREW.changed() and "gold" or "plain"
@@ -3609,7 +3949,7 @@ function HOMEBREW.draw(i)
     SHAPE.paint("homebrewApply", HOMEBREW.applyLook())
 end
 
--- The Homebrew Rules page shown in the main page's place (`on`), its
+-- The Settings page shown in the main page's place (`on`), its
 -- choices those in force -- or the main page back, whatever the page had
 -- chosen and not applied gone with it.
 function HOMEBREW.show(on)
@@ -3673,7 +4013,7 @@ function HOMEBREW.list()
     return out
 end
 
--- The main page's Homebrew Rules: the page opens. Back: it closes, nothing
+-- The main page's Settings: the page opens. Back: it closes, nothing
 -- changed.
 function onHomebrewOpen(player, value, id) HOMEBREW.show(true) end
 function onHomebrewBack(player, value, id) HOMEBREW.show(false) end
@@ -3689,13 +4029,23 @@ function onHomebrewOption(player, value, id)
     HOMEBREW.draw(i)
 end
 
--- Apply Selected Rules: see HOMEBREW.apply.
+-- Apply Settings: see HOMEBREW.apply.
 function onHomebrewApply(player, value, id) HOMEBREW.apply() end
 
 -- The Feedback button (under the column): the feedback form on a tablet
 -- past the panel -- or, when it is up, taken away (see FEEDBACK.open).
 function onFeedback(player, value, id)
     FEEDBACK.open(PANEL, PANEL_H)
+end
+
+-- Supported Mechanics (over "ROUND"): the instructions page on the same
+-- tablet as the feedback form (see FEEDBACK.open) -- chat says so while
+-- there is no page yet.
+function onInfo(player, value, id)
+    if FEEDBACK.INFO_URL == "" then
+        return printToAll(CHAT_PREFIX .. "No instructions page yet.", { 0.8, 0.8, 0.8 })
+    end
+    FEEDBACK.open(PANEL, PANEL_H, "info")
 end
 
 -- Where the feedback tablet goes for this panel (in place of the shared
@@ -3721,16 +4071,19 @@ function FEEDBACK.spot()
            { FEEDBACK.TILT, math.deg((math.atan2 or math.atan)(dx, dz)) + FEEDBACK.TURN, 0 }
 end
 
--- The Feedback button lit (`on`: the tablet is up) or not, in place -- in
--- this panel's own look, gold while lit like a choice made (the shared
--- FEEDBACK.draw's colours are for the importer's parchment, so this one
--- takes its place here; the other script's relight, feedbackLit, comes
--- here too).
+-- The Feedback button lit (the tablet shows the form) or not, in place --
+-- in this panel's own look, gold while lit like a choice made -- and
+-- Supported Mechanics plain while the tablet shows the instructions, else
+-- dim. `on`: as FEEDBACK.showing says, or true / false from an older
+-- script (the shared FEEDBACK.draw's colours are for the importer's
+-- parchment, so this one takes its place here; the other script's
+-- relight, feedbackLit, comes here too).
 function FEEDBACK.draw(on)
-    local look = on and "gold" or "plain"
+    local look = (on == true or on == "feedback") and "gold" or "plain"
     pcall(function()
         SHAPE.paint("feedback", look)
         self.UI.setAttribute("feedbackText", "color", LOOK.BUTTONS[look].ink)
+        SHAPE.paint("info", on == "info" and "plain" or "dim")
     end)
 end
 
@@ -3837,7 +4190,7 @@ end
 local SELF_UPDATE    = true                    -- false pins this copy for good
 local REPO_BASE      = "https://raw.githubusercontent.com/Antaresx101/TTS_tools/main"
 local TOOL_ID        = "mundane-controller"
-local TOOL_VERSION   = "2.2.2"                 -- bumped with manifest.json
+local TOOL_VERSION   = "3.0.0"                 -- bumped with manifest.json
 local TOOL_SIGNATURE = "TTS-SELFUPDATE:mundane-controller"
 
 -- Fixed conventions. MIN_BYTES only has to be large enough to throw out error
