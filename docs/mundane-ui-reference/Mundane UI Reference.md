@@ -1,4 +1,4 @@
-# Munda HP Display: what the fighter card supports
+# Mundane UI: what the fighter card supports
 
 This page covers the Mundane Importer UI card for Fighters in Tabletop Simulator: every action, skill, piece of wargear, weapon trait, accessory and Wyrd power, and how the card handles each one. Rosters come from **MundaManager (N26 export)**.
 
