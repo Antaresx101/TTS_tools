@@ -741,18 +741,11 @@ local TEMPLATES_SOON = "...coming soon"
 -- at most ~75 characters, so the popup fits them.
 local CHANGELOG = {
     { version = "3.0.0", note = "Huge Update", changes = {
-    "Full Template and Blast attacks support",
-    "Unstable reworked, plus Unstable homebrew options",
+    "Full Template, Blast and Unstable attacks support (+Homebrew option for unstable)",
     "Dice effect tags (Shred, Blaze, Rending...) and much better chat messages",
-    "Fight Back, Counter-Attack and Additional Attacks in close combat",
-    "99% of skills, wargear and weapon traits are now fully integrated",
-    "Wyrd powers with disruption from enemy wyrds",
-    "All gang rules are supported now",
-    "Spyrers get two activations",
-    "Extra Arm, Mounted,  Cult Icon and other gang-specific wargear like Mutations are fully supported",
-    "Settings page on the Controller for gameplay and homebrew rules",
-    "Custom backgrounds: PNGs with transparency, any image height (they work now)",
-    "New condition icons for Fearsome, Frenzy and Insanity",
+    "99% of skills, wargear and weapon traits are now fully integrated. All gang rules supported",
+    "Custom backgrounds for the UI: PNGs with transparency, any image height (they work now)",
+    "Online reference page for all supported abilities, rules, skills and traits (also on the Controller)",
     "Many smaller fixes and readability improvements"
     } },
     { version = "2.2.1", note = "Minor Update", changes = {"UI-Overhaul for the Mundane Controller"
