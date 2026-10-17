@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Munda UI Reference</title>
+<!--
+  The searchable reference for players. It shows skills_wargear_traits.md
+  (next to this file) as it is: edit that file and this page follows --
+  nothing here names a section, a skill or an item.
+  Search: every word typed must appear in a row (or in the bold group row
+  over it, which then shows the whole group). The status buttons come
+  from the legend table's first column. ?q=catfall in the address opens
+  the page with that search.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #15171b; --panel: #1d2026; --row: #22262d; --line: #343a44;
+    --text: #e9e9ea; --dim: #9aa3ae; --accent: #e8c97a; --mark: #e8c97a55;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f4ef; --panel: #ffffff; --row: #faf8f3; --line: #ddd8cc;
+    --text: #1d1f23; --dim: #5d636c; --accent: #8a6a1f; --mark: #e8c97a99;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f4ef; --panel: #ffffff; --row: #faf8f3; --line: #ddd8cc;
+      --text: #1d1f23; --dim: #5d636c; --accent: #8a6a1f; --mark: #e8c97a99;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg);
+           border-bottom: 1px solid var(--line); padding: 12px 16px 10px; }
+  .bar { max-width: 1100px; margin: 0 auto; }
+  h1.title { margin: 0 0 8px; font-size: 20px; color: var(--accent); }
+  #q { width: 100%; padding: 10px 12px; font-size: 16px; border-radius: 8px;
+       border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  #q:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+  .chips, .jump { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { border: 1px solid var(--line); background: var(--panel); color: var(--text);
+          border-radius: 999px; padding: 3px 10px; font-size: 13px; cursor: pointer; }
+  .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--mark); }
+  .jump a { color: var(--dim); font-size: 13px; text-decoration: none; }
+  .jump a:hover { color: var(--accent); }
+  #count { color: var(--dim); font-size: 13px; margin-top: 6px; min-height: 1.2em; }
+  main { max-width: 1100px; margin: 0 auto; padding: 8px 16px 60px; }
+  main h1 { display: none; }
+  main h2 { color: var(--accent); margin: 28px 0 8px; scroll-margin-top: 190px; }
+  main h3 { margin: 20px 0 6px; scroll-margin-top: 190px; }
+  main hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; margin: 8px 0 14px; }
+  table { border-collapse: collapse; width: 100%; background: var(--panel); }
+  th, td { text-align: left; vertical-align: top; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 600; font-size: 13px; background: var(--row); }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  tr.group td { background: var(--row); color: var(--accent); padding-top: 10px; }
+  tr:last-child td { border-bottom: 0; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+  code { background: var(--row); padding: 0 4px; border-radius: 4px; }
+  .hide { display: none !important; }
+  .note { color: var(--dim); }
+  @media (max-width: 640px) {
+    td:first-child { white-space: normal; } th, td { padding: 6px 8px; }
+    header { padding: 8px 16px; } h1.title { font-size: 16px; margin-bottom: 6px; }
+    .jump { display: none; } .chip { font-size: 12px; padding: 2px 8px; }
+    main h2, main h3 { scroll-margin-top: 150px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1 class="title" id="pageTitle">Munda UI Reference</h1>
+    <input id="q" type="search" placeholder="Search abilities, skills, wargear, traits, powers..." autocomplete="off">
+    <div class="chips" id="chips"></div>
+    <div class="jump" id="jump"></div>
+    <div id="count"></div>
+  </div>
+</header>
+<main id="doc"><p class="note">Loading...</p></main>
+<script>
+(function () {
+  var SOURCE = "Mundane UI Reference.md";
+  var doc = document.getElementById("doc"), q = document.getElementById("q");
+  var countEl = document.getElementById("count"), chipsEl = document.getElementById("chips");
+  var statusOn = null;          // the status button pressed (its label), or null
+  var sections = [];            // { head, nodes, rows, isLegend }
+
+  function norm(s) { return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, ""); }
+
+  // Splits the rendered page into sections at every h2 / h3, and notes each
+  // table row: a "group" row (bold first cell, the others empty) heads the
+  // rows under it; a row's status is its "Status" column's text.
+  function index() {
+    var cur = null;
+    Array.prototype.slice.call(doc.children).forEach(function (n) {
+      if (/^H[23]$/.test(n.tagName)) {
+        cur = { head: n, nodes: [], rows: [], isLegend: /legend/i.test(n.textContent) };
+        sections.push(cur);
+        n.id = n.id || norm(n.textContent).replace(/[^a-z0-9]+/g, "-");
+        return;
+      }
+      if (!cur) return;
+      cur.nodes.push(n);
+      if (n.tagName === "TABLE") {
+        var wrap = document.createElement("div"); wrap.className = "scroll";
+        n.parentNode.insertBefore(wrap, n); wrap.appendChild(n);
+        cur.nodes[cur.nodes.length - 1] = wrap;
+        var heads = Array.prototype.map.call(n.querySelectorAll("thead th"), function (th) { return norm(th.textContent); });
+        var st = heads.indexOf("status"), group = null;
+        Array.prototype.forEach.call(n.querySelectorAll("tbody tr"), function (tr) {
+          var cells = tr.children;
+          var rest = Array.prototype.slice.call(cells, 1).every(function (c) { return !c.textContent.trim(); });
+          if (cells[0] && cells[0].querySelector("strong") && rest) {
+            tr.className = "group"; group = { tr: tr, kids: [], text: norm(tr.textContent) }; cur.rows.push({ tr: tr, group: true, info: group });
+            return;
+          }
+          tr._html = Array.prototype.map.call(cells, function (c) { return c.innerHTML; });
+          var r = { tr: tr, text: norm(tr.textContent), status: st >= 0 && cells[st] ? cells[st].textContent : "", parent: group };
+          if (group) group.kids.push(r);
+          cur.rows.push(r);
+        });
+      }
+    });
+  }
+
+  // The status buttons: the legend table's first column ("✅ Card", ...).
+  function chips() {
+    var legend = sections.filter(function (s) { return s.isLegend; })[0];
+    (legend ? legend.rows : []).forEach(function (r) {
+      if (r.group) return;
+      var label = r.tr.children[0].textContent.trim();
+      var b = document.createElement("button");
+      b.className = "chip"; b.textContent = label; b.setAttribute("aria-pressed", "false");
+      b.onclick = function () {
+        statusOn = statusOn === label ? null : label;
+        Array.prototype.forEach.call(chipsEl.children, function (c) { c.setAttribute("aria-pressed", String(c.textContent === statusOn)); });
+        apply();
+      };
+      chipsEl.appendChild(b);
+    });
+  }
+
+  function jumps() {
+    var el = document.getElementById("jump");
+    sections.forEach(function (s) {
+      if (s.head.tagName !== "H2" || s.isLegend) return;
+      var a = document.createElement("a"); a.href = "#" + s.head.id; a.textContent = s.head.textContent;
+      el.appendChild(a);
+    });
+  }
+
+  // Marks every place a word of the search shows in a cell's text.
+  function highlight(td, html, words) {
+    td.innerHTML = html;
+    if (!words.length) return;
+    var walker = document.createTreeWalker(td, NodeFilter.SHOW_TEXT), texts = [], t;
+    while ((t = walker.nextNode())) texts.push(t);
+    var re = new RegExp("(" + words.map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|") + ")", "gi");
+    texts.forEach(function (node) {
+      if (!re.test(node.nodeValue)) return;
+      re.lastIndex = 0;
+      var span = document.createElement("span");
+      span.innerHTML = node.nodeValue.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(re, "<mark>$1</mark>");
+      node.parentNode.replaceChild(span, node);
+    });
+  }
+
+  // Shows the rows with every word of the search (and the status pressed),
+  // the group rows over them and the sections that have any; with no search
+  // and no status, the whole page.
+  function apply() {
+    var words = norm(q.value).split(/\s+/).filter(Boolean), raw = q.value.trim().split(/\s+/).filter(Boolean);
+    var filtering = words.length > 0 || statusOn !== null, hits = 0;
+    sections.forEach(function (s) {
+      var shown = 0;
+      s.rows.forEach(function (r) {
+        if (r.group) return;
+        var ok = (words.every(function (w) { return r.text.indexOf(w) >= 0; })
+                  || (r.parent && words.length > 0 && words.every(function (w) { return r.parent.text.indexOf(w) >= 0; })))
+              && (statusOn === null || r.status.indexOf(statusOn.replace(/^\S+\s+/, "")) >= 0);
+        if (s.isLegend) ok = !filtering;
+        r.tr.classList.toggle("hide", !ok);
+        if (r.tr._html) Array.prototype.forEach.call(r.tr.children, function (td, i) { highlight(td, r.tr._html[i], ok ? raw : []); });
+        if (ok) { shown++; if (!s.isLegend) hits++; }
+      });
+      s.rows.forEach(function (r) {
+        if (r.group) r.tr.classList.toggle("hide", !r.info.kids.some(function (k) { return !k.tr.classList.contains("hide"); }));
+      });
+      var visible = !filtering || shown > 0;
+      s.head.classList.toggle("hide", !visible);
+      s.nodes.forEach(function (n) {
+        var isTable = n.className === "scroll";
+        n.classList.toggle("hide", !visible || (filtering && (!isTable || shown === 0)));
+      });
+    });
+    // an h2 stays while any h3 under it is shown
+    sections.forEach(function (s, i) {
+      if (s.head.tagName !== "H2" || !filtering) return;
+      for (var j = i + 1; j < sections.length && sections[j].head.tagName === "H3"; j++) {
+        if (!sections[j].head.classList.contains("hide")) s.head.classList.remove("hide");
+      }
+    });
+    Array.prototype.forEach.call(doc.querySelectorAll(":scope > hr, :scope > p, :scope > ul"), function (n) {
+      if (!sections.some(function (s) { return s.nodes.indexOf(n) >= 0; })) n.classList.toggle("hide", filtering);
+    });
+    countEl.textContent = filtering ? (hits === 1 ? "1 match" : hits + " matches") : "";
+    try {
+      var u = new URL(location.href);
+      if (q.value.trim()) u.searchParams.set("q", q.value.trim()); else u.searchParams.delete("q");
+      history.replaceState(null, "", u);
+    } catch (e) {}
+  }
+
+  fetch(SOURCE, { cache: "no-cache" })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+    .then(function (md) {
+      doc.innerHTML = marked.parse(md);
+      var h1 = doc.querySelector("h1");
+      if (h1) { document.getElementById("pageTitle").textContent = h1.textContent; document.title = h1.textContent; }
+      index(); chips(); jumps();
+      var start = new URLSearchParams(location.search).get("q");
+      if (start) q.value = start;
+      q.addEventListener("input", apply);
+      apply();
+    })
+    .catch(function () {
+      doc.innerHTML = '<p class="note">Couldn\'t load ' + SOURCE + '. Open this page from the website it is published on, ' +
+        'or from a local web server -- browsers don\'t let a page opened as a file read the file next to it.</p>';
+    });
+})();
+</script>
+</body>
+</html>
